@@ -5,7 +5,11 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { KafkaDiskIndex } from '../../src/kafka-disk-index.js';
 import { encodeKafkaBlob, type KafkaBlobValue } from '../../src/kafka-blob.js';
 import { boundedAgentEventId, eventIdentityKey } from '../../src/event-identity.js';
-import { initialKafkaCheckpoint, projectKafkaEvents } from '../../src/kafka-state.js';
+import {
+  initialKafkaCheckpoint,
+  kafkaTranscriptHash,
+  projectKafkaEvents,
+} from '../../src/kafka-state.js';
 import {
   collectKafkaMembership,
   initialKafkaState,
@@ -64,6 +68,49 @@ afterEach(async () => {
 });
 
 describe('Kafka service-private v2 state', () => {
+  it('excludes only completion markers from membership collection', () => {
+    const marker = event(1, 'session.user_event_completed', { user_event_id: 'evt_user_turn' });
+    const acceptance = event(2, 'session.user_event_processed', { user_event_id: 'evt_user_turn' });
+    const reducer = initialKafkaCheckpoint(route, context).reducer;
+    expect(collectKafkaMembership(reducer, [{ offset: '1', event: marker }])).toEqual({
+      identities: [],
+      accepted: [],
+    });
+    expect(collectKafkaMembership(reducer, [{ offset: '2', event: acceptance }])).toEqual({
+      identities: [eventIdentityKey(acceptance.id)],
+      accepted: [boundedAgentEventId(acceptance.id), 'evt_user_turn'],
+    });
+  });
+
+  it('preserves legacy completion identities across migration, commit and replay', async () => {
+    const marker = event(1, 'session.user_event_completed', { user_event_id: 'evt_user_turn' });
+    const legacy = {
+      ...initialKafkaCheckpoint(route, context),
+      nextOffset: '2',
+      identities: [
+        { key: eventIdentityKey(marker.id), hash: kafkaTranscriptHash(marker), offset: '1' },
+      ],
+    };
+    const index = await open();
+    const state = await apply(index, migrateKafkaCheckpoint(JSON.stringify(legacy), route, key));
+    const identityKey = kafkaStateKeys(key).identity(eventIdentityKey(marker.id));
+    const before = await index.read([identityKey]);
+    const replay = { ...marker, seq: 2, producedAt: '2026-01-02T00:00:00.000Z' };
+    const batch = [{ offset: '2', event: replay }];
+    const projected = await projectKafkaState(state, batch, key, index);
+    expect(projected.deliveries).toEqual([]);
+    expect(projected.head.nextOffset).toBe('3');
+    expect(projected.head.identityCount).toBe(1);
+    expect(state.head.nextOffset).toBe('2');
+    const restored = await apply(index, projected);
+    await validateKafkaState(restored, key, index);
+    expect(await index.read([identityKey])).toEqual(before);
+    const repeated = await projectKafkaState(restored, batch, key, index);
+    expect(repeated.deliveries).toEqual([]);
+    expect(repeated.head.nextOffset).toBe('3');
+    expect(repeated.head.identityCount).toBe(1);
+  });
+
   it('replays raw state across every split without changing persisted delivery content', async () => {
     const raw = { ...context, captureMode: 'raw_io' };
     const oracle = projectKafkaEvents(initialKafkaCheckpoint(route, raw), messages, 'raw_io');

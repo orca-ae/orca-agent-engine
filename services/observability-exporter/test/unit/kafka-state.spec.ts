@@ -13,6 +13,7 @@ import {
   validateKafkaTranscriptOffsets,
 } from '../../src/kafka-state.js';
 import { hashTranscriptEnvelope } from '../../src/persistence.js';
+import { eventIdentityKey } from '../../src/event-identity.js';
 import type { PinnedDeliveryContext } from '../../src/types.js';
 import {
   completedPrimaryTurnEvents,
@@ -48,6 +49,50 @@ function decoded(event: Event) {
 }
 
 describe('Kafka-only durable reducer', () => {
+  it('advances past repeated completion markers without changing trace output or identities', () => {
+    const messages = completedPrimaryTurnEvents().map(decoded);
+    const initial = initialKafkaCheckpoint(route, context);
+    const expected = projectKafkaEvents(initial, messages);
+    const seq = Number(expected.checkpoint.nextOffset);
+    const marker = event(seq, 'session.user_event_completed', { user_event_id: 'evt_user_turn' });
+    const replay = { ...marker, seq: seq + 1, producedAt: '2026-01-02T00:00:00.000Z' };
+    const result = projectKafkaEvents(initial, [...messages, decoded(marker), decoded(replay)]);
+    expect(result.deliveries).toEqual(expected.deliveries);
+    expect(result.checkpoint).toEqual({ ...expected.checkpoint, nextOffset: String(seq + 2) });
+  });
+
+  it('replays a completion marker against an unchanged legacy identity', () => {
+    const marker = event(1, 'session.user_event_completed', { user_event_id: 'evt_user_turn' });
+    const legacy = {
+      ...initialKafkaCheckpoint(route, context),
+      nextOffset: '2',
+      identities: [
+        { key: eventIdentityKey(marker.id), hash: kafkaTranscriptHash(marker), offset: '1' },
+      ],
+    };
+    const restored = parseKafkaCheckpoint(JSON.parse(JSON.stringify(legacy)), route);
+    const replay = { ...marker, seq: 2, producedAt: '2026-01-02T00:00:00.000Z' };
+    const expected = projectKafkaEvents(restored, []).checkpoint;
+    const result = projectKafkaEvents(restored, [decoded(replay)]);
+    expect(result.deliveries).toEqual([]);
+    expect(result.checkpoint).toEqual({ ...expected, nextOffset: '3' });
+    expect(restored).toEqual(legacy);
+  });
+
+  it('still rejects timestamp-only identity conflicts for ordinary events', () => {
+    const source = completedPrimaryTurnEvents()[0]!;
+    const first = projectKafkaEvents(initialKafkaCheckpoint(route, context), [decoded(source)]);
+    expect(() =>
+      projectKafkaEvents(first.checkpoint, [
+        decoded({
+          ...source,
+          seq: 100,
+          producedAt: '2026-01-02T00:00:00.000Z',
+        }),
+      ]),
+    ).toThrow('identity conflict');
+  });
+
   it('restores an open turn and publishes once without retaining payload', () => {
     const messages = completedPrimaryTurnEvents().map(decoded);
     const initial = initialKafkaCheckpoint(route, context);

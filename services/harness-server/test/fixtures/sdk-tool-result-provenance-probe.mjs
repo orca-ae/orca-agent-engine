@@ -8,6 +8,7 @@ import { mkdtemp, mkdir, readFile, readdir, realpath, rm } from 'node:fs/promise
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { walkSdkConfig } from './walk-sdk-config.mjs';
 
 await main();
 
@@ -264,7 +265,12 @@ async function main() {
                       current.notice = input.tool_response;
                       // Discover ONLY fixture-owned files, never open a path supplied by
                       // a tool notice. This is evidence collection, not a bridge reader.
-                      const files = await walk(current.config);
+                      const files = await walkSdkConfig(current.config).catch((error) => {
+                        // The SDK catches hook exceptions. Preserve discovery failures
+                        // for the parent oracle instead of a later undefined-path error.
+                        current.discoveryError = error;
+                        throw error;
+                      });
                       const spills = files.filter((file) =>
                         file.includes(sep + 'tool-results' + sep),
                       );
@@ -293,6 +299,7 @@ async function main() {
       }
       assert.equal(current.serverError, undefined);
       assert.equal(current.unexpectedRequest, undefined);
+      if (current.discoveryError) throw current.discoveryError;
       assert.equal(current.hooks.length, 3);
       const [a, b, c] = current.hooks;
       assert.equal(a.input.session_id, sessionId);
@@ -453,15 +460,6 @@ async function main() {
 function within(root, path) {
   const rel = relative(root, path);
   return rel !== '' && !rel.startsWith('..') && !rel.startsWith(sep);
-}
-async function walk(root) {
-  const files = [];
-  for (const entry of await readdir(root, { withFileTypes: true })) {
-    const path = join(root, entry.name);
-    if (entry.isDirectory()) files.push(...(await walk(path)));
-    else if (entry.isFile()) files.push(path);
-  }
-  return files;
 }
 function send(response, block) {
   const tool = block.type === 'tool_use';

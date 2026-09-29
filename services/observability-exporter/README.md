@@ -15,6 +15,11 @@ and credentials; its own database is independent of exporter persistence.
 - Each single-partition Session topic is consumed directly in broker order. The same consumed
   records feed the acceptance-aware reducer: there is no inbox or second Transcript replay read.
   Session topics are discovered at startup and periodically through Kafka Admin metadata.
+- Internal `session.user_event_completed` markers are skipped before projection identity checks
+  and membership collection, as they do not contribute to traces. Their source offsets advance
+  with the normal checkpoint transaction. Existing completion-marker identities remain unchanged;
+  replaying these markers with different timestamps does not require a checkpoint migration or
+  offset reset. Other event kinds retain envelope identity conflict checks.
 - A Kafka transaction writes the per-Session v2 head and auxiliary state, sampled canonical delivery records,
   and source consumer-group offset together. Consumers use `read_committed`. Checkpoints contain
   the reducer, next source offset, event identity digests, accepted-source identities, and pinned
