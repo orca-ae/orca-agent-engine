@@ -1,0 +1,48 @@
+{{- if .Values.tests.enabled -}}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ printf "%s-test-connection" (include "orca-managed-agents.fullname" .) | trunc 63 | trimSuffix "-" }}
+  labels:
+    {{- include "orca-managed-agents.labels" . | nindent 4 }}
+    app.kubernetes.io/component: test-connection
+  annotations:
+    "helm.sh/hook": test
+    # Keep the completed Pod available for `helm test --logs`; the next run removes it.
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  {{- with .Values.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  restartPolicy: Never
+  activeDeadlineSeconds: 180
+  automountServiceAccountToken: false
+  securityContext:
+    {{- toYaml .Values.tests.podSecurityContext | nindent 4 }}
+  containers:
+    - name: connection
+      image: "{{ .Values.tests.image.repository }}:{{ .Values.tests.image.tag }}"
+      imagePullPolicy: {{ .Values.tests.image.pullPolicy }}
+      securityContext:
+        {{- toYaml .Values.tests.securityContext | nindent 8 }}
+      command:
+        - sh
+        - -ec
+        - |
+          wait_for_readyz() {
+            endpoint="$1"
+            attempt=0
+            until wget -T 5 -q -O - "$endpoint"; do
+              attempt=$((attempt + 1))
+              [ "$attempt" -lt 20 ] || exit 1
+              sleep 1
+            done
+          }
+          wait_for_readyz http://{{ include "orca-managed-agents.registryServiceName" . }}:{{ .Values.registry.service.port }}/readyz &
+          registry_pid=$!
+          wait_for_readyz http://{{ include "orca-managed-agents.harnessServiceName" . }}:{{ .Values.harness.service.port }}/readyz &
+          harness_pid=$!
+          wait "$registry_pid"
+          wait "$harness_pid"
+{{- end }}

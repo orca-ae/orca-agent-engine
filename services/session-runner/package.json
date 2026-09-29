@@ -1,0 +1,40 @@
+{
+  "name": "@orca/session-runner",
+  "version": "0.0.0",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsup src/main.ts src/harness/codex-sdk/worker-entry.ts src/harness/pi-sdk/worker-entry.ts src/harness/claude-code/bridge-entry.ts src/harness/codex/bridge-entry.ts src/harness/cursor/bridge-entry.ts src/harness/pi/bridge-entry.ts src/harness/custom/bridge-entry.ts --format esm --dts --target node22 --no-splitting && node -e \"require('node:fs').mkdirSync('dist/harness/pi',{recursive:true});require('node:fs').copyFileSync('src/harness/pi/orca-extension.mjs','dist/harness/pi/orca-extension.mjs')\"",
+    "start": "node dist/main.js",
+    "dev": "tsx src/main.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "lint": "eslint 'src/**/*.ts' 'src/**/*.mjs' 'test/**/*.ts' 'test/**/*.mjs'"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.283",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@orca/codex-harness": "workspace:*",
+    "@orca/guardrails": "workspace:*",
+    "@orca/harness-tunnel": "workspace:*",
+    "@orca/sandbox-runtime": "workspace:*",
+    "@orca/transcript-store-types": "workspace:*",
+    "uuid": "^11.0.0",
+    "ws": "^8.18.0",
+    "zod": "^4.0.0",
+    "@orca/sdk-harness": "workspace:*",
+    "@orca/pi-harness": "workspace:*"
+  },
+  "devDependencies": {
+    "@orca/harness-catalog": "workspace:*",
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.5.0",
+    "@vitest/coverage-v8": "^2.0.0",
+    "tsup": "^8.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
+  }
+}

@@ -1,0 +1,440 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1777669666598,
+      "tag": "0000_init",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1777928848104,
+      "tag": "0001_session_resources_mount_strategy",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1780464535088,
+      "tag": "0002_outgoing_vanisher",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1780464816887,
+      "tag": "0003_misty_cannonball",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1780570901514,
+      "tag": "0004_vault_credentials",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1780915530097,
+      "tag": "0005_session_events_index",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1780737569551,
+      "tag": "0006_slim_christian_walker",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1781247997106,
+      "tag": "0007_vault_metadata",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1781247997107,
+      "tag": "0008_git_credentials",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1782200000000,
+      "tag": "0010_agent_name_display_not_unique",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1782221696641,
+      "tag": "0011_powerful_phil_sheldon",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1782300000000,
+      "tag": "0012_multiagent_threads",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1782728907744,
+      "tag": "0013_great_pestilence",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1782731340696,
+      "tag": "0014_mixed_sage",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1782734488848,
+      "tag": "0015_legal_ironclad",
+      "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "7",
+      "when": 1782736404691,
+      "tag": "0016_married_thor",
+      "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1782736404692,
+      "tag": "0017_skill_version_content",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1782736404693,
+      "tag": "0018_managed_resource_metadata",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1783926331653,
+      "tag": "0019_session_event_processed_at",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1783946749970,
+      "tag": "0020_session_event_projection_order",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1784009867505,
+      "tag": "0021_git_repository_credentials",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1784081914920,
+      "tag": "0022_git_credential_staging_intents",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1784089780599,
+      "tag": "0023_processed_marker_seq",
+      "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1784278647102,
+      "tag": "0024_kind_carnage",
+      "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1784343023413,
+      "tag": "0025_workspaces",
+      "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1784594930395,
+      "tag": "0026_session_lifecycle_outbox",
+      "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "7",
+      "when": 1784608285721,
+      "tag": "0027_bent_colossus",
+      "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "7",
+      "when": 1784678826275,
+      "tag": "0028_admin_plane",
+      "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1784773936000,
+      "tag": "0029_claude_agent_environment_fields",
+      "breakpoints": true
+    },
+    {
+      "idx": 30,
+      "version": "7",
+      "when": 1784777600000,
+      "tag": "0030_session_agent_overrides",
+      "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1784779200000,
+      "tag": "0031_vault_credential_auth_config",
+      "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1784779968157,
+      "tag": "0032_session_deleted_lifecycle",
+      "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1784864713972,
+      "tag": "0033_stable_session_thread_ids",
+      "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1785135224115,
+      "tag": "0034_long_masque",
+      "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "7",
+      "when": 1785300514503,
+      "tag": "0035_dazzling_iron_monger",
+      "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1785323010893,
+      "tag": "0036_adorable_dreaming_celestial",
+      "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1785326075351,
+      "tag": "0037_premium_the_twelve",
+      "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1785335550914,
+      "tag": "0038_ambitious_stone_men",
+      "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "7",
+      "when": 1785336058653,
+      "tag": "0039_shallow_mysterio",
+      "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1785336880271,
+      "tag": "0040_hot_starbolt",
+      "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "7",
+      "when": 1785469054923,
+      "tag": "0041_migrate_memory_mount_paths",
+      "breakpoints": true
+    },
+    {
+      "idx": 42,
+      "version": "7",
+      "when": 1785487621293,
+      "tag": "0042_fluffy_terrax",
+      "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "7",
+      "when": 1785722573598,
+      "tag": "0043_careful_thunderbolt_ross",
+      "breakpoints": true
+    },
+    {
+      "idx": 44,
+      "version": "7",
+      "when": 1786003368576,
+      "tag": "0044_provider_credentials",
+      "breakpoints": true
+    },
+    {
+      "idx": 45,
+      "version": "7",
+      "when": 1786975104060,
+      "tag": "0045_organization_audience",
+      "breakpoints": true
+    },
+    {
+      "idx": 46,
+      "version": "7",
+      "when": 1787117428205,
+      "tag": "0046_clumsy_midnight",
+      "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1787117464339,
+      "tag": "0047_familiar_lenny_balinger",
+      "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "7",
+      "when": 1787824857110,
+      "tag": "0048_clear_mother_askani",
+      "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "7",
+      "when": 1787893241171,
+      "tag": "0049_session_observability_pin_repair",
+      "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1788035474866,
+      "tag": "0050_guardrails_and_model_prices",
+      "breakpoints": true
+    },
+    {
+      "idx": 51,
+      "version": "7",
+      "when": 1788035807144,
+      "tag": "0051_guardrail_subject_and_usage_events",
+      "breakpoints": true
+    },
+    {
+      "idx": 52,
+      "version": "7",
+      "when": 1788051973480,
+      "tag": "0052_session_events_unprocessed_client_user_index",
+      "breakpoints": true
+    },
+    {
+      "idx": 53,
+      "version": "7",
+      "when": 1788132267223,
+      "tag": "0053_open_maginty",
+      "breakpoints": true
+    },
+    {
+      "idx": 54,
+      "version": "7",
+      "when": 1788143501034,
+      "tag": "0054_session_observability_lifecycle_enforcement",
+      "breakpoints": true
+    },
+    {
+      "idx": 55,
+      "version": "7",
+      "when": 1788150142234,
+      "tag": "0055_agent_observability_mutation_persistence",
+      "breakpoints": true
+    },
+    {
+      "idx": 56,
+      "version": "7",
+      "when": 1788405947672,
+      "tag": "0056_workspace_archive_observability_revocation",
+      "breakpoints": true
+    },
+    {
+      "idx": 57,
+      "version": "7",
+      "when": 1789007988928,
+      "tag": "0057_name_uniqueness",
+      "breakpoints": true
+    },
+    {
+      "idx": 58,
+      "version": "7",
+      "when": 1789522658957,
+      "tag": "0058_soft_delete_objects",
+      "breakpoints": true
+    },
+    {
+      "idx": 59,
+      "version": "7",
+      "when": 1789526088907,
+      "tag": "0059_soft_delete_git_resource_credentials",
+      "breakpoints": true
+    },
+    {
+      "idx": 60,
+      "version": "7",
+      "when": 1789538575968,
+      "tag": "0060_agent_observability_raw_io",
+      "breakpoints": true
+    },
+    {
+      "idx": 61,
+      "version": "7",
+      "when": 1789617986001,
+      "tag": "0061_codex_sdk_state",
+      "breakpoints": true
+    },
+    {
+      "idx": 62,
+      "version": "7",
+      "when": 1789896403161,
+      "tag": "0062_separate_session_harness_states",
+      "breakpoints": true
+    }
+  ]
+}

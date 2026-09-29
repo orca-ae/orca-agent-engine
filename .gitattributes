@@ -1,0 +1,2 @@
+# Unified-diff syntax uses a single-space marker for blank context lines.
+services/harness-server/sandbox-templates/orca-opensandbox-server/*.patch -whitespace

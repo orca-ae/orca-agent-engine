@@ -1,0 +1,13 @@
+# Copyright The Orca Authors
+# SPDX-License-Identifier: Apache-2.0
+
+version: v2
+plugins:
+  - remote: buf.build/community/stephenh-ts-proto:v2.11.6
+    out: src/generated
+    opt:
+      - esModuleInterop=true
+      - outputServices=grpc-js
+      - useExactTypes=false
+      - useOptionals=messages
+      - importSuffix=.js

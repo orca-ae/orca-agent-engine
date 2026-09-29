@@ -1,0 +1,628 @@
+# Copyright The Orca Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# Conformance decision register.
+#
+# Every difference between this API and Anthropic's published Managed Agents API
+# carries an explicit decision and a reference to where the reasoning lives.
+# `pnpm conformance:gen` fails when a difference has no decision AND when a
+# decision matches no difference — the second half is what stops this file from
+# accumulating dead entries that read as coverage.
+#
+# Entries are match rules, not per-row entries: there are well over a hundred
+# differences and a per-row file would rot within a release. An entry matches
+# either an exact `operation` or a `path` glob, within one difference class.
+# Exact beats glob; among globs the longest pattern wins.
+#
+# Decisions: keep | not-implemented | accepted-deviation | fix-later
+# See docs/managed-agents/conformance.md.
+
+version: 1
+
+decisions:
+  # ---------------------------------------------------------------------------
+  # missing — Anthropic publishes the operation, we do not serve it.
+  # ---------------------------------------------------------------------------
+
+  # The inference API. Orca is not an inference provider: a session's model calls
+  # go to the configured provider, not through this service. These endpoints are
+  # permanently out of scope, not a backlog item.
+  - id: missing-messages-api
+    match: { class: missing, path: '/v1/messages*' }
+    covers: 8
+    decision: accepted-deviation
+    reference: docs/managed-agents/overview.md#confirmed-decisions
+    rationale: >-
+      Messages, batches and token counting are the inference API. The "API scope"
+      decision mirrors the managed-agents surface only; model traffic is served
+      by the provider, not by this control plane.
+
+  - id: missing-text-completions-api
+    match: { class: missing, path: '/v1/complete' }
+    covers: 1
+    decision: accepted-deviation
+    reference: docs/managed-agents/overview.md#confirmed-decisions
+    rationale: >-
+      Legacy Text Completions is part of the inference API and predates the
+      managed-agents surface entirely.
+
+  - id: missing-model-catalogue
+    match: { class: missing, path: '/v1/models*' }
+    covers: 2
+    decision: accepted-deviation
+    reference: docs/managed-agents/overview.md#confirmed-decisions
+    rationale: >-
+      The model catalogue describes Anthropic's hosted models. Orca does not host
+      models and would have nothing truthful to return.
+
+  # Orca deliberately uses its own Trigger resource rather than Anthropic's
+  # Deployment/DeploymentRun wire model. The two surfaces are not aliases.
+  - id: missing-deployments
+    match: { class: missing, path: '/v1/deployment*' }
+    covers: 10
+    decision: accepted-deviation
+    reference: docs/managed-agents/cron-triggers.md#decision
+    rationale: >-
+      Orca exposes cron scheduling through the Orca-owned /v1/triggers Core
+      extension. It does not claim wire compatibility with Anthropic
+      Deployments or publish a public DeploymentRun resource.
+
+  - id: missing-dreams
+    match: { class: missing, path: '/v1/dreams*' }
+    covers: 5
+    decision: not-implemented
+    reference: docs/managed-agents/roadmap.md#anthropic-surface-not-implemented
+    rationale: Background "dream" runs are not part of the current surface.
+
+  - id: missing-tunnels
+    match: { class: missing, path: '/v1/tunnels*' }
+    covers: 10
+    decision: not-implemented
+    reference: docs/managed-agents/roadmap.md#anthropic-surface-not-implemented
+    rationale: >-
+      Tunnels expose a sandbox port to the public internet. Orca's egress model
+      routes outbound traffic through the MCP gateway; inbound exposure has not
+      been designed.
+
+  - id: missing-user-profiles
+    match: { class: missing, path: '/v1/user_profiles*' }
+    covers: 5
+    decision: not-implemented
+    reference: docs/managed-agents/roadmap.md#anthropic-surface-not-implemented
+    rationale: >-
+      End-user profiles and enrollment URLs have no counterpart in the workspace
+      identity model yet.
+
+  - id: missing-self-hosted-work-queue
+    match: { class: missing, path: '/v1/environments/{environment_id}/work*' }
+    covers: 8
+    decision: not-implemented
+    reference: docs/managed-agents/roadmap.md#anthropic-surface-not-implemented
+    rationale: >-
+      The self-hosted work queue lets an external runner poll Anthropic for work.
+      Orca dispatches to its own harness, so this surface has no consumer today.
+
+  # ---------------------------------------------------------------------------
+  # extension — we serve the operation, Anthropic does not publish it.
+  # ---------------------------------------------------------------------------
+
+  - id: extension-cron-triggers
+    match: { class: extension, path: '/v1/triggers*' }
+    covers: 8
+    decision: keep
+    reference: docs/managed-agents/cron-triggers.md#decision
+    rationale: >-
+      Cron Triggers are a stable Orca Core capability implemented by Registry
+      and Postgres in every distribution. They remain machine-labelled as an
+      Orca extension and are not presented as Anthropic Deployments.
+
+  # The two discovery routes are named individually rather than covered by a
+  # `/api*` glob. `*` here is `.*`, not a segment wildcard, so `/api*` also
+  # matches `/api/v2`, `/apikeys`, and — the one that matters —
+  # `/apis/<group>/<version>/*`. The first extension group this model exists to
+  # support would have inherited a `keep` decided about discovery, silently.
+  - id: extension-core-version-discovery
+    match: { class: extension, operation: 'GET /api' }
+    decision: keep
+    reference: docs/managed-agents/api-groups-and-extensions.md#discovery
+    rationale: >-
+      Advertises the core API versions a deployment serves. Anthropic has one
+      deployment and therefore no discovery problem; a self-hosted engine has
+      many, and without this a client cannot tell "capability absent" from
+      "wrong base URL" except by 404. Authenticated, like the rest of the
+      listener: the answer describes the deployment, not its liveness.
+
+  - id: extension-api-group-discovery
+    match: { class: extension, operation: 'GET /apis' }
+    decision: keep
+    reference: docs/managed-agents/api-groups-and-extensions.md#discovery
+    rationale: >-
+      Advertises the extension groups a deployment serves. Same reasoning as
+      `extension-core-version-discovery`. The list is the only supported way to
+      test whether a group is available; the engine's own groups are always
+      listed, and a distribution built on the engine appends its own.
+
+  # The three engine groups get one rule each rather than a shared `/apis/*`.
+  # A pattern that broad would cover every group any distribution ever mounts,
+  # so a cloud-only group would inherit a decision taken about guardrails and
+  # never appear as an undecided difference — which is the whole failure this
+  # register exists to catch. Scoped to the group and version it names, each
+  # rule goes dead the moment that group stops being served.
+  - id: extension-policy-group
+    match: { class: extension, path: '/apis/policy.runorca.ai/v1*' }
+    covers: 8
+    decision: keep
+    reference: docs/managed-agents/guardrails.md
+    rationale: >-
+      The Guardrails control plane: guardrail CRUD, the read-only type catalog,
+      and the group's own `APIResourceList`. Anthropic publishes no guardrail
+      surface — a tool-level `permission_policy` is as far as their model goes,
+      and it stays Claude-shaped and unchanged. These operations live under a
+      named group rather than on `/v1` precisely so that nothing here can be
+      mistaken for core API, and so the group can version independently of it.
+  - id: extension-runtime-group
+    match: { class: extension, path: '/apis/runtime.runorca.ai/v1*' }
+    covers: 2
+    decision: keep
+    reference: docs/managed-agents/api-groups-and-extensions.md
+    rationale: >-
+      SDK harness and native-model discovery is an Orca extension. Agent CRUD
+      retains the Anthropic shape and selects the immutable harness through metadata.
+  - id: extension-pricing-group
+    match: { class: extension, path: '/apis/pricing.runorca.ai/v1*' }
+    covers: 3
+    decision: keep
+    reference: docs/managed-agents/pricing.md
+    rationale: >-
+      The model price table a self-hosted deployment reads to cost its own
+      usage. Anthropic bills its own models and so publishes no price API;
+      an operator running against several providers has no other source of
+      truth. Reads are public; every write is on the admin listener.
+
+  # The two probes are named individually for a second reason: the only patterns
+  # that cover both also cover half of `/v1`, and a rule that broad would absorb
+  # a future extension nobody decided about.
+  - id: extension-liveness-probe
+    match: { class: extension, operation: 'GET /healthz' }
+    decision: keep
+    reference: docs/managed-agents/api-groups-and-extensions.md#probes
+    rationale: >-
+      Liveness probe, served on the public listener and already depended on by
+      the compose healthchecks and the Helm charts. Anthropic publishes no
+      probes because their availability is not their caller's concern; on a
+      self-hosted deployment it is the operator's. Published because it exists,
+      not because Anthropic would.
+
+  - id: extension-readiness-probe
+    match: { class: extension, operation: 'GET /readyz' }
+    decision: keep
+    reference: docs/managed-agents/api-groups-and-extensions.md#probes
+    rationale: Readiness probe. Same reasoning as `extension-liveness-probe`.
+
+  - id: extension-agent-delete
+    match: { class: extension, operation: 'DELETE /v1/agents/{id}' }
+    decision: keep
+    reference: docs/managed-agents/conformance.md#orca-only-operations
+    rationale: >-
+      Anthropic offers archive-only for Agents. Every other Orca resource is hard
+      deletable and returns an `agent_deleted` tombstone; the asymmetry would be
+      the surprise.
+
+  - id: extension-git-creds
+    match: { class: extension, operation: 'POST /v1/git-creds' }
+    decision: keep
+    reference: docs/managed-agents/orca-extensions.md#git-credential-helper
+    rationale: >-
+      Session-JWT credential helper called by `git` from inside the sandbox. It
+      is public-listener reachable only because git invokes it there, and it is
+      already labelled an Orca extension.
+
+  - id: extension-git-proxy-advertisement
+    match: { class: extension, operation: 'GET /v1/git-proxy/{resourceId}/info/refs' }
+    decision: keep
+    reference: docs/managed-agents/orca-extensions.md#git-read-proxy
+    rationale: >-
+      Read-only Git smart HTTP advertisement for one session resource. A separate
+      git-proxy JWT authorizes the request; upstream PATs stay inside Registry.
+
+  - id: extension-git-proxy-upload-pack
+    match: { class: extension, operation: 'POST /v1/git-proxy/{resourceId}/git-upload-pack' }
+    decision: keep
+    reference: docs/managed-agents/orca-extensions.md#git-read-proxy
+    rationale: >-
+      Git upload-pack reads, including protocol v2 ls-refs, use a bounded binary
+      POST. The route offers no receive-pack or other repository write operation.
+
+  - id: extension-session-outcome
+    match: { class: extension, operation: 'GET /v1/sessions/{id}/outcome' }
+    decision: keep
+    reference: docs/managed-agents/overview.md#confirmed-decisions
+    rationale: >-
+      Anthropic exposes `outcome` as a Session field only. Outcomes are out of
+      scope for v1 here and the route returns null, but it is the seam the
+      evaluation work will land on.
+
+  - id: extension-session-files
+    match: { class: extension, path: '/v1/sessions/{id}/files*' }
+    covers: 4
+    decision: keep
+    reference: docs/managed-agents/orca-extensions.md#session-files
+    rationale: >-
+      Provides a direct, ownership-enforcing view of the output Files created by
+      one Session. Anthropic exposes the equivalent data only through the
+      top-level Files API with a scope_id filter; the nested surface is an Orca
+      convenience and is therefore labelled as an extension.
+
+  # One glob for the two key-lifecycle routes, like `extension-cron-triggers`:
+  # they are one capability with one reason, and splitting them would invite the
+  # two halves to drift apart. The pattern is anchored on `-key` rather than a
+  # bare `/v1/environments/{id}/*`, which would also absorb `archive`,
+  # `work_stats`, and anything else nested under an environment.
+  - id: extension-environment-key-lifecycle
+    match: { class: extension, path: '/v1/environments/{id}/*-key' }
+    covers: 2
+    decision: keep
+    reference: docs/managed-agents/orca-extensions.md#environment-key-lifecycle
+    rationale: >-
+      `rotate-key` and `revoke-key` manage an Environment's worker/host tunnel
+      credential — the Env Key. Anthropic's `BetaEnvironment` carries no key
+      concept at all, so neither route shadows a published operation; their
+      nearest published analogue is the Tunnel resource's `rotate_token` /
+      `reveal_token`, the same credential-on-a-resource shape applied to a
+      resource Orca does not serve. The key's fields on the Anthropic-shaped
+      routes are `orca-beta`-gated so the default Environment projection stays
+      byte-compatible.
+
+  # NOT `keep`. Anthropic already publishes this capability, so an accepted
+  # extension here would ship a shadow of an existing operation under a
+  # different name — precisely what the compatibility rule forbids. `fix-later`
+  # is the honest record: the divergence is real, and closing it is a product
+  # call rather than a spec edit.
+  - id: extension-environment-work-stats
+    match: { class: extension, operation: 'GET /v1/environments/{id}/work_stats' }
+    decision: fix-later
+    reference: docs/managed-agents/roadmap.md#environment-work-stats-path-and-shape
+    rationale: >-
+      Anthropic publishes `GET /v1/environments/{environment_id}/work/stats`
+      returning `BetaSelfHostedWorkQueueStats` — `depth`, `oldest_queued_at`,
+      `pending`, `type`, `workers_polling`, all five required. Ours spells the
+      last segment `work_stats` rather than `work/stats`, which is why the
+      differ sees an extension rather than a divergent core operation, and
+      returns `depth`, `in_flight`, `worker_connected`. Only `depth` overlaps by
+      name, and even it is counted differently (theirs is consumer-group lag,
+      ours a COUNT(*) of pending sessions with no runner minted); two of their
+      required fields are absent and two of ours have no counterpart. Aligning
+      the path and body would reclassify this row `extension` -> `core` and drop
+      one operation from `missing-self-hosted-work-queue`, whose `covers: 8`
+      would have to become `covers: 7` in the same commit or the gate reports it
+      miscounted. Recorded rather than decided: the rename is breaking for any
+      existing reader, and the three unanswered fields need counting semantics
+      this service does not track.
+
+  - id: extension-thread-interrupt
+    match:
+      class: extension
+      operation: 'POST /v1/sessions/{id}/threads/{thread_id}/interrupt'
+    decision: keep
+    reference: docs/managed-agents/orca-extensions.md#thread-interrupt
+    rationale: >-
+      A REST alias, not a capability. Anthropic models interrupt as a message
+      type — `user.interrupt` on `POST /v1/sessions/{id}/events`, which appears
+      seven times in the vendored spec — and that event is the primary mechanism
+      here too: it is what this route appends, what the harness acts on, and
+      what a Claude-compatible client sends without knowing the route exists.
+      Anthropic publishes five thread operations and no interrupt path, so this
+      one shadows nothing; kept as a convenience over the published event, which
+      remains the contract.
+
+  # ---------------------------------------------------------------------------
+  # success-codes — compared strictly.
+  #
+  # The six unconditional creates and three `orca-beta` branches that differed
+  # from Anthropic now answer only the published Anthropic success status. There
+  # are no success-code decisions to register; any future difference is
+  # unmatched and fails the conformance check.
+
+  # ---------------------------------------------------------------------------
+  # response-media — the media types a 2xx body is offered under.
+  # ---------------------------------------------------------------------------
+
+  - id: response-media-session-event-stream
+    match:
+      class: response-media
+      operation: 'GET /v1/sessions/{id}/events/stream'
+      onlyAnthropic: ['application/json']
+      onlyOrca: ['text/event-stream']
+    decision: accepted-deviation
+    reference: docs/managed-agents/conformance.md#classification
+    rationale: >-
+      Anthropic types the stream as `application/json` carrying one event model.
+      We send `text/event-stream` — `src/streaming/sse.ts` writes that header,
+      and publishing anything else would describe a response this service does
+      not produce. The frame payload is the same event object on both sides; the
+      schemas are still compared, because `alignResponseMedia` lines the bodies
+      up before diffing so the media difference cannot hide them.
+
+  - id: response-media-thread-stream
+    match:
+      class: response-media
+      operation: 'GET /v1/sessions/{id}/threads/{thread_id}/stream'
+      onlyAnthropic: ['application/json']
+      onlyOrca: ['text/event-stream']
+    decision: accepted-deviation
+    reference: docs/managed-agents/conformance.md#classification
+    rationale: >-
+      Same route family and same reason as
+      `response-media-session-event-stream`: served by the same SSE bridge, so it
+      declares the media type that bridge writes.
+
+  # ---------------------------------------------------------------------------
+  # required-params — informational; required query/header params and required
+  # top-level request-body properties.
+  # ---------------------------------------------------------------------------
+
+  - id: required-params-create-session-agent
+    match:
+      class: required-params
+      operation: 'POST /v1/sessions'
+      onlyAnthropic: ['body:agent']
+      onlyOrca: []
+    decision: fix-later
+    reference: docs/managed-agents/conformance.md#classification
+    rationale: >-
+      Anthropic requires `agent` on Create Session; we accept a session without
+      one. Accepting a request Anthropic would reject is the safe direction, but
+      it is still a contract difference and belongs in the conformance-fix PR.
+
+  - id: required-params-attach-session-resource-file-id
+    match:
+      class: required-params
+      operation: 'POST /v1/sessions/{id}/resources'
+      onlyAnthropic: ['body:file_id']
+      onlyOrca: []
+    decision: accepted-deviation
+    reference: docs/managed-agents/conformance.md#classification
+    rationale: >-
+      Anthropic publishes one branch for this body — `file` — so `file_id` is
+      unconditionally required there. Orca accepts three resource types, and the
+      requirement shared by every branch is therefore just `type`. This is a
+      consequence of supporting more resource kinds, not a relaxation of the file
+      case: our `file` branch still requires `file_id`, so a request valid
+      against Anthropic's spec is valid here. Surfaced once union bodies began
+      being compared by the intersection of their branches.
+
+  # ---------------------------------------------------------------------------
+  # error-codes — informational; one family rule for the whole surface.
+  # ---------------------------------------------------------------------------
+
+  - id: error-code-enumeration-convention
+    match: { class: error-codes, path: '/v1/*' }
+    covers: 72
+    decision: accepted-deviation
+    reference: docs/managed-agents/conformance.md#error-code-enumeration
+    rationale: >-
+      Anthropic lists the platform's entire error taxonomy on nearly every
+      operation, or a bare `4XX` wildcard on the older ones. This service
+      enumerates only the statuses a route actually returns. Neither convention
+      is observable by a client on a successful call, and matching Anthropic's
+      would mean documenting statuses we never emit.
+
+  # ---------------------------------------------------------------------------
+  # prose-invariant — requirements Anthropic documents but does not encode in
+  # their spec. Transcribed by hand in anthropic-prose-invariants.yaml; see the
+  # header there for why this is the one non-derived input, and what that costs.
+  # ---------------------------------------------------------------------------
+
+  - id: prose-beta-header-managed-agents
+    match: { class: prose-invariant, operation: 'beta-header-managed-agents-version' }
+    decision: accepted-deviation
+    reference: docs/managed-agents/orca-extensions.md#header-behavior
+    rationale: >-
+      Accepted and ignored. Recognising this value would be a claim to implement
+      the version negotiation it gates, which this service does not perform.
+
+  - id: prose-beta-header-files
+    match: { class: prose-invariant, operation: 'beta-header-files-version' }
+    decision: accepted-deviation
+    reference: docs/managed-agents/orca-extensions.md#header-behavior
+    rationale: >-
+      Files routes accept and ignore the SDK's endpoint-specific beta value.
+      Recorded separately so implementing or enforcing this family cannot be
+      hidden by the managed-agents rule.
+
+  - id: prose-beta-header-skills
+    match: { class: prose-invariant, operation: 'beta-header-skills-version' }
+    decision: accepted-deviation
+    reference: docs/managed-agents/orca-extensions.md#header-behavior
+    rationale: >-
+      Skills routes accept and ignore the SDK's endpoint-specific beta value.
+      Recorded separately because it has its own version and may evolve
+      independently.
+
+  - id: prose-beta-header-vaults
+    match: { class: prose-invariant, operation: 'beta-header-vaults-version' }
+    decision: accepted-deviation
+    reference: docs/managed-agents/orca-extensions.md#header-behavior
+    rationale: >-
+      Vault routes accept and ignore the managed-agents beta value. The exact
+      Vault family is registered independently rather than inferred from other
+      endpoints using the same value.
+
+  - id: prose-beta-header-memory-version
+    match: { class: prose-invariant, operation: 'beta-header-memory-version' }
+    decision: accepted-deviation
+    reference: docs/managed-agents/orca-extensions.md#header-behavior
+    rationale: >-
+      Memory routes do not distinguish this value from any other. Same reasoning
+      as the managed-agents value, recorded separately because it is a separate
+      documented requirement and a future decision may diverge.
+
+  - id: prose-beta-header-memory-exclusivity
+    match: { class: prose-invariant, operation: 'beta-header-memory-exclusivity' }
+    decision: accepted-deviation
+    reference: docs/managed-agents/orca-extensions.md#header-behavior
+    rationale: >-
+      Nothing here parses the header, so no combination of values is rejected.
+      Registered on its own because rejecting a combination is a different
+      behaviour from ignoring a value, and conflating them would hide the day we
+      implement one but not the other.
+
+  - id: prose-threads-list-ordering
+    match: { class: prose-invariant, operation: 'threads-list-ordering' }
+    decision: fix-later
+    reference: docs/managed-agents/services/registry-service.md#session-threads-api-anthropic-thread-model-multiagent
+    rationale: >-
+      The served list orders newest-first (created_at DESC, id DESC); Anthropic
+      documents primary first, then children in spawn order. Client-visible but
+      non-breaking for the limit/page pagination both sides serve. The
+      implementation should switch to primary-first; registered as fix-later
+      rather than accepted so the divergence cannot silently become permanent.
+
+  # ---------------------------------------------------------------------------
+  # wire schemas — compared by oasdiff (see scripts/lib/schema-diff.mjs).
+  #
+  # `covers` pins membership; `deltaFingerprint` pins every directional atom in
+  # those rows. A changed constraint therefore fails even when the row count is
+  # unchanged. Request rules are resource-scoped because their causes and
+  # compatibility consequences differ.
+  # ---------------------------------------------------------------------------
+
+  - id: header-parameters-representation-and-orca-additions
+    match: { class: header-parameters, path: '/v1/*' }
+    covers: 72
+    deltaFingerprint: sha256:4517ad9d4d919c0a312ce40ab7bf1fb0026f9dea34e7b39215e3f3b1381aae26
+    decision: accepted-deviation
+    reference: docs/managed-agents/conformance.md#classification
+    rationale: >-
+      `x-api-key` is represented by the document's top-level apiKey security
+      scheme rather than repeated as an operation parameter. Anthropic also
+      repeats `anthropic-version`; the server accepts that header through the
+      public-header passthrough although this document does not assign it
+      negotiation semantics. Orca additionally declares the idempotency and
+      dialect headers its handlers inspect. Query constraints are deliberately
+      excluded from this rule.
+
+  - id: query-parameters-wire-shapes
+    match: { class: query-parameters, path: '/v1/*' }
+    covers: 20
+    deltaFingerprint: sha256:8ef9218d7c43234ba3466d4ea7e07f7a7785161299a7d35ff688a092b541642d
+    decision: fix-later
+    reference: docs/managed-agents/conformance.md#classification
+    rationale: >-
+      The rejected `Environment limit=101` case is fixed: shared 100-item caps
+      no longer narrow Anthropic's list inputs. Remaining rows include positive
+      integer validation where upstream publishes only `int32`, nullable/default
+      annotations, stricter identifier patterns, and wire names such as
+      `event_deltas` versus `event_deltas[]`. Generic Session `metadata_<key>`
+      filters are an intentional additive Orca extension documented in the
+      operation description because OpenAPI cannot enumerate dynamic parameter
+      names. They apply exact AND predicates before pagination without changing
+      the default list behavior or response dialect; see
+      docs/managed-agents/orca-extensions.md.
+      The remaining restrictive atoms are observable request-shape
+      differences and remain scheduled for alignment, not hidden under the
+      equivalent authentication representation.
+
+  - id: request-schema-agent-wire-shapes
+    match: { class: request-schema, path: '/v1/agents*' }
+    covers: 2
+    deltaFingerprint: sha256:61526d706f9ffabfcceb2d961855f8ec59653e1ccf1b44b727965f5f385ec268
+    decision: fix-later
+    reference: docs/managed-agents/orca-extensions.md
+    rationale: >-
+      Agent names and descriptions now accept Anthropic's published 256/2048
+      limits. Both rows additionally carry `guardrail_ids`, the Orca-only
+      property that names the guardrails an agent references — additive on the
+      request side, so a client written against Anthropic's spec is unaffected.
+      The remaining atoms mix additive Orca model/tool shapes with local
+      collection and metadata constraints; those restrictions must be aligned
+      before this family can claim full request compatibility.
+
+  - id: request-schema-environment-wire-shapes
+    match: { class: request-schema, path: '/v1/environments*' }
+    covers: 2
+    deltaFingerprint: sha256:42cac5f49f669915c1fc9ffe5eccadec95de055cf3d1f2d8c91fb5d4f72c69b6
+    decision: fix-later
+    reference: docs/managed-agents/orca-extensions.md#environment-key-lifecycle
+    rationale: >-
+      Two atoms joined this family and nothing left it: `properties:egress_mode`
+      and `properties:llm` on both create and update, the colocated execution
+      path's egress-routing selector and per-environment LLM binding. Both are
+      additive optional request fields, so a Claude-compatible request is still
+      accepted unchanged; they bring the count of Orca-only top-level request
+      properties to six, alongside the pre-existing `packages`, `networking`,
+      `image` and `target`. The rest of the family is unmoved: our `config` is
+      published as one inlined object where Anthropic publishes a two-arm
+      `anyOf`, `scope` as a nullable enum where they publish a nullable string,
+      and the body rejects unknown properties in both directions. The
+      restrictive atoms are still the ones scheduled for alignment — metadata
+      values capped at 512 characters, and update's `name` bounded to 1..256
+      where Anthropic accepts any length including empty.
+
+  - id: request-schema-memory-wire-shapes
+    match: { class: request-schema, path: '/v1/memory_stores*' }
+    covers: 4
+    deltaFingerprint: sha256:6c16c5346b915ab87b58e6f563f8b7d4f4cfc442bd4de141a6218469529b56cd
+    decision: fix-later
+    reference: docs/managed-agents/orca-extensions.md
+    rationale: >-
+      Memory requests differ in metadata validation, path bounds, and the
+      precondition representation. Some are safe broadenings and some are local
+      restrictions, so this resource family is explicitly scheduled rather
+      than described as uniformly additive.
+
+  - id: request-schema-session-wire-shapes
+    match: { class: request-schema, path: '/v1/sessions*' }
+    covers: 5
+    deltaFingerprint: sha256:99b63a44e14c1f94c9ee64aba60630637c567b98209642f66d03d1902ce77829
+    decision: fix-later
+    reference: docs/managed-agents/orca-extensions.md
+    rationale: >-
+      Empty event batches now match Anthropic's published minimum. The session
+      update row additionally carries `agent.model`: changing the model
+      mid-session is what makes a cost budget's downgrade gate reachable, since
+      the gate denies at the cap only while the session is on an expensive model
+      and allows again once it moves to a cheaper one. Additive, and the session
+      create row's agent overrides carry `guardrail_ids` on the same footing.
+      Remaining rows include Orca resource kinds and agent overrides alongside
+      local collection/content bounds; the exact aggregate is pinned while those
+      restrictive atoms are aligned.
+
+  - id: request-schema-skill-wire-shape
+    match: { class: request-schema, operation: 'POST /v1/skills' }
+    deltaFingerprint: sha256:3e110f660b8077ca27b61313259c76cb468db81ee2ff10e5758d70a12e77e8b1
+    decision: accepted-deviation
+    reference: docs/managed-agents/skills.md
+    rationale: >-
+      The upload is represented through the multipart contract this server
+      accepts; its exact content/media atoms are pinned independently from JSON
+      resource requests.
+
+  - id: request-schema-vault-wire-shapes
+    match: { class: request-schema, path: '/v1/vaults*' }
+    covers: 4
+    deltaFingerprint: sha256:17a6c3030b6f80c69f8d3a07f889b163ebc5b8557e14f798f58cf0f5264b2d7a
+    decision: fix-later
+    reference: docs/managed-agents/orca-extensions.md
+    rationale: >-
+      Vault updates now accept nullable `display_name` as Anthropic publishes.
+      Credential unions and local metadata/host validation account for the
+      remaining atoms; their restrictive portions remain scheduled for
+      compatibility work.
+
+  - id: success-schema-response-requiredness-and-unions
+    match: { class: success-schema, path: '/v1/*' }
+    covers: 72
+    deltaFingerprint: sha256:d457fa620e6e6be32642637b93a995c5cbfa76fd1661dea277d9a3e566c80409
+    decision: accepted-deviation
+    reference: docs/managed-agents/conformance.md#classification
+    rationale: >-
+      Dominated by one convention: Anthropic marks response fields `required`,
+      guaranteeing their presence, while our schemas leave most optional. Ours is
+      the weaker promise, so a client written against their spec may find a field
+      absent that they would have guaranteed. Recorded as accepted rather than
+      fixed because tightening it is a response-contract change across the whole
+      surface, not a spec edit. The remainder is the same union and nullability
+      shapes as the request side, plus `guardrail_ids` on the six agent response
+      rows — served only under `orca-beta`, hence optional rather than required,
+      and additive either way.

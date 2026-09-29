@@ -1,0 +1,145 @@
+# Copyright The Orca Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# In-cluster ai-gateway config for OpenSandbox sandbox-harness e2e.
+#
+# Sandbox pods cannot reach the host docker-compose ai-gateway from kind, so the
+# e2e workflow deploys the same external ai-gateway image inside kind with this
+# LLM-only config. The host registry still mints an ai-gateway session JWT;
+# this gateway validates it with the same generated public key and injects the
+# provider key for the selected Anthropic or OpenAI route from its env vault.
+
+server:
+  listen: '0.0.0.0:8090'
+  admin_listen: '0.0.0.0:9099'
+
+identity:
+  scope_dims: [workspace_id, session_id, org_id, llm_routes, llm_models]
+  validators:
+    - name: orca-session-jwt
+      kind: jwt
+      static_public_key_pem: '/etc/orca-gateway/session-jwt-pub.pem'
+      issuers: ['orca-registry']
+      audiences: ['ai-gateway']
+      scope_from:
+        jwt_claims:
+          workspace_id: workspace_id
+          session_id: session_id
+          org_id: org_id
+          llm_routes: llm_routes
+          llm_models: llm_models
+
+vaults:
+  - name: openai_api_key
+    resolver: env
+    env_var: OPENAI_API_KEY
+  - name: deepseek_api_key
+    resolver: env
+    env_var: DEEPSEEK_API_KEY
+  - name: anthropic_api_key
+    resolver: env
+
+destinations:
+  openai-responses:
+    kind: openai
+    base_url: 'https://api.openai.com/v1'
+    credentials:
+      vault: openai_api_key
+  deepseek-chat:
+    kind: openai_compatible
+    base_url: 'https://api.deepseek.com'
+    credentials:
+      vault: deepseek_api_key
+  anthropic-proxy:
+    kind: anthropic
+    base_url: 'https://api.anthropic.com'
+    credentials:
+      vault: anthropic_api_key
+
+routes:
+  - name: llm-responses
+    match:
+      path: '/v1/responses'
+    strategy:
+      mode: fallback
+      targets:
+        - destination: openai-responses
+  - name: llm-chat
+    match:
+      path: '/v1/chat/completions'
+    strategy:
+      mode: fallback
+      targets:
+        - destination: deepseek-chat
+  - name: llm-messages
+    match:
+      path: '/v1/messages'
+    idempotency_safe: true
+    strategy:
+      mode: fallback
+      targets:
+        - destination: anthropic-proxy
+
+plugins:
+  authorizers:
+    - name: session-model-allowlist
+      kind: yaml_acl
+      required: true
+      failure_mode: deny
+      rules:
+        - effect: allow
+          action: invoke
+          scope:
+            workspace_id: ws_e2e_tests
+          resource:
+            kind: model
+            provider: openai
+          conditions:
+            - resource_name_in_scope_list:
+                scope: llm_models
+        - effect: allow
+          action: invoke
+          scope:
+            workspace_id: ws_e2e_tests
+          resource:
+            kind: model
+            provider: anthropic
+          conditions:
+            - resource_name_in_scope_list:
+                scope: llm_models
+        - effect: allow
+          action: invoke
+          resource:
+            kind: model
+            provider: openai_compatible
+          conditions:
+            - resource_name_in_scope_list:
+                scope: llm_models
+        - effect: allow
+          action: invoke
+          resource:
+            kind: route
+          conditions:
+            - resource_name_in_scope_list:
+                scope: llm_routes
+  audit_sinks:
+    - name: llm-stdout
+      kind: stdout
+      required: false
+      failure_mode: log_only
+  usage_sinks:
+    - name: registry-session-usage
+      kind: registry
+      base_url: 'http://registry-host.opensandbox.svc.cluster.local:8081'
+      bearer_token_file: '/var/run/secrets/orca/registry-internal/token'
+      timeout_ms: 3000
+      buffer: 10000
+    - name: kafka-usage
+      kind: kafka
+      brokers: 'kafka:29092'
+      topic: 'orca.e2e.gateway-usage'
+      buffer: 10000
+      # Keep the E2E record readable by the repository's KafkaJS client without
+      # adding an optional native compression codec just for this assertion.
+      compression: none
+      ack: all

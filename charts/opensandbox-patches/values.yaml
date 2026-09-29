@@ -1,0 +1,12 @@
+# Copyright The Orca Authors
+# SPDX-License-Identifier: Apache-2.0
+
+dataplaneNamespace:
+  # Set false when upgrading an existing OpenSandbox deployment whose
+  # opensandbox Namespace was created outside this Helm release.
+  create: true
+
+admission:
+  # Defense in depth for every Pod created in the opensandbox dataplane
+  # namespace. Requires Kubernetes ValidatingAdmissionPolicy support.
+  enabled: true

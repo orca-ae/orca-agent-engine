@@ -1,0 +1,744 @@
+# Copyright The Orca Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# Environment-variable exemption register.
+#
+# `pnpm docs:env-check` fails when a documented `SCREAMING_SNAKE` identifier is
+# not read by a scanned config file. Some legitimately are not, and this file is
+# where that is *declared* rather than inferred.
+#
+# It exists because four rounds of regex tightening could not tell the two apart.
+# The check used to accept "setting" shapes — a bare quoted `'NAME'`, a
+# `NAME:` key, a `${NAME}` — so that variables exported for something else to
+# read would pass. Those shapes rescued 19 names, 7 of which are not environment
+# variables at all but exported constants named in prose. They could not be
+# tightened either: `subprocess-entry.ts` reads
+#
+#     const DEFAULT_CWD_ENV = 'SANDBOX_HARNESS_DEFAULT_CWD';
+#     process.env[DEFAULT_CWD_ENV]
+#
+# which no name-based pattern resolves. The doc side over-collected and the
+# wiring side over-accepted, and the two errors cancelled.
+#
+# So intent is declared here instead of guessed there. Adding an entry is a line
+# in a diff a reviewer can argue with.
+#
+# reason:
+#   not-an-env-var       backticked identifier that is not an environment
+#                        variable — an exported constant, a capability name, a
+#                        SQL keyword. Nothing to wire.
+#   wired-elsewhere      a real variable, consumed outside the scanned configs:
+#                        a chart, a CI workflow, a subprocess env. Requires
+#                        `site`, which must exist and still contain the name.
+#   intentionally-absent documented in order to say this repo does *not* set it.
+#                        Inverts the check: the gate fails if a config ever
+#                        starts reading it.
+#
+# Both directions are enforced. An entry whose name no doc mentions any more, or
+# that a config has since started reading, fails as dead — otherwise this file
+# only grows and starts reading as coverage it no longer provides.
+#
+# Some entries exist only because the collectors over-collect on purpose:
+# single-token names that are an HTTP verb, a SQL keyword, a signal, an errno,
+# a heredoc delimiter, or a shell local. They are enumerated here so the claim
+# is checkable rather than illustrative, and `validateRegisterInventory` fails
+# the run when this list and the register disagree in either direction. That
+# check exists because the sentence was hand-written twice and wrong both
+# times: first counting three config-side entries as disjoint from twenty-one
+# single-token ones when they were a subset, then omitting `NODE` in the very
+# commit that added it.
+#
+# single-token inventory >>>
+#   PROVIDERS BEGIN SIGINT SIGTERM SIGKILL RSA
+#   NODE COMMIT ROLLBACK ECONNREFUSED ENOENT DOCKERFILE
+#   DELETE LISTEN NOTIFY
+#   INSERT CONCURRENTLY ACCEPTED STRICT SETFCAP
+#   COMPOSE CREATEDB
+# <<< end inventory
+#
+# (HOME, TMPDIR, TMP and TEMP are single-token too, but are real variables the
+# local runtime sets, filed as `wired-elsewhere`.) That is the deliberate trade:
+# under-collecting
+# fails silently, which is the failure this gate exists to prevent, so the
+# collectors cast wide and the exceptions are written down. A cheaper rule was
+# measured and rejected — counting a single token only when it heads a table row
+# costs 3 entries instead of 20, but makes coverage depend on doc formatting,
+# and inference is what every bug in this gate has been made of. Narrowing the
+# config-side net was measured too: collecting quoted literals only from
+# argument lists that mention `env` saves three entries and silently loses four
+# real variables to the name-constant indirection, which is the wrong trade.
+#
+# Every entry here is load-bearing: removing any one turns the gate red. That is
+# checked by leave-one-out, not asserted — two entries (`GET`, `POST`) were found
+# inert that way and deleted. Re-run it when this file grows: an entry that
+# suppresses nothing is indistinguishable from one that does, until you remove it.
+#
+# What this file CANNOT do, stated plainly so nobody assumes otherwise:
+# `not-an-env-var` suppresses both directions, and `collectDeclared` cannot tell
+# a quoted string literal apart from a real read — that ambiguity is why it
+# over-collects in the first place. So a `not-an-env-var` entry for a genuine,
+# undocumented variable will pass, and only the required `note` and a human
+# reading this diff stand in the way.
+#
+# One thing does catch it: `collectEnvAccessed` collects the strictly narrower
+# set of names reached through `env.NAME` or `env['NAME']`, and an entry naming
+# one of those fails as dead. Being read through `process.env` is not evidence
+# that a name is a variable, it is the definition of one. The earlier rule
+# correlated two weak signals instead — documented AND declared — and was wrong
+# in both directions: it passed nine exported constants, then flagged `GET` and
+# `POST`, which are HTTP methods in a route table and HTTP methods in a
+# fixture's request options. `intentionally-absent` was never abusable this way,
+# since any config reading the name fails immediately.
+#
+# Scope: every file under `services/` and `packages/` that reads `process.env`
+# is scanned — 24 of them, enumerated in `CONFIG_SOURCES` and checked against a
+# walk of the tree by `validateScanCoverage`, so a new reader cannot be omitted
+# by leaving a line out. That check exists because the omission had already
+# happened: `KIND_HELM_NAMESPACE`, `KIND_HELM_E2E_TIMEOUT_MS`,
+# `ORCA_MANAGED_CHART_DIR`, and `ORCA_GATEWAY_CHART_DIR` were read by a
+# checked-in script, documented nowhere, and the gate reported "env docs in
+# sync".
+
+version: 1
+
+exemptions:
+  # ---------------------------------------------------------------------------
+  # not-an-env-var — exported constants and platform identifiers that the doc
+  # regex collects because they are SCREAMING_SNAKE in backticks.
+  # ---------------------------------------------------------------------------
+
+  - name: MUST_BE_CORE
+    reason: not-an-env-var
+    note: >-
+      Exported const in services/registry-service-ts/scripts/orca-extension-tagging.mjs — the
+      operations that must never carry an Orca extension tag. Discussed in prose in
+      api-groups-and-extensions.md.
+
+  - name: MUST_BE_EXTENSIONS
+    reason: not-an-env-var
+    note: >-
+      Its counterpart in the same file: operations that must be tagged as Orca extensions.
+
+  - name: HARNESS_CATALOG
+    reason: not-an-env-var
+    note: >-
+      The exported catalog object in packages/harness-catalog/src/catalog.ts, named in the
+      library docs as the thing you add an entry to.
+
+  - name: HARNESS_CAPABILITIES
+    reason: not-an-env-var
+    note: >-
+      Exported capability data in packages/harness-catalog/src/capabilities.ts,
+      consumed by harness setup, SDK discovery, and feature validation.
+
+  - name: SHARED_USAGE_KEYS
+    reason: not-an-env-var
+    note: >-
+      Exported const in packages/guardrails/src/state.ts — the usage keys the runtime writes
+      un-namespaced, so every rule can read them. Named in the library doc because the
+      distinction between those and a rule's own namespaced bookkeeping is the whole point of
+      that bullet.
+
+  - name: DEFAULT_HARNESS
+    reason: not-an-env-var
+    note: >-
+      Exported const in packages/harness-catalog/src/catalog.ts — the harness chosen when a
+      request names none.
+
+  - name: DEFAULT_MODE
+    reason: not-an-env-var
+    note: >-
+      Exported const alongside DEFAULT_HARNESS — the topology chosen when a request names none.
+
+  - name: MAX_MEMORY_PATH_LENGTH
+    reason: not-an-env-var
+    note: >-
+      Exported const in packages/memory-store/src/blob/path.ts capping a memory path, quoted in
+      that package's README.
+
+  - name: SKILLS_ROOT
+    reason: not-an-env-var
+    note: >-
+      Exported const in packages/sandbox-runtime/src/write-policy.ts — the frozen
+      /workspace/skills path, named as a symbol in the sandbox-runtime library doc.
+
+  - name: PROVIDERS
+    reason: not-an-env-var
+    note: >-
+      The static provider array in services/sandbox-harness/src/providers/registry.ts, named in that
+      service's AGENTS.md as the thing you push onto to add a provider.
+
+  - name: SESSION_TOPIC_PATTERN
+    reason: not-an-env-var
+    note: >-
+      Exported regex in packages/transcript-store/src/kafka/topic.ts, listed in that package's
+      README next to the helpers that use it.
+
+  - name: RUNNER_TURN_PATH
+    reason: not-an-env-var
+    note: >-
+      The tunnel path a turn is pushed to (/v1/runner/turn). An exported constant in
+      services/registry-service-ts/src/tunnel/session-event-bridge.ts, not a variable.
+
+  - name: RUNNER_SESSION_HEADER
+    reason: not-an-env-var
+    note: >-
+      The header scoping a tunnelled turn (X-Orca-Session-Id). Exported alongside RUNNER_TURN_PATH in
+      services/registry-service-ts/src/tunnel/session-event-bridge.ts.
+
+  - name: RUNNER_REPLAY_PATH
+    reason: not-an-env-var
+    note: >-
+      The tunnel path a resume replay is pushed to (/v1/runner/replay). An exported constant in
+      services/session-runner/src/protocol.ts, not a variable.
+
+  - name: CLAUDE_FAST_MODE_MODEL_IDS
+    reason: not-an-env-var
+    note: >-
+      Exported const in packages/harness-catalog/src/model-controls.ts — the fast-mode allowlist,
+      named in libraries/harness-catalog.md.
+
+  - name: CLAUDE_MODEL_EFFORT_LEVELS
+    reason: not-an-env-var
+    note: >-
+      Exported const in packages/harness-catalog/src/model-controls.ts — the effort-level tuple,
+      named in the same doc.
+
+  - name: SYS_ADMIN
+    reason: not-an-env-var
+    note: >-
+      The Linux capability, discussed throughout the OpenSandbox and kubernetes docs in
+      securityContext terms.
+
+  # Single-token literals the broadened collector now picks up out of the config
+  # sources. Accepting single tokens is what makes a real one like `PORT`
+  # checkable; these three are the whole cost of that on this tree.
+
+  - name: BEGIN
+    reason: not-an-env-var
+    note: >-
+      A PEM guard in registry config.ts:443 — `rawKey.includes('BEGIN')` distinguishes a PEM block
+      from a bare key. Not a variable.
+
+  - name: SIGINT
+    reason: not-an-env-var
+    note: >-
+      The POSIX signal name, passed to process.on() in harness-server main.ts:403.
+
+  - name: SIGTERM
+    reason: not-an-env-var
+    note: >-
+      The POSIX signal name, passed to process.on() in harness-server main.ts:404.
+
+  - name: SIGKILL
+    reason: not-an-env-var
+    note: >-
+      The POSIX signal name, passed to child.kill() in the kind-helm e2e driver at
+      kind-helm-e2e.ts:200 and :443 when a port-forward outlives its grace period.
+
+  - name: RSA
+    reason: not-an-env-var
+    note: >-
+      An openssl `genpkey -algorithm` argument in kind-helm-e2e.ts:795, where the driver mints
+      the session-JWT keypair the rendered chart is asserted against.
+
+  - name: KAFKA_TRANSCRIPT_OK
+    reason: not-an-env-var
+    note: >-
+      A sentinel the kind-helm driver writes to stdout (kind-helm-e2e.ts:1005) and matches on
+      (:1026) to assert a transcript round-tripped through Kafka. An in-band success marker,
+      not a knob.
+
+  - name: TRANSCRIPT_MODULES_OK
+    reason: not-an-env-var
+    note: >-
+      The same sentinel pattern for the transcript module probe — written at kind-helm-e2e.ts:943,
+      matched at :961.
+
+  - name: NODE
+    reason: not-an-env-var
+    note: >-
+      A heredoc delimiter. `docker-entrypoint.sh:27` opens an inline script with
+      `node - <<'NODE'`, and the quoted delimiter reads as a SCREAMING_SNAKE literal to the
+      collector's broad net.
+
+  - name: ALL_PASS
+    reason: not-an-env-var
+    note: >-
+      A sentinel the E2B spike script prints when every check passed
+      (spike-orca-default.ts:197), so a human scanning the log has one token to look for.
+
+  - name: COMMIT
+    reason: not-an-env-var
+    note: >-
+      The SQL statement, issued verbatim by the e2e seeder at seed.ts:132.
+
+  - name: ROLLBACK
+    reason: not-an-env-var
+    note: >-
+      Its counterpart, in the failure path at seed.ts:135.
+
+  - name: ECONNREFUSED
+    reason: not-an-env-var
+    note: >-
+      A Node error code the e2e client matches at client.ts:105 to tell an operator to run
+      `make stack-up` rather than surfacing a bare connection error.
+
+  - name: UND_ERR_SOCKET
+    reason: not-an-env-var
+    note: >-
+      An undici error code, matched alongside it at client.ts:106.
+
+  - name: UNKNOWN_TOPIC_OR_PARTITION
+    reason: not-an-env-var
+    note: >-
+      Kafka protocol error code 3, recognized in packages/transcript-store/src/kafka/consumer.ts
+      and documented in docs/managed-agents/libraries/transcript-store.md for cold-topic
+      subscription retries. An error identifier, not a configuration variable.
+
+  - name: ENOENT
+    reason: not-an-env-var
+    note: >-
+      The POSIX errno, matched by the local runtime at runtime.ts:263 and :355 to distinguish
+      a missing path from a real I/O failure.
+
+  - name: SESSION_PER_EVENT
+    reason: not-an-env-var
+    note: >-
+      The only accepted value of a Trigger's `session_mode` field, declared as a zod literal at
+      services/registry-service-ts/src/contracts/triggers.contract.ts:68. An enum member in the wire
+      contract, not a knob.
+
+  - name: FULL_TRANSITIVE
+    reason: not-an-env-var
+    note: >-
+      A Schema Registry subject compatibility policy chosen by platform operators, not an
+      application environment variable. Transcript clients never update this Registry policy.
+
+  - name: SESSION_JWT_PUBLIC_KEY_PEM
+    reason: not-an-env-var
+    note: >-
+      A Kubernetes Secret *item key*, not an environment variable. The chart projects it to the
+      file `session-jwt-public-key-pem` (charts/.../_helpers.tpl:203) and the gateway reads the
+      mounted path; nothing reads it from process.env. The e2e driver asserts that projection at
+      kind-helm-e2e.ts:1117.
+
+  # ---------------------------------------------------------------------------
+  # Shell locals. The dev-stack launcher assigns these itself and never reads
+  # them from the environment; they are collected because shell parameter
+  # expansion cannot distinguish a local from an inherited variable.
+  # ---------------------------------------------------------------------------
+
+  - name: BASH_SOURCE
+    reason: not-an-env-var
+    note: >-
+      A bash builtin array, used at start-services.sh:24 to resolve the script's own directory.
+
+  - name: BASH_REMATCH
+    reason: not-an-env-var
+    note: >-
+      A bash builtin array holding the last regex match, read by with-dev-env.sh.
+
+  - name: COMPOSE
+    reason: not-an-env-var
+    note: >-
+      A shell local holding the resolved docker-compose invocation.
+
+  - name: SCRIPT_DIR
+    reason: not-an-env-var
+    note: >-
+      start-services.sh:24 — the script resolving its own directory.
+
+  - name: DEV_DIR
+    reason: not-an-env-var
+    note: >-
+      start-services.sh:25 — derived from SCRIPT_DIR.
+
+  - name: REPO_ROOT
+    reason: not-an-env-var
+    note: >-
+      start-services.sh:26 — derived from DEV_DIR.
+
+  - name: LOG_DIR
+    reason: not-an-env-var
+    note: >-
+      start-services.sh:27 — derived from DEV_DIR.
+
+  - name: RUN_DIR
+    reason: not-an-env-var
+    note: >-
+      start-services.sh:28 — derived from DEV_DIR.
+
+  - name: SECRETS_DIR
+    reason: not-an-env-var
+    note: >-
+      start-services.sh:29 — derived from DEV_DIR.
+
+  - name: CALLER_TRANSCRIPT_STORE_BACKEND
+    reason: not-an-env-var
+    note: >-
+      start-services.sh:73 — a local snapshot of whether the caller set TRANSCRIPT_STORE_BACKEND, so the script can tell "unset" from "set to the default".
+
+  - name: INTERNAL_SERVICE_TOKEN_RUNTIME_FILE
+    reason: not-an-env-var
+    note: >-
+      start-services.sh:171 — a path under RUN_DIR the script writes the token to.
+
+  - name: INTERNAL_SERVICE_TOKEN_SOURCE_FILE
+    reason: not-an-env-var
+    note: >-
+      start-services.sh:172 — a local snapshot of the caller-supplied INTERNAL_SERVICE_TOKEN_FILE.
+
+  - name: COMPAT_IMAGE
+    reason: not-an-env-var
+    note: >-
+      prepare-ai-gateway-image.sh:15 — the resolved tag, from AI_GATEWAY_COMPAT_IMAGE.
+
+  - name: SOURCE_IMAGE
+    reason: not-an-env-var
+    note: >-
+      prepare-ai-gateway-image.sh — the upstream tag the compat image is built from.
+
+  - name: DOCKERFILE
+    reason: not-an-env-var
+    note: >-
+      prepare-ai-gateway-image.sh — a path to the generated Dockerfile.
+
+  - name: ENV_FILE
+    reason: not-an-env-var
+    note: >-
+      with-dev-env.sh — the .env path the wrapper sources before exec.
+
+  - name: PRIV_KEY
+    reason: not-an-env-var
+    note: >-
+      init-secrets.sh — a path to the generated session-JWT private key.
+
+  - name: PUB_KEY
+    reason: not-an-env-var
+    note: >-
+      init-secrets.sh — its public half.
+  # ---------------------------------------------------------------------------
+  # wired-elsewhere — real variables consumed outside the two scanned configs.
+  # ---------------------------------------------------------------------------
+
+  - name: HOME
+    reason: wired-elsewhere
+    site: services/harness-server/src/sandbox/local/runtime.ts
+    note: >-
+      Written, not read. The local runtime builds the sandbox environment from scratch and sets
+      HOME to the session working directory (runtime.ts:380); the agent process reads it. An
+      earlier entry claimed this repo "neither sets nor reads it", which the code contradicts.
+
+  - name: ORCA_RUNNER_WORKSPACE
+    reason: wired-elsewhere
+    site: packages/harness-tunnel/src/identity.ts
+    note: >-
+      The workspace-selection variable for a dialing runner. Its name constant
+      (RUNNER_WORKSPACE_ENV_VAR) is exported from packages/harness-tunnel and set on the runner
+      environment by the launcher, then read during the dial handshake — not by a scanned config.
+
+  - name: TMPDIR
+    reason: wired-elsewhere
+    site: services/harness-server/src/sandbox/local/runtime.ts
+    note: >-
+      Same: set to the session temp directory at runtime.ts:381, consumed inside the sandbox.
+
+  - name: TMP
+    reason: wired-elsewhere
+    site: services/harness-server/src/sandbox/local/runtime.ts
+    note: >-
+      The second spelling, set to the same directory at runtime.ts:382 so tools that only honour
+      TMP land in the confined path too.
+
+  - name: TEMP
+    reason: wired-elsewhere
+    site: services/harness-server/src/sandbox/local/runtime.ts
+    note: >-
+      The third spelling, set at runtime.ts:383 for the same reason.
+
+  - name: ORCA_GIT_CREDS_URL
+    reason: wired-elsewhere
+    site: services/harness-server/src/runner/dispatcher.ts
+    note: >-
+      Harness sets it into the sandbox environment and writes it to
+      /etc/profile.d/orca-git-creds.sh; the image's git credential helper reads it, not this repo.
+
+  - name: ORCA_GIT_CREDS_TOKEN
+    reason: wired-elsewhere
+    site: services/harness-server/src/runner/dispatcher.ts
+    note: >-
+      The scoped session JWT injected alongside ORCA_GIT_CREDS_URL, read by the same in-image
+      helper.
+
+  - name: ORCA_TRUSTED_SANDBOX_REPOSITORIES
+    reason: wired-elsewhere
+    site: charts/opensandbox-patches/files/batchsandbox_provider.py
+    note: >-
+      Operator-owned exact repository + entrypoint policy, read by the OpenSandbox Python patch
+      through _TRUSTED_REPOSITORIES_ENV. Unset uses official repositories; [] disables them.
+
+  - name: ORCA_TRUSTED_SANDBOX_REPOSITORY_PREFIXES
+    reason: wired-elsewhere
+    site: charts/opensandbox-patches/files/batchsandbox_provider.py
+    note: >-
+      Registry/namespace prefixes the official sandbox images are trusted under, read by the
+      OpenSandbox Python patch through _TRUSTED_REPOSITORY_PREFIXES_ENV. Unset trusts the release
+      registry; it cannot be combined with ORCA_TRUSTED_SANDBOX_REPOSITORIES.
+
+  - name: ORCA_TRUSTED_SANDBOX_WORKLOADS
+    reason: wired-elsewhere
+    site: charts/opensandbox-patches/files/batchsandbox_provider.py
+    note: >-
+      Additive legacy exact image + entrypoint policy, read by the OpenSandbox patch as
+      _TRUSTED_WORKLOADS_ENV — another name-constant indirection. The chart's ConfigMap template and
+      values.yaml name it only in comments, so neither is the consumer.
+
+  - name: ORCA_REGISTRY_URL
+    reason: wired-elsewhere
+    site: charts/orca-managed-agents/templates/deployment-toolset.yaml
+    note: >-
+      Registry host root handed to the toolset pod's `ork` CLI (ghcr.io/orca-ae/orca-cli) through
+      its container env; the CLI reads it, no service in this repo does.
+
+  - name: ORCA_ACCESS_TOKEN
+    reason: wired-elsewhere
+    site: charts/orca-managed-agents/templates/deployment-toolset.yaml
+    note: >-
+      The toolset pod's workspace credential, sourced from a secret into the same container env and
+      read by the `ork` CLI rather than by anything here.
+
+  - name: DOCKERHUB_USERNAME
+    reason: wired-elsewhere
+    site: .github/workflows/release-images.yml
+    note: >-
+      CI-only credential for the optional Docker Hub mirror job; never read by a service.
+
+  - name: DOCKERHUB_TOKEN
+    reason: wired-elsewhere
+    site: .github/workflows/release-images.yml
+    note: >-
+      The paired secret for DOCKERHUB_USERNAME, used only by the mirror job.
+
+  - name: DOCKERHUB_NAMESPACE
+    reason: wired-elsewhere
+    site: .github/workflows/release-images.yml
+    note: >-
+      Repository variable naming the Docker Hub namespace the optional mirror job copies releases
+      into; the mirror runs only when it is set. CI-only.
+
+  # ---------------------------------------------------------------------------
+  # wired-elsewhere, test-only — read by smoke, integration, or e2e suites and
+  # nothing else. Test files are not scanned for wiring (see `isWired`), so
+  # each is declared here with one concrete reader.
+  # ---------------------------------------------------------------------------
+
+  - name: LITEFUSE_OTLP_ENDPOINT
+    reason: wired-elsewhere
+    site: services/observability-exporter/test/support/litefuse.ts
+    note: >-
+      Explicit real-Litefuse smoke endpoint. Both smoke commands are excluded from default tests and
+      no production exporter runtime reads this test-only variable.
+
+  - name: LITEFUSE_PUBLIC_KEY
+    reason: wired-elsewhere
+    site: services/observability-exporter/test/support/litefuse.ts
+    note: >-
+      Litefuse project public key used only by the opt-in real smokes. Default tests use a mock
+      server and no production exporter runtime reads this test-only variable.
+
+  - name: LITEFUSE_SECRET_KEY
+    reason: wired-elsewhere
+    site: services/observability-exporter/test/support/litefuse.ts
+    note: >-
+      Litefuse project secret key used only by the opt-in real smokes. Default tests use a mock
+      server and no production exporter runtime reads this test-only variable.
+
+  - name: LITEFUSE_SMOKE_RUN_ID
+    reason: wired-elsewhere
+    site: services/observability-exporter/test/smoke/litefuse.smoke.spec.ts
+    note: >-
+      Optional run namespace for deterministic smoke trace identities; random when omitted.
+
+  - name: LITEFUSE_SMOKE_TIMEOUT_MS
+    reason: wired-elsewhere
+    site: services/observability-exporter/test/support/litefuse.ts
+    note: >-
+      Optional bounded deadline for polling the Litefuse Observations API during the smoke.
+
+  - name: LITEFUSE_SMOKE_RESOLVED_IP
+    reason: wired-elsewhere
+    site: services/observability-exporter/test/smoke/litefuse-vertical.smoke.spec.ts
+    note: >-
+      Optional test-only public A/AAAA result for hosts using fake-IP DNS. The durable smoke still
+      applies hardened address admission and TLS hostname verification; production runtime never
+      reads it.
+
+  - name: OBSERVABILITY_EXPORTER_TEST_ADMIN_DATABASE_URL
+    reason: wired-elsewhere
+    site: services/observability-exporter/test/smoke/litefuse-vertical.smoke.spec.ts
+    note: >-
+      Test-only Postgres admin connection used by both durable exporter integration specs and the
+      Litefuse vertical smoke to create and drop isolated databases; no production runtime reads it.
+
+  - name: ORCA_ADMIN_BASE_URL
+    reason: wired-elsewhere
+    site: packages/e2e-tests/test/multi-workspace-isolation.spec.ts
+    note: >-
+      Organization-admin listener the multi-workspace e2e provisions through; no service reads it.
+
+  - name: ORCA_HARNESS_BASE_URL
+    reason: wired-elsewhere
+    site: packages/e2e-tests/test/real-agent-loop.spec.ts
+    note: >-
+      Harness health endpoint the real-agent e2e polls to confirm warm-runner teardown.
+
+  - name: ORCA_E2E_BUDGET_MODEL
+    reason: wired-elsewhere
+    site: packages/e2e-tests/test/guardrails-budget-agent.spec.ts
+    note: >-
+      Priced model selected by the opt-in real-provider budget smoke; no production config reads it.
+
+  - name: ORCA_SPEND_POSTGRES_ADMIN_URL
+    reason: wired-elsewhere
+    site: packages/e2e-tests/test/spend-stack-helpers.ts
+    note: >-
+      Test infrastructure connection used to create and drop the deterministic spend suite's owned databases.
+
+  - name: ORCA_SPEND_S3_ENDPOINT
+    reason: wired-elsewhere
+    site: packages/e2e-tests/test/spend-stack-helpers.ts
+    note: >-
+      S3-compatible endpoint for the deterministic spend suite's owned storage buckets.
+
+  - name: ORCA_SPEND_S3_ACCESS_KEY_ID
+    reason: wired-elsewhere
+    site: packages/e2e-tests/test/spend-stack-helpers.ts
+    note: >-
+      Test infrastructure credential used by the deterministic spend fixture to manage its own buckets.
+
+  - name: ORCA_SPEND_S3_SECRET_ACCESS_KEY
+    reason: wired-elsewhere
+    site: packages/e2e-tests/test/spend-stack-helpers.ts
+    note: >-
+      Test infrastructure credential paired with the spend fixture's S3 access key.
+
+  - name: AI_GATEWAY_E2E_UPSTREAM_HOST
+    reason: wired-elsewhere
+    site: packages/e2e-tests/test/ai-gateway-mcp.spec.ts
+    note: >-
+      Hostname written into MCP destinations so the containerised gateway can reach the fake
+      upstream; only the e2e sets it.
+
+  - name: GITHUB_TOKEN
+    reason: wired-elsewhere
+    site: packages/e2e-tests/test/sandbox-harness-agent.spec.ts
+    note: >-
+      Session attachment token the sandbox-harness e2e uses to clone a public repository through
+      the scoped credential helper.
+
+  - name: ORCA_MANAGED_PROBE_WORK_DIR
+    reason: wired-elsewhere
+    site: packages/sandbox-runtime/test/integration/managed-local-probe.mjs
+    note: >-
+      Standalone Linux isolation probe workspace; CI uses the real Environment workspace.
+
+  - name: ORCA_EXPECT_TMPFS_REJECTION
+    reason: wired-elsewhere
+    site: packages/sandbox-runtime/test/integration/managed-local-probe.mjs
+    note: >-
+      Enables the pinned gVisor tmpfs rejection regression in the standalone Linux probe.
+
+  - name: ORCA_SANDBOX_RUNTIME_ENTRY
+    reason: wired-elsewhere
+    site: packages/sandbox-runtime/test/integration/managed-local-probe.mjs
+    note: >-
+      Standalone Linux isolation probe override selecting the deployed sandbox-runtime entry;
+      a test knob, never read by a service.
+
+  - name: CODEX_TEST_GATEWAY_BINARY
+    reason: wired-elsewhere
+    site: packages/codex-harness/test/support/responses-fixture.ts
+    note: Optional locally built Gateway executable for SDK to Gateway HTTP integration tests.
+
+  # ---------------------------------------------------------------------------
+  # Single-token identifiers. The phantom check stopped skipping these when
+  # `PORT` became a real declared variable and a stale doc for it would have
+  # gone unnoticed. Each of the following is genuinely not an env var this
+  # repo owns — an HTTP verb, a SQL keyword, a capability, or a POSIX variable
+  # the OS provides.
+  # ---------------------------------------------------------------------------
+
+  - name: CREATEDB
+    reason: not-an-env-var
+    note: >-
+      PostgreSQL role attribute required to create the deterministic spend suite's isolated databases.
+
+  - name: DELETE
+    reason: not-an-env-var
+    note: >-
+      HTTP method, in the harness-modes route table.
+
+  - name: LISTEN
+    reason: not-an-env-var
+    note: >-
+      Postgres command, in the kubernetes doc describing NOTIFY-based wakeups.
+
+  - name: NOTIFY
+    reason: not-an-env-var
+    note: >-
+      Postgres command, its counterpart in the same paragraph.
+
+  - name: INSERT
+    reason: not-an-env-var
+    note: >-
+      SQL keyword, in the file-store doc describing dedup.
+
+  - name: CONCURRENTLY
+    reason: not-an-env-var
+    note: >-
+      Postgres index-build modifier, in event-processing-semantics.
+
+  - name: ACCEPTED
+    reason: not-an-env-var
+    note: >-
+      An event state in event-processing-semantics, not a variable.
+
+  - name: STRICT
+    reason: not-an-env-var
+    note: >-
+      Istio's mTLS peer-authentication mode, named in architecture.md when describing transport
+      security between services. A mesh setting, not a variable this repo reads.
+
+  - name: SETFCAP
+    reason: not-an-env-var
+    note: >-
+      A Linux capability, in the kubernetes and OpenSandbox securityContext docs.
+
+  # ---------------------------------------------------------------------------
+  # intentionally-absent — documented so that the *absence* is the claim. The
+  # gate fails if a config ever starts reading one of these.
+  # ---------------------------------------------------------------------------
+
+  - name: HARNESS_REGISTRY_API_KEY
+    reason: intentionally-absent
+    note: >-
+      multi-workspace-isolation.md states harness never owns or receives a workspace API key, and
+      names this variable to say it does not exist. Reading it would break that isolation claim.
+
+  - name: CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK
+    reason: intentionally-absent
+    note: >-
+      harness-modes.md notes the fast-mode wire test runs without this SDK escape hatch, which is
+      what makes it a real assertion about the SDK rather than about our own bypass.
+
+  - name: HTTP_PROXY
+    reason: intentionally-absent
+    note: >-
+      mcp-routing.md documents it as deliberately unused — Node's native fetch ignores it, so MCP
+      egress does not honour it. Setting it would imply a routing guarantee we do not make.
+
+  - name: HTTPS_PROXY
+    reason: intentionally-absent
+    note: >-
+      The TLS counterpart of HTTP_PROXY, unused for the same reason.

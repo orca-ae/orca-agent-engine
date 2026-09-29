@@ -1,0 +1,57 @@
+{
+  "name": "orca-managed-agents",
+  "private": true,
+  "version": "0.0.0",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": "^22.21.0 || >=24.9.0",
+    "pnpm": ">=9.0.0 <10"
+  },
+  "scripts": {
+    "build": "pnpm -r build",
+    "test": "pnpm -r --filter=!@orca/e2e-tests test",
+    "coverage": "node scripts/merge-coverage.mjs",
+    "coverage:report": "node scripts/merge-coverage.mjs --report-only",
+    "coverage:update": "node scripts/merge-coverage.mjs --update",
+    "coverage:clean": "rm -rf coverage packages/*/coverage services/*/coverage",
+    "lint": "pnpm -r lint && eslint 'scripts/**/*.mjs'",
+    "format": "prettier --write --no-error-on-unmatched-pattern '{services,scripts,packages/{agent-event-contract,sandbox-runtime,cloud-sandbox,harness-tunnel,transcript-store-types}}/**/*.{ts,tsx,mjs,json,md,yaml}'",
+    "format:check": "prettier --check --no-error-on-unmatched-pattern '{services,scripts,packages/{agent-event-contract,sandbox-runtime,cloud-sandbox,harness-tunnel,transcript-store-types}}/**/*.{ts,tsx,mjs,json,md,yaml}'",
+    "docs:env-check": "node scripts/check-env-docs.mjs",
+    "license:check": "node scripts/check-license-headers.mjs",
+    "test:chart:render": "node --test charts/orca-managed-agents/test/*.test.mjs",
+    "test:chart:secret-store-upgrade": "bash charts/orca-managed-agents/test/secret-store-upgrade-kind.sh",
+    "proto:gen": "pnpm -r proto:gen",
+    "anthropic:sync": "pnpm -F @orca/registry-service-ts anthropic:sync",
+    "openapi:gen": "pnpm -F @orca/registry-service-ts openapi:gen",
+    "conformance:gen": "pnpm -F @orca/registry-service-ts conformance:gen",
+    "proto:lint": "buf lint services",
+    "proto:breaking": "buf breaking services --against '.git#branch=master,subdir=services'",
+    "e2e:wire": "pnpm -F @orca/e2e-tests test:wire",
+    "e2e:gateway": "pnpm -F @orca/e2e-tests test:gateway",
+    "e2e:self-hosted": "pnpm -F @orca/e2e-tests test:self-hosted",
+    "e2e:agent": "pnpm -F @orca/e2e-tests test:agent",
+    "e2e:agent:sandbox": "pnpm -F @orca/e2e-tests test:agent:sandbox",
+    "e2e:kind-helm": "pnpm -F @orca/e2e-tests kind-helm",
+    "e2e:spend": "pnpm -F @orca/e2e-tests test:spend"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.0.0",
+    "@types/node": "^22.0.0",
+    "eslint": "^9.0.0",
+    "eslint-config-prettier": "^9.1.0",
+    "istanbul-lib-coverage": "^3.2.2",
+    "istanbul-lib-report": "^3.0.1",
+    "istanbul-reports": "^3.1.7",
+    "js-yaml": "^4.1.1",
+    "prettier": "^3.3.0",
+    "typescript": "^5.5.0",
+    "typescript-eslint": "^8.0.0"
+  },
+  "pnpm": {
+    "patchedDependencies": {
+      "pulsar-client@1.17.0": "patches/pulsar-client@1.17.0.patch"
+    }
+  }
+}

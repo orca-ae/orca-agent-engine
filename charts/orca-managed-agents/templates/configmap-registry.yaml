@@ -1,0 +1,92 @@
+{{- $observabilityExporterServiceAccountName := include "orca-managed-agents.observabilityExporterServiceAccountName" . -}}
+{{- $registryUsage := .Values.aiGateway.registryUsage | default (dict) -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "orca-managed-agents.fullname" . }}-registry-config
+  labels:
+    {{- include "orca-managed-agents.labels" . | nindent 4 }}
+data:
+  NODE_ENV: production
+  HTTP_PORT: {{ .Values.registry.httpPort | quote }}
+  INTERNAL_HTTP_PORT: {{ .Values.registry.internalHttpPort | quote }}
+  ADMIN_HTTP_PORT: {{ .Values.registry.adminHttpPort | quote }}
+  TRUST_PROXY_CIDRS: {{ join "," (default (list) .Values.registry.trustedProxyCidrs) | quote }}
+  INTERNAL_AUTH_MODE: {{ .Values.internalAuth.mode | quote }}
+  INTERNAL_AUTH_AUDIENCE: {{ .Values.internalAuth.audience | quote }}
+  INTERNAL_AUTH_HARNESS_SUBJECT: {{ printf "system:serviceaccount:%s:%s" .Release.Namespace (include "orca-managed-agents.harnessServiceAccountName" .) | quote }}
+  INTERNAL_AUTH_AI_GATEWAY_SUBJECT: {{ printf "system:serviceaccount:%s:%s" .Release.Namespace (include "orca-managed-agents.aiGatewayServiceAccountName" .) | quote }}
+  {{- if or .Values.registry.aiGatewayMcpUrl .Values.harness.aiGatewayUrl .Values.registry.aiGatewayLlmUrl .Values.aiGateway.openai.enabled .Values.aiGateway.anthropic.enabled .Values.aiGateway.deepseek.enabled (not (empty .Values.aiGateway.piProviders)) }}
+  {{- $mcpUrl := regexReplaceAll "/+$" (default (include "orca-managed-agents.aiGatewayMcpUrl" .) .Values.harness.aiGatewayUrl) "" }}
+  {{- if not (hasSuffix "/v1/mcp" $mcpUrl) }}
+  {{- $mcpUrl = printf "%s/v1/mcp" $mcpUrl }}
+  {{- end }}
+  AI_GATEWAY_MCP_URL: {{ default $mcpUrl .Values.registry.aiGatewayMcpUrl | quote }}
+  {{- end }}
+  {{- if or .Values.registry.aiGatewayLlmUrl .Values.aiGateway.openai.enabled .Values.aiGateway.anthropic.enabled .Values.aiGateway.deepseek.enabled (not (empty .Values.aiGateway.piProviders)) }}
+  AI_GATEWAY_LLM_URL: {{ default (printf "%s/v1" (include "orca-managed-agents.aiGatewayMcpUrl" .)) .Values.registry.aiGatewayLlmUrl | quote }}
+  {{- end }}
+  AI_GATEWAY_REGISTRY_USAGE_ENABLED: {{ dig "enabled" false $registryUsage | quote }}
+  INTERNAL_AUTH_OBSERVABILITY_EXPORTER_SUBJECT: {{ printf "system:serviceaccount:%s:%s" .Release.Namespace $observabilityExporterServiceAccountName | quote }}
+  GRPC_PORT: {{ .Values.registry.grpcPort | quote }}
+  OIDC_ALLOWED_ISSUERS: {{ .Values.registry.oidcAllowedIssuers | quote }}
+  OIDC_AUDIENCE: {{ .Values.registry.oidcAudience | quote }}
+  ADMIN_OIDC_ALLOWED_ISSUERS: {{ .Values.registry.adminOidcAllowedIssuers | quote }}
+  ADMIN_OIDC_AUDIENCE: {{ .Values.registry.adminOidcAudience | quote }}
+  PLATFORM_OIDC_ALLOWED_ISSUERS: {{ .Values.registry.platformOidcAllowedIssuers | quote }}
+  PLATFORM_OIDC_AUDIENCE: {{ .Values.registry.platformOidcAudience | quote }}
+  OIDC_METADATA_CLAIMS: {{ .Values.registry.oidcMetadataClaims | quote }}
+  ADMIN_OIDC_METADATA_CLAIMS: {{ .Values.registry.adminOidcMetadataClaims | quote }}
+  PLATFORM_OIDC_METADATA_CLAIMS: {{ .Values.registry.platformOidcMetadataClaims | quote }}
+  OIDC_RESOLVE_WORKSPACE_BY_AUDIENCE: {{ .Values.registry.oidcResolveWorkspaceByAudience | quote }}
+  TRANSCRIPT_STORE_BACKEND: {{ .Values.transcriptStore.backend | quote }}
+  DATABASE_POOL_MAX: {{ .Values.databasePools.registryMax | quote }}
+  TRANSCRIPT_STORE_POOL_MAX: {{ .Values.databasePools.transcriptStoreMax | quote }}
+  FILESTORE_POOL_MAX: {{ .Values.databasePools.fileStoreMax | quote }}
+  MEMORYSTORE_POOL_MAX: {{ .Values.databasePools.memoryStoreMax | quote }}
+  KAFKA_BROKERS: {{ .Values.transcriptStore.kafka.brokers | quote }}
+  KAFKA_CONNECTION_MODE: {{ .Values.transcriptStore.kafka.connectionMode | quote }}
+  KAFKA_TOPIC_PREFIX: {{ .Values.transcriptStore.kafka.topicPrefix | quote }}
+  KAFKA_SSL: {{ .Values.transcriptStore.kafka.ssl | quote }}
+  KAFKA_SSL_REJECT_UNAUTHORIZED: {{ .Values.transcriptStore.kafka.sslRejectUnauthorized | quote }}
+  KAFKA_SSL_CA_FILE: {{ .Values.transcriptStore.kafka.sslCaFile | quote }}
+  KAFKA_SSL_CERT_FILE: {{ .Values.transcriptStore.kafka.sslCertFile | quote }}
+  KAFKA_SSL_KEY_FILE: {{ .Values.transcriptStore.kafka.sslKeyFile | quote }}
+  KAFKA_SASL_MECHANISM: {{ .Values.transcriptStore.kafka.saslMechanism | quote }}
+  {{- include "orca-managed-agents.kafkaTranscriptEncoding" . | nindent 2 }}
+  PULSAR_SERVICE_URL: {{ .Values.transcriptStore.pulsar.serviceUrl | quote }}
+  PULSAR_TENANT: {{ .Values.transcriptStore.pulsar.tenant | quote }}
+  PULSAR_NAMESPACE: {{ .Values.transcriptStore.pulsar.namespace | quote }}
+  PULSAR_TOPIC_PREFIX: {{ .Values.transcriptStore.pulsar.topicPrefix | quote }}
+  PULSAR_AUTH_TYPE: {{ .Values.transcriptStore.pulsar.authType | quote }}
+  PULSAR_OAUTH2_ISSUER_URL: {{ .Values.transcriptStore.pulsar.oauth2IssuerUrl | quote }}
+  PULSAR_OAUTH2_CLIENT_ID: {{ .Values.transcriptStore.pulsar.oauth2ClientId | quote }}
+  PULSAR_OAUTH2_AUDIENCE: {{ .Values.transcriptStore.pulsar.oauth2Audience | quote }}
+  PULSAR_OAUTH2_SCOPE: {{ .Values.transcriptStore.pulsar.oauth2Scope | quote }}
+  PULSAR_OAUTH2_TYPE: {{ .Values.transcriptStore.pulsar.oauth2Type | quote }}
+  SSE_BUFFER_SIZE: {{ .Values.registry.sse.bufferSize | quote }}
+  SSE_DROP_AGE_MS: {{ .Values.registry.sse.dropAgeMs | quote }}
+  SSE_HEARTBEAT_MS: {{ .Values.registry.sse.heartbeatMs | quote }}
+  TRIGGER_SCHEDULER_ENABLED: {{ .Values.registry.triggerScheduler.enabled | quote }}
+  TRIGGER_RECONCILE_INTERVAL_MS: {{ .Values.registry.triggerScheduler.reconcileIntervalMs | quote }}
+  TRIGGER_RECONCILE_BATCH_SIZE: {{ .Values.registry.triggerScheduler.batchSize | quote }}
+  SESSION_JWT_ISSUER: {{ .Values.sessionJwt.issuer | quote }}
+  SESSION_JWT_AUDIENCE: {{ .Values.sessionJwt.audience | quote }}
+  SESSION_JWT_TTL_SECS: {{ .Values.sessionJwt.ttlSecs | quote }}
+  {{- if or .Values.sessionJwt.llmRoutes .Values.sessionJwt.llmModels }}
+  {{- if not (and .Values.sessionJwt.llmRoutes .Values.sessionJwt.llmModels) }}
+  {{- fail "sessionJwt.llmRoutes and sessionJwt.llmModels must be configured together" }}
+  {{- end }}
+  SESSION_JWT_LLM_ROUTES: {{ join "," .Values.sessionJwt.llmRoutes | quote }}
+  SESSION_JWT_LLM_MODELS: {{ join "," .Values.sessionJwt.llmModels | quote }}
+  {{- end }}
+  S3_ENDPOINT: {{ .Values.objectStorage.endpoint | quote }}
+  S3_FORCE_PATH_STYLE: {{ .Values.objectStorage.forcePathStyle | quote }}
+  S3_BUCKET: {{ .Values.objectStorage.bucket | quote }}
+  S3_REGION: {{ .Values.objectStorage.region | quote }}
+  S3_KEY_PREFIX: {{ .Values.objectStorage.keyPrefix | quote }}
+  ORCA_SECRET_STORE_MODE: {{ .Values.secretStore.mode | quote }}
+  {{- if eq .Values.secretStore.mode "kubernetes" }}
+  ORCA_SECRET_STORE_K8S_NAMESPACE: {{ .Release.Namespace | quote }}
+  ORCA_SECRET_STORE_K8S_SECRET_NAME: {{ include "orca-managed-agents.secretStoreName" . | quote }}
+  {{- end }}

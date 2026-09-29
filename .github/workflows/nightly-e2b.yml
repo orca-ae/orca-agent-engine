@@ -1,0 +1,178 @@
+# Copyright The Orca Authors
+# SPDX-License-Identifier: Apache-2.0
+
+name: nightly-e2b
+on:
+  # 7 AM UTC = midnight Pacific, after the other scheduled workflows
+  # (e2e-stack 03:00, e2e-kind-helm 04:00, nightly-anthropic-spec 06:00). The
+  # job runs the E2B-gated integration tests (file FUSE / memory FUSE / github
+  # clone) once a day on main so the mount paths stay exercised against a real
+  # sandbox without paying the E2B cost on every PR.
+  schedule:
+    - cron: '0 7 * * *'
+  # Manual trigger for ad-hoc runs after a template rebuild — no need to wait
+  # for the next nightly tick when validating a `e2b template push`.
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  e2b-fuse:
+    runs-on: ubuntu-latest
+    # `concurrency` keeps two manual triggers from spawning a parallel sandbox
+    # against the same E2B account quota. `cancel-in-progress: false` so a
+    # human-triggered manual run replaces the scheduled one cleanly.
+    concurrency:
+      group: nightly-e2b
+      cancel-in-progress: false
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: orca
+          POSTGRES_PASSWORD: orca
+          POSTGRES_DB: registry
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U orca"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+      kafka:
+        image: apache/kafka:3.7.1
+        ports:
+          - 9092:9092
+        env:
+          KAFKA_NODE_ID: 1
+          KAFKA_PROCESS_ROLES: broker,controller
+          KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+          KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+          KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+          KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+          KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+          KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+          KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+          KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+          KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+          KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+          KAFKA_NUM_PARTITIONS: 1
+          KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+          KAFKA_MIN_INSYNC_REPLICAS: 1
+          CLUSTER_ID: 'MkU3OEVBNTcwNTJENDM2Qk'
+        options: >-
+          --health-cmd "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 || exit 1"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 50
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+      - uses: bufbuild/buf-action@v1
+        with: { setup_only: true }
+      - run: bash .github/scripts/pnpm-install-with-retry.sh
+      - run: pnpm proto:gen
+      - run: pnpm -r build
+      - name: Wait for Kafka readiness
+        run: |
+          for i in {1..30}; do
+            if nc -z localhost 9092; then
+              echo "Kafka port 9092 is open."
+              break
+            fi
+            echo "Waiting for Kafka... attempt $i"
+            sleep 2
+          done
+      - name: Create per-service databases
+        run: |
+          PGPASSWORD=orca psql -h localhost -U orca -d registry -c 'CREATE DATABASE filestore' || true
+          PGPASSWORD=orca psql -h localhost -U orca -d registry -c 'CREATE DATABASE memorystore' || true
+      - name: Start RustFS + create bucket
+        # RustFS is only used here for blob seeding + the OutputIndexer's
+        # ListObjectsV2 sweep — the E2B sandbox itself does NOT reach this
+        # RustFS instance (it's in E2B's network and would need a publicly
+        # reachable S3 endpoint). It starts, and gets its bucket, exactly as
+        # in test-ts.yml's integration job.
+        run: |
+          docker run -d --name rustfs --network host \
+            -e RUSTFS_ACCESS_KEY=minioadmin \
+            -e RUSTFS_SECRET_KEY=minioadmin \
+            -e RUSTFS_OBS_LOG_STDOUT_ENABLED=true \
+            rustfs/rustfs:1.0.0
+          for i in {1..30}; do
+            if curl -fsS http://localhost:9000/health/ready; then
+              echo "RustFS is ready."
+              break
+            fi
+            echo "Waiting for RustFS... attempt $i"
+            sleep 2
+          done
+          docker run --rm --network host \
+            -e RC_HOST_local=http://minioadmin:minioadmin@localhost:9000 \
+            rustfs/rc:v0.1.36 mb --ignore-existing local/orca-files
+      - name: Apply file-store migrations
+        env:
+          FILESTORE_DATABASE_URL: postgres://orca:orca@localhost:5432/filestore
+        run: pnpm -F @orca/file-store db:migrate
+      - name: Smoke-check orca-default template capabilities
+        # The spike script self-skips with exit 0 when E2B_API_KEY /
+        # E2B_TEMPLATE_ID are unset (so this step never blocks the workflow on
+        # a fork without secrets). When both are set, it runs the full
+        # capability matrix (s3fs, sudoers, CAP_SYS_ADMIN, orca-git-creds) so
+        # a regression in the template's image surfaces here BEFORE we waste
+        # ~10 minutes on the mount-tests step. continue-on-error keeps the
+        # workflow green if the smoke fails — the per-spec gates surface the
+        # detail.
+        continue-on-error: true
+        env:
+          E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
+          E2B_TEMPLATE_ID: ${{ secrets.E2B_TEMPLATE_ID }}
+        run: pnpm -F @orca/harness-server exec tsx scripts/spike-orca-default.ts
+      - name: Run E2B-gated mount tests (file + memory + github)
+        # All three specs use `describe.skipIf(...)` to no-op when the relevant
+        # env vars are absent. Without S3_PUBLIC_* secrets, the file/memory
+        # specs skip with a clear warn (the github spec runs against
+        # github.com/octocat/Hello-World, which is public + unauth'd). Without
+        # E2B_API_KEY / E2B_TEMPLATE_ID, all three skip. Running the trio
+        # sequentially in one job is cheaper than three parallel jobs because
+        # the Postgres + Kafka + RustFS services are reused, and each test
+        # boots its own E2B sandbox anyway.
+        env:
+          KAFKA_BROKERS: localhost:9092
+          DATABASE_URL: postgres://orca:orca@localhost:5432/registry
+          FILESTORE_DATABASE_URL: postgres://orca:orca@localhost:5432/filestore
+          MEMORYSTORE_DATABASE_URL: postgres://orca:orca@localhost:5432/memorystore
+          S3_ENDPOINT: http://localhost:9000
+          S3_BUCKET: orca-files
+          S3_ACCESS_KEY: minioadmin
+          S3_SECRET_KEY: minioadmin
+          S3_PUBLIC_ENDPOINT: ${{ secrets.S3_PUBLIC_ENDPOINT }}
+          S3_PUBLIC_BUCKET: ${{ secrets.S3_PUBLIC_BUCKET }}
+          S3_PUBLIC_REGION: ${{ secrets.S3_PUBLIC_REGION }}
+          S3_PUBLIC_ACCESS_KEY_ID: ${{ secrets.S3_PUBLIC_ACCESS_KEY_ID }}
+          S3_PUBLIC_SECRET_ACCESS_KEY: ${{ secrets.S3_PUBLIC_SECRET_ACCESS_KEY }}
+          E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
+          E2B_TEMPLATE_ID: ${{ secrets.E2B_TEMPLATE_ID }}
+        run: |
+          pnpm -F @orca/harness-server exec vitest run \
+            -c vitest.integration.config.ts \
+            test/integration/file-prefetch-outputs-e2b.spec.ts \
+            test/integration/memory-fuse-strategy-e2b.spec.ts \
+            test/integration/github-repo-strategy-e2b.spec.ts \
+            --reporter=basic
+
+  # Until this existed, a red nightly was invisible: nothing opens the Actions
+  # tab on a schedule, and this workflow has no other failure handling at all.
+  # The `event_name` clause is redundant here — there is no `pull_request`
+  # trigger — but it is kept so all four call sites of the action read alike.
+  notify-failure:
+    needs: e2b-fuse
+    if: ${{ always() && needs.e2b-fuse.result == 'failure' && github.event_name != 'pull_request' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/notify-slack-failure
+        with:
+          webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}

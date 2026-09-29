@@ -1,0 +1,21 @@
+# Copyright The Orca Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# e2b.toml — Orca Environment E2B template config.
+#
+# Build (from services/environment-image/, needs the E2B CLI + `e2b auth login`):
+#   e2b template build
+# Result: a template id → set it as the registry's E2B_ENVIRONMENT_TEMPLATE_ID.
+#
+# This template is `FROM` the pre-built-and-pushed Orca Environment image via
+# e2b.Dockerfile (E2B builds with THIS directory as context and cannot see the
+# monorepo, so the heavy build happens once via the main Dockerfile — see
+# README.md). Tune cpu_count / memory_mb to your E2B plan and workload; the
+# start command just keeps the box alive so the registry launcher can exec the
+# worker in.
+
+template_name = "orca-environment"
+dockerfile = "e2b.Dockerfile"
+start_cmd = "sleep infinity"
+cpu_count = 2
+memory_mb = 2048

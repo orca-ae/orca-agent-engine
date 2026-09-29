@@ -1,0 +1,22 @@
+{{- if .Values.registry.istio.enabled -}}
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: {{ include "orca-managed-agents.registryServiceName" . }}
+  labels:
+    {{- include "orca-managed-agents.labels" . | nindent 4 }}
+    app.kubernetes.io/component: registry
+spec:
+  hosts:
+    - {{ .Values.registry.istio.host | quote }}
+  gateways:
+    # Namespace-qualified because the Gateway lives in the gateway workload's
+    # namespace while this VirtualService stays in the release namespace.
+    - {{ printf "%s/%s" .Values.registry.istio.gatewayNamespace (include "orca-managed-agents.registryServiceName" .) }}
+  http:
+    - route:
+        - destination:
+            host: {{ include "orca-managed-agents.registryServiceName" . }}
+            port:
+              number: {{ .Values.registry.service.port }}
+{{- end }}

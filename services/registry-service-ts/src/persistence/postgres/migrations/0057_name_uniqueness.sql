@@ -1,0 +1,2 @@
+CREATE UNIQUE INDEX "organizations_name_idx" ON "organizations" USING btree ("name");--> statement-breakpoint
+CREATE UNIQUE INDEX "workspaces_organization_name_idx" ON "workspaces" USING btree ("organization_id","name");

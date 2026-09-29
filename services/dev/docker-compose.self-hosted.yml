@@ -1,0 +1,85 @@
+# Copyright The Orca Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# Minimal self-hosted dev stack: Postgres + RustFS ONLY.
+#
+# This is the infra footprint for the SELF-HOSTED path (worker → claim → spawn
+# runner → run agent → single-writer events → client SSE). That path does NOT
+# need Kafka/Pulsar or the ai-gateway:
+#   - the registry runs with TRANSCRIPT_STORE_BACKEND=postgres, so the durable
+#     transcript log is a Postgres table (no broker);
+#   - the session-runner is OUTBOUND-WSS-ONLY behind a NAT — its conversation
+#     history is the in-memory, tunnel-fed store, so it needs no broker either;
+#   - the e2e drives the LLM-free `mock` provider, so no model credential and no
+#     ai-gateway egress are involved.
+#
+# So this file is deliberately Postgres + RustFS and nothing else. The registry +
+# environment-worker + session-runner run natively on the host (the worker
+# spawns runners with `node`, which container-in-container would complicate),
+# exactly like the hybrid `docker-compose.yml` stack runs registry/harness on
+# the host. See services/dev/scripts/start-self-hosted.sh.
+#
+# Ports, bind mounts and the bucket bootstrap mirror docker-compose.yml so the
+# registry's localhost defaults (5432 / 9000) and the shared `postgres/init.sql`
+# work unchanged. A distinct project name (`-p orca-self-hosted`, set by the
+# start script) keeps these containers from colliding with the full stack's.
+
+networks:
+  orca-self-hosted:
+    driver: bridge
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    networks: [orca-self-hosted]
+    environment:
+      POSTGRES_USER: orca
+      POSTGRES_PASSWORD: orca
+      POSTGRES_DB: orca
+    # Host port is overridable (SELF_HOSTED_POSTGRES_PORT) so this stack can run
+    # alongside another Postgres already bound to 5432. The in-container port is
+    # always 5432; only the published host port changes.
+    ports: ['${SELF_HOSTED_POSTGRES_PORT:-5432}:5432']
+    volumes:
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
+      - ./data/self-hosted/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD', 'pg_isready', '-U', 'orca']
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  rustfs:
+    # Same image, user, environment and healthcheck as docker-compose.yml's
+    # rustfs service, which explains them.
+    image: rustfs/rustfs:1.0.0
+    user: root
+    networks: [orca-self-hosted]
+    environment:
+      RUSTFS_ACCESS_KEY: minioadmin
+      RUSTFS_SECRET_KEY: minioadmin
+      RUSTFS_OBS_LOG_STDOUT_ENABLED: 'true'
+    # Host ports overridable (SELF_HOSTED_RUSTFS_PORT / _CONSOLE_PORT) for the same
+    # coexistence reason as Postgres; in-container ports stay 9000/9001.
+    ports:
+      - '${SELF_HOSTED_RUSTFS_PORT:-9000}:9000'
+      - '${SELF_HOSTED_RUSTFS_CONSOLE_PORT:-9001}:9001'
+    volumes:
+      - ./data/self-hosted/rustfs:/data
+    healthcheck:
+      test: ['CMD', 'curl', '-fsS', 'http://localhost:9000/health/ready']
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  rustfs-bootstrap:
+    # As docker-compose.yml's rustfs-bootstrap: RustFS's own client creates the
+    # bucket, reading the `local` alias from RC_HOST_local.
+    image: rustfs/rc:v0.1.36
+    networks: [orca-self-hosted]
+    depends_on:
+      rustfs:
+        condition: service_healthy
+    environment:
+      RC_HOST_local: http://minioadmin:minioadmin@rustfs:9000
+    command: ['mb', '--ignore-existing', 'local/orca-files']

@@ -1,0 +1,51 @@
+# Copyright The Orca Authors
+# SPDX-License-Identifier: Apache-2.0
+
+name: transcript-avro
+on:
+  push: { branches: [main] }
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: transcript-avro-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      ts: ${{ steps.areas.outputs.ts }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - id: areas
+        run: bash .github/scripts/changed-areas.sh
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+  avro-schema-registry:
+    needs: changes
+    # No trigger paths: a failed classifier runs the test rather than skipping it.
+    if: ${{ !cancelled() && needs.changes.outputs.ts != 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+      - run: bash .github/scripts/pnpm-install-with-retry.sh
+      - run: pnpm --filter @orca/transcript-store... build
+      - run: bash services/dev/scripts/test-transcript-avro.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: transcript-avro-evidence
+          path: services/dev/logs/transcript-avro/
+      - name: Clean isolated fixture
+        if: always()
+        run: bash services/dev/scripts/test-transcript-avro.sh down

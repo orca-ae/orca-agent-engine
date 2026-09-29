@@ -1,0 +1,2 @@
+ALTER TABLE "session_lifecycle_outbox" DROP CONSTRAINT "session_lifecycle_outbox_kind_check";--> statement-breakpoint
+ALTER TABLE "session_lifecycle_outbox" ADD CONSTRAINT "session_lifecycle_outbox_kind_check" CHECK ("session_lifecycle_outbox"."kind" in ('session.archived', 'session.deleted'));

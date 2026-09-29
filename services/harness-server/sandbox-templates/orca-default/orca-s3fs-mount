@@ -1,0 +1,184 @@
+#!/bin/bash -p
+# Copyright The Orca Authors
+# SPDX-License-Identifier: Apache-2.0
+
+set -euo pipefail
+
+readonly SAFE_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+PATH=${SAFE_PATH}
+export PATH
+
+if [[ $# -ne 3 ]]; then
+  echo "usage: orca-s3fs-mount BUCKET[:/PREFIX] MOUNT_PATH OPTIONS" >&2
+  exit 64
+fi
+if [[ ${EUID} -ne 0 ]]; then
+  echo "orca-s3fs-mount must run as root" >&2
+  exit 1
+fi
+
+bucket_and_prefix=$1
+mount_path=$2
+options=$3
+
+if [[ ! ${bucket_and_prefix} =~ ^[A-Za-z0-9][A-Za-z0-9._-]*(:/[A-Za-z0-9._/-]*)?$ ]]; then
+  echo "invalid s3fs bucket/prefix" >&2
+  exit 64
+fi
+if [[ ${bucket_and_prefix} == *':/'* ]]; then
+  prefix=${bucket_and_prefix#*:/}
+  if [[ ${prefix} == /* ||
+    ${prefix} == '.' ||
+    ${prefix} == '..' ||
+    ${prefix} == ./* ||
+    ${prefix} == ../* ||
+    ${prefix} == *'/./'* ||
+    ${prefix} == */. ||
+    ${prefix} == *'/../'* ||
+    ${prefix} == */.. ]]; then
+    echo "non-canonical s3fs prefix" >&2
+    exit 64
+  fi
+fi
+case ${mount_path} in
+  /mnt/session/outputs | /mnt/memory/?*) ;;
+  *)
+    echo "invalid s3fs mount path" >&2
+    exit 64
+    ;;
+esac
+if [[ ${mount_path} == *'/../'* || ${mount_path} == */.. || ${mount_path} == *'/./'* || ${mount_path} == */. ]]; then
+  echo "non-canonical s3fs mount path" >&2
+  exit 64
+fi
+if [[ ! -d ${mount_path} ]]; then
+  echo "s3fs mount path does not exist" >&2
+  exit 1
+fi
+canonical_mount_path=$(realpath -e -- "${mount_path}")
+case ${mount_path}:${canonical_mount_path} in
+  /mnt/session/outputs:/mnt/session/outputs | /mnt/memory/?*:/mnt/memory/?*) ;;
+  *)
+    echo "s3fs mount path resolves outside its allowed root" >&2
+    exit 64
+    ;;
+esac
+mount_path=${canonical_mount_path}
+if [[ -z ${ORCA_S3_ACCESS_KEY_ID:-} || -z ${ORCA_S3_SECRET_ACCESS_KEY:-} ]]; then
+  echo "missing s3fs credentials" >&2
+  exit 1
+fi
+if [[ ${options} == *$'\n'* || ${options} == *$'\r'* ]]; then
+  echo "invalid s3fs options" >&2
+  exit 64
+fi
+
+saw_url=0
+IFS=',' read -r -a option_parts <<<"${options}"
+for option in "${option_parts[@]}"; do
+  case ${option} in
+    allow_other | use_path_request_style | use_cache= | ensure_diskfree=0 | compat_dir | ro | uid=1000 | gid=1000 | umask=0022) ;;
+    url=http://* | url=https://*)
+      if [[ ${option} == 'url=http://' || ${option} == 'url=https://' || ${option} == *[[:space:]]* ]]; then
+        echo "invalid s3fs url option" >&2
+        exit 64
+      fi
+      saw_url=1
+      ;;
+    endpoint=*)
+      if [[ ! ${option#endpoint=} =~ ^[A-Za-z0-9-]+$ ]]; then
+        echo "invalid s3fs endpoint option" >&2
+        exit 64
+      fi
+      ;;
+    *)
+      echo "unsupported s3fs option" >&2
+      exit 64
+      ;;
+  esac
+done
+if [[ ${saw_url} -ne 1 ]]; then
+  echo "s3fs url option is required" >&2
+  exit 64
+fi
+
+credentials_dir=/root/.aws
+credentials_target=${credentials_dir}/credentials
+credentials_lock=/run/orca-s3fs-credentials.lock
+created_credentials_dir=0
+created_credentials_target=0
+acquired_credentials_lock=0
+
+cleanup_credentials() {
+  if [[ ${created_credentials_target} -eq 1 ]]; then
+    # Erase the credential inode before unlinking it. The sandbox is ephemeral,
+    # but this also keeps a failed mount from leaving credentials for later
+    # commands in the same sandbox.
+    : >"${credentials_target}" 2>/dev/null || true
+    rm -f "${credentials_target}" || true
+  fi
+  if [[ ${created_credentials_dir} -eq 1 ]]; then
+    rmdir "${credentials_dir}" >/dev/null 2>&1 || true
+  fi
+  if [[ ${acquired_credentials_lock} -eq 1 ]]; then
+    rmdir "${credentials_lock}" >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup_credentials EXIT
+
+attempt=0
+until mkdir -m 0700 "${credentials_lock}" 2>/dev/null; do
+  attempt=$((attempt + 1))
+  if [[ ${attempt} -ge 300 ]]; then
+    echo "timed out waiting for s3fs credential lock" >&2
+    exit 1
+  fi
+  sleep 0.1
+done
+acquired_credentials_lock=1
+
+if [[ -L ${credentials_dir} || ( -e ${credentials_dir} && ! -d ${credentials_dir} ) ]]; then
+  echo "unsafe existing ${credentials_dir}" >&2
+  exit 1
+fi
+if [[ ! -d ${credentials_dir} ]]; then
+  mkdir -m 0700 "${credentials_dir}"
+  created_credentials_dir=1
+fi
+if [[ -e ${credentials_target} || -L ${credentials_target} ]]; then
+  echo "refusing to replace existing ${credentials_target}" >&2
+  exit 1
+fi
+: >"${credentials_target}"
+chmod 0600 "${credentials_target}"
+created_credentials_target=1
+
+# s3fs only accepts session tokens from its standard AWS profile path. Write
+# that root-only file directly: gVisor does not support Linux's file-on-file
+# bind mount used by the previous helper implementation.
+old_umask=$(umask)
+umask 077
+{
+  printf '%s\n' '[orca-session]'
+  printf 'aws_access_key_id = %s\n' "${ORCA_S3_ACCESS_KEY_ID}"
+  printf 'aws_secret_access_key = %s\n' "${ORCA_S3_SECRET_ACCESS_KEY}"
+  if [[ -n ${ORCA_S3_SESSION_TOKEN:-} ]]; then
+    printf 'aws_session_token = %s\n' "${ORCA_S3_SESSION_TOKEN}"
+  fi
+} >"${credentials_target}"
+umask "${old_umask}"
+
+env -i PATH="${PATH}" HOME=/root \
+  s3fs "${bucket_and_prefix}" "${mount_path}" \
+  -o "${options},profile=orca-session"
+
+: >"${credentials_target}"
+rm -f "${credentials_target}"
+created_credentials_target=0
+if [[ ${created_credentials_dir} -eq 1 ]]; then
+  rmdir "${credentials_dir}"
+  created_credentials_dir=0
+fi
+rmdir "${credentials_lock}"
+acquired_credentials_lock=0
+trap - EXIT

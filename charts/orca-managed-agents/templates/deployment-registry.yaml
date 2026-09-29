@@ -1,0 +1,184 @@
+{{- $secretName := include "orca-managed-agents.secretName" . -}}
+{{- $databaseSecretName := include "orca-managed-agents.databaseSecretName" . -}}
+{{- $registrySecretRefs := default (dict) .Values.registry.secretKeyRefs -}}
+{{- $registryExtraEnv := default (list) .Values.registry.extraEnv -}}
+{{- $registryExtraEnvFrom := default (list) .Values.registry.extraEnvFrom -}}
+{{- $registryExtraVolumeMounts := default (list) .Values.registry.extraVolumeMounts -}}
+{{- $registryExtraVolumes := default (list) .Values.registry.extraVolumes -}}
+{{- $registryDatabaseKeys := list "DATABASE_URL" "TRANSCRIPT_STORE_DATABASE_URL" "FILESTORE_DATABASE_URL" "MEMORYSTORE_DATABASE_URL" -}}
+{{- $registryHasEnv := or (ne $databaseSecretName "") (gt (len $registrySecretRefs) 0) (gt (len $registryExtraEnv) 0) -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "orca-managed-agents.registryServiceName" . }}
+  labels:
+    {{- include "orca-managed-agents.labels" . | nindent 4 }}
+    app.kubernetes.io/component: registry
+spec:
+  replicas: {{ .Values.registry.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "orca-managed-agents.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: registry
+  template:
+    metadata:
+      annotations:
+        {{- /* Roll the fleet when the rendered config or credentials change;
+               envFrom/secretKeyRef updates are otherwise invisible to running
+               containers. */}}
+        checksum/config: {{ include (print $.Template.BasePath "/configmap-registry.yaml") . | sha256sum }}
+        {{- if and .Values.secrets.create (not .Values.secrets.existingSecret) }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.registry.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "orca-managed-agents.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: registry
+        {{- with .Values.registry.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "orca-managed-agents.registryServiceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.registry.automountServiceAccountToken }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- if .Values.migrations.registry.initContainer.enabled }}
+      initContainers:
+        - name: migrate
+          image: "{{ .Values.images.registry.repository }}:{{ .Values.images.registry.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.images.registry.pullPolicy }}
+          command: ["node", "dist/migrate.js"]
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          {{- if or $secretName $registryExtraEnvFrom }}
+          {{- /* The DSN may live in an operator-supplied bundle rather than the
+                 chart Secret, so migrations get the same sources as the app. */}}
+          envFrom:
+            {{- if $secretName }}
+            - secretRef:
+                name: {{ $secretName }}
+            {{- end }}
+            {{- with $registryExtraEnvFrom }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- end }}
+          env:
+            {{- include "orca-managed-agents.secretEnv" (dict "ctx" $ "key" "DATABASE_URL" "refs" $registrySecretRefs "optional" false "fallbackSecretName" $databaseSecretName) | nindent 12 }}
+            - name: NODE_ENV
+              value: production
+            - name: npm_config_update_notifier
+              value: "false"
+            - name: NO_UPDATE_NOTIFIER
+              value: "1"
+            - name: CI
+              value: "true"
+          {{- if or .Values.external.databases.tls.caSecretName (gt (len $registryExtraVolumeMounts) 0) }}
+          volumeMounts:
+            {{- if .Values.external.databases.tls.caSecretName }}
+            {{- include "orca-managed-agents.pgCaVolumeMount" . | nindent 12 }}
+            {{- end }}
+            {{- with $registryExtraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- end }}
+      {{- end }}
+      containers:
+        - name: registry
+          image: "{{ .Values.images.registry.repository }}:{{ .Values.images.registry.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.images.registry.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.registry.httpPort }}
+              protocol: TCP
+            - name: internal-http
+              containerPort: {{ .Values.registry.internalHttpPort }}
+              protocol: TCP
+            - name: admin-http
+              containerPort: {{ .Values.registry.adminHttpPort }}
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "orca-managed-agents.fullname" . }}-registry-config
+            {{- if $secretName }}
+            - secretRef:
+                name: {{ $secretName }}
+            {{- end }}
+            {{- if .Values.external.databases.existingSecret }}
+            - secretRef:
+                name: {{ $databaseSecretName }}
+            {{- end }}
+            {{- /* Last wins for duplicate keys, so operator-supplied bundles
+                   override the chart ConfigMap. */}}
+            {{- with $registryExtraEnvFrom }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- if $registryHasEnv }}
+          env:
+            {{- /* Keep every workload on the same selected database Secret.
+                   Per-variable refs still win because secretEnv checks them
+                   before the fallback Secret. */}}
+            {{- include "orca-managed-agents.secretEnv" (dict "ctx" $ "key" "DATABASE_URL" "refs" $registrySecretRefs "optional" false "fallbackSecretName" $databaseSecretName) | nindent 12 }}
+            {{- include "orca-managed-agents.secretEnv" (dict "ctx" $ "key" "TRANSCRIPT_STORE_DATABASE_URL" "refs" $registrySecretRefs "optional" (ne .Values.transcriptStore.backend "postgres") "fallbackSecretName" $databaseSecretName) | nindent 12 }}
+            {{- include "orca-managed-agents.secretEnv" (dict "ctx" $ "key" "FILESTORE_DATABASE_URL" "refs" $registrySecretRefs "optional" false "fallbackSecretName" $databaseSecretName) | nindent 12 }}
+            {{- include "orca-managed-agents.secretEnv" (dict "ctx" $ "key" "MEMORYSTORE_DATABASE_URL" "refs" $registrySecretRefs "optional" false "fallbackSecretName" $databaseSecretName) | nindent 12 }}
+            {{- range $key, $_ := $registrySecretRefs }}
+            {{- if not (has $key $registryDatabaseKeys) }}
+            {{- include "orca-managed-agents.secretEnv" (dict "ctx" $ "key" $key "refs" $registrySecretRefs "optional" false) | nindent 12 }}
+            {{- end }}
+            {{- end }}
+            {{- with $registryExtraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- end }}
+          {{- if or .Values.external.databases.tls.caSecretName (gt (len $registryExtraVolumeMounts) 0) }}
+          volumeMounts:
+            {{- if .Values.external.databases.tls.caSecretName }}
+            {{- include "orca-managed-agents.pgCaVolumeMount" . | nindent 12 }}
+            {{- end }}
+            {{- with $registryExtraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- end }}
+          {{- with .Values.registry.startupProbe }}
+          startupProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.registry.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.registry.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.registry.resources | nindent 12 }}
+      {{- if or .Values.external.databases.tls.caSecretName (gt (len $registryExtraVolumes) 0) }}
+      volumes:
+        {{- if .Values.external.databases.tls.caSecretName }}
+        {{- include "orca-managed-agents.pgCaVolume" . | nindent 8 }}
+        {{- end }}
+        {{- with $registryExtraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- end }}
+      {{- with .Values.registry.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.registry.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.registry.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

@@ -1,0 +1,41 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1777873511604,
+      "tag": "0000_plain_sunfire",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1777925103430,
+      "tag": "0001_files_purpose_scope",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1777925498366,
+      "tag": "0002_partial_dedup",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1784779427885,
+      "tag": "0003_brave_lady_deathstrike",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1789522660543,
+      "tag": "0004_soft_delete_files",
+      "breakpoints": true
+    }
+  ]
+}

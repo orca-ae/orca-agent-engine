@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "orca-managed-agents.registryServiceName" . }}
+  labels:
+    {{- include "orca-managed-agents.labels" . | nindent 4 }}
+    app.kubernetes.io/component: registry
+spec:
+  type: {{ .Values.registry.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.registry.service.port }}
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "orca-managed-agents.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: registry

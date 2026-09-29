@@ -1,0 +1,149 @@
+# Copyright The Orca Authors
+# SPDX-License-Identifier: Apache-2.0
+
+networks:
+  orca-dev:
+    driver: bridge
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    networks: [orca-dev]
+    environment:
+      POSTGRES_USER: orca
+      POSTGRES_PASSWORD: orca
+      POSTGRES_DB: orca
+    ports: ["5432:5432"]
+    volumes:
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
+      - ./data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "orca"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  rustfs:
+    # RustFS serves the S3 API on 9000 and its console on 9001
+    # (/rustfs/console/). The image runs as uid 10001; run it as root so it can
+    # write ./data/rustfs when Docker created that directory root-owned on
+    # Linux. minioadmin is the credential pair every S3 client, .env file and
+    # test default in this repository uses.
+    image: rustfs/rustfs:1.0.0
+    user: root
+    networks: [orca-dev]
+    environment:
+      RUSTFS_ACCESS_KEY: minioadmin
+      RUSTFS_SECRET_KEY: minioadmin
+      # RustFS logs only to files under /logs unless told to mirror them.
+      RUSTFS_OBS_LOG_STDOUT_ENABLED: "true"
+    # The host-native harness explicitly uses this API for both S3_ENDPOINT
+    # and the local-only S3_STS_ENDPOINT override (see .env.example).
+    ports: ["9000:9000", "9001:9001"]
+    volumes:
+      - ./data/rustfs:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9000/health/ready"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  rustfs-bootstrap:
+    # RustFS's own client creates the bucket. It reads the `local` alias —
+    # endpoint and credentials — from RC_HOST_local.
+    image: rustfs/rc:v0.1.36
+    networks: [orca-dev]
+    depends_on:
+      rustfs:
+        condition: service_healthy
+    environment:
+      RC_HOST_local: http://minioadmin:minioadmin@rustfs:9000
+    command: ["mb", "--ignore-existing", "local/orca-files"]
+
+  kafka:
+    image: apache/kafka:3.7.1
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,DOCKER://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,DOCKER://kafka:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,DOCKER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: DOCKER
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_NUM_PARTITIONS: 1
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+      KAFKA_MIN_INSYNC_REPLICAS: 1
+      CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
+    ports:
+      - "9092:9092"
+      # The OpenSandbox E2E exposes this Docker listener through a selectorless
+      # Kind Service. Its advertised `kafka:29092` address then resolves to that
+      # Service from the in-cluster ai-gateway.
+      - "29092:29092"
+    volumes:
+      - ./data/kafka:/var/lib/kafka/data
+    networks: [orca-dev]
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  ai-gateway:
+    image: ${AI_GATEWAY_IMAGE:-ghcr.io/orca-ae/orca-ai-gateway:v0.4.3-rc.3}
+    networks: [orca-dev]
+    depends_on:
+      kafka:
+        condition: service_healthy
+        required: false
+    ports:
+      - "8090:8090"
+      - "9099:9099"
+    environment:
+      # The ai-gateway env vault defaults to workspace-scoped keys:
+      # ORCA_VAULT__<workspace_id>__<vault_id>.
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      ZAI_API_KEY: ${ZAI_API_KEY:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      ORCA_VAULT__ws_e2e_tests__anthropic_api_key: ${ANTHROPIC_API_KEY:-}
+    volumes:
+      - ${AI_GATEWAY_CONFIG_FILE:-./ai-gateway-config.yaml}:/etc/orca-gateway/config.yaml:ro
+      - ./secrets/session-jwt-pub.pem:/etc/orca-gateway/session-jwt-pub.pem:ro
+      - ./run/internal-service-token:/var/run/secrets/orca/registry-internal/token:ro
+    # registry-service-ts still runs on the host in the hybrid local stack.
+    # Keep the checked-in config's internal-listener URL portable by
+    # resolving `registry` to the Docker host from inside this container.
+    # `host.docker.internal` lets e2e tests expose a fake MCP upstream on the
+    # host and verify the real ai-gateway container forwards to it.
+    extra_hosts:
+      - "registry:host-gateway"
+      - "host.docker.internal:host-gateway"
+
+  pulsar:
+    image: apachepulsar/pulsar:4.2.1
+    profiles: ["pulsar"]
+    command: ["bin/pulsar", "standalone", "-nfw", "-nss", "--wipe-data", "-a", "localhost"]
+    environment:
+      # Keep the image default when unset, while allowing resource-constrained
+      # CI jobs to size the standalone broker alongside Kind/OpenSandbox.
+      PULSAR_MEM: ${PULSAR_MEM:-}
+    ports:
+      - "6650:6650"
+      # Keep host :8081 free for registry-service-ts's internal listener.
+      - "18081:8080"
+    volumes:
+      - ./data/pulsar:/pulsar/data
+    networks: [orca-dev]
+    healthcheck:
+      test: ["CMD-SHELL", "bin/pulsar-admin brokers healthcheck >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 30

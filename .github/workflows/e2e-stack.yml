@@ -1,0 +1,1702 @@
+# Copyright The Orca Authors
+# SPDX-License-Identifier: Apache-2.0
+
+name: e2e-stack
+# End-to-end coverage for the managed-agents stack. The transcript-backend
+# matrix runs control-plane and gateway conformance without provisioning a
+# production sandbox. The OpenSandbox matrix runs Claude on Kafka, Pi SDK with
+# Claude Sonnet on Postgres, and Codex SDK on Pulsar; each runs separate and colocated.
+#
+# Why this exists as a separate workflow:
+#   - test-ts.yml runs unit + per-package integration tests against
+#     in-process or container-only fixtures. It never proves the cross-service
+#     contract (registry → transcript backend → harness → model provider →
+#     in-process MCP tools).
+#   - nightly-e2b.yml exercises the FUSE mount paths against E2B sandboxes,
+#     not the local-stack happy path.
+#   - This workflow is where a stack regression surfaces: `make stack-up`,
+#     dispatcher topic re-discovery, OpenSandbox tool execution, in-process MCP
+#     wiring, or a native SDK shape. It is NOT the pre-merge gate — it was
+#     until the per-PR runs were removed, and it catches those regressions on
+#     the merged commit or the next daily tick instead of before the merge.
+#
+# Required repo secrets:
+#   ANTHROPIC_API_KEY — Claude (Kafka) and Pi SDK / Claude Sonnet (Postgres).
+#   OPENAI_API_KEY — Codex SDK real-agent leg (Pulsar).
+#   The selected provider key is required; a missing secret fails the job.
+#   SLACK_WEBHOOK_URL — where `notify-failure` posts. The notifying job fails
+#   when it is unset rather than passing having told nobody.
+#
+# When this runs:
+#   push to main    — the merged commit, every time
+#   schedule        — 03:00 UTC daily, so a break that lands between merges
+#                     surfaces within a day rather than at the next stack PR
+#   pull_request    — ONLY when the PR carries the `run-e2e` label; see the
+#                     gating note on `changes` below
+#   workflow_dispatch — any ref, on demand
+#
+# It used to run in full on every PR push, at ~470 runner-minutes and three paid
+# Anthropic legs per run — several times over for a PR that got a few review
+# rounds. It is no longer the pre-merge gate for the stack; the daily tick, the
+# opt-in label, and the Slack alert on failure are what replaced that.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    # `labeled` so applying `run-e2e` to an open PR triggers a run instead of
+    # waiting for the next push. Naming `types:` at all discards the defaults,
+    # so the other three have to be restated.
+    types: [opened, synchronize, reopened, labeled]
+  schedule:
+    # 03:00 UTC = 8 PM Pacific. Worst case here is ~135 minutes of wall clock,
+    # so this finishes around 05:15 — clear of nightly-anthropic-spec (06:00)
+    # and nightly-e2b (07:00), both of which picked their slots the same way.
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+# This is the most expensive workflow in the repo — six matrix legs, four of
+# which stand up a Kind cluster or a compose stack. Without a concurrency group
+# every push to a PR left the previous full run grinding away on a commit
+# nobody would look at again.
+#
+# `main` and scheduled runs are never cancelled. Only `pull_request` is in the
+# expression below, so every other event is exempt by construction. A cancelled
+# run on the default branch would leave the merge base without a verdict, and
+# now that the suites do not block a merge, that verdict and the Slack alert
+# derived from it are the only signal that the merged commit was good.
+concurrency:
+  group: e2e-stack-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  # The one Gateway image every leg runs: a public release, pulled rather than
+  # built, so this repository needs no access to the Gateway's source. Keep it
+  # equal to images.aiGateway in charts/orca-managed-agents/values.yaml. The
+  # Codex SDK and Pi SDK legs need a release that includes the native OpenAI
+  # Responses route and native Pi provider routing.
+  AI_GATEWAY_IMAGE: ghcr.io/orca-ae/orca-ai-gateway:v0.4.3-rc.3
+  # server/v0.2.2: first released server revision whose Kubernetes providers
+  # implement bootstrap.execd.isolation=enable (SYS_ADMIN + unconfined profiles).
+  # CI builds this exact source as an unmodified Python base image, then proves
+  # charts/opensandbox-patches supplies the gVisor + in-sandbox FUSE overlay.
+  OPEN_SANDBOX_SOURCE_REF: 207d94c7dc7735c143856fe5c6538b743e478786
+  OPEN_SANDBOX_SERVER_IMAGE_REPOSITORY: ghcr.io/orca-ae/opensandbox-server
+  OPEN_SANDBOX_SERVER_IMAGE_TAG: base-207d94c7
+jobs:
+  # See `.github/scripts/changed-areas.sh` for the path -> suite mapping.
+  #
+  # Two independent conditions gate every suite below, and BOTH must allow a run:
+  #
+  #   1. the filter — `needs.changes.outputs.stack != 'false'`, unchanged
+  #   2. the event  — a `pull_request` runs the suites only when the PR carries
+  #      the `run-e2e` label; every other event runs them unconditionally
+  #
+  # The label is the opt-in pre-merge path for a change the author judges risky.
+  # It cannot widen coverage past the filter: a labelled PR touching only prose
+  # still skips, because (1) still says so.
+  #
+  # The gating stays job-level rather than a `paths:`/`types:`-only filter on
+  # `on:` because a workflow skipped by a trigger filter never reports at all,
+  # and any check that is ever made required again would sit Pending forever.
+  # A job skipped by `if:` reports as success.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      stack: ${{ steps.areas.outputs.stack }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - id: areas
+        run: bash .github/scripts/changed-areas.sh
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+
+  e2e-stack-backend:
+    name: e2e-stack (${{ matrix.transcript_backend }})
+    runs-on: ubuntu-latest
+    needs: changes
+    # `!= 'false'` + `!cancelled()`: an unset output means the filter broke, and
+    # the fail-open answer is to run. See the note on `test` in test-ts.yml.
+    if: >-
+      ${{ !cancelled()
+      && needs.changes.outputs.stack != 'false'
+      && (github.event_name != 'pull_request'
+          || contains(github.event.pull_request.labels.*.name, 'run-e2e')) }}
+    # This matrix covers each transcript backend without paying to repeat the
+    # real agent/OpenSandbox suite three times.
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        transcript_backend: [kafka, postgres, pulsar]
+    env:
+      # Deterministic plaintext used only by the e2e API client seed. Harness
+      # callbacks use workspace-scoped internal runtime contracts instead of
+      # impersonating a workspace API key.
+      ORCA_E2E_PLAINTEXT_KEY: orca_dev_e2e_local_stack
+      TRANSCRIPT_STORE_BACKEND: ${{ matrix.transcript_backend }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pull first, so an unavailable release fails the leg in seconds instead
+      # of after the stack build. The image is public; no login is needed.
+      - name: Pull released ai-gateway image
+        run: |
+          set -euo pipefail
+          docker pull --platform linux/amd64 "${AI_GATEWAY_IMAGE}"
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "${AI_GATEWAY_IMAGE}")" = 'linux/amd64'
+
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+
+      - uses: bufbuild/buf-action@v1
+        with: { setup_only: true }
+
+      - name: Install OS prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            lsof \
+            ripgrep \
+            socat
+
+      - name: pnpm install
+        run: bash .github/scripts/pnpm-install-with-retry.sh
+
+      - name: pnpm proto:gen
+        run: pnpm proto:gen
+
+      - name: Write services/dev/.env for stack-up
+        # `start-services.sh` sources `services/dev/.env` if present and falls
+        # back to inline defaults otherwise.
+        # No paid provider runs in this matrix. The Postgres leg also runs
+        # owned SDK/harness spend scenarios with scripted Messages responses
+        # and the in-memory development runtime. OS sandbox behavior is
+        # exercised in the OpenSandbox job below.
+        run: |
+          mkdir -p services/dev
+          {
+            echo "# Generated by .github/workflows/e2e-stack.yml — do not commit."
+            echo "DATABASE_URL=postgres://orca:orca@localhost:5432/registry"
+            echo "TRANSCRIPT_STORE_BACKEND=${TRANSCRIPT_STORE_BACKEND}"
+            echo "TRANSCRIPT_STORE_DATABASE_URL=postgres://orca:orca@localhost:5432/transcriptstore"
+            echo "FILESTORE_DATABASE_URL=postgres://orca:orca@localhost:5432/filestore"
+            echo "MEMORYSTORE_DATABASE_URL=postgres://orca:orca@localhost:5432/memorystore"
+            echo "KAFKA_BROKERS=localhost:9092"
+            echo "KAFKA_TOPIC_REDISCOVER_INTERVAL_MS=5000"
+            echo "PULSAR_SERVICE_URL=pulsar://localhost:6650"
+            echo "PULSAR_TENANT=public"
+            echo "PULSAR_NAMESPACE=default"
+            echo "PULSAR_TOPIC_PREFIX=orca"
+            echo "PULSAR_RECEIVE_TIMEOUT_MS=500"
+            echo "S3_ENDPOINT=http://localhost:9000"
+            echo "S3_BUCKET=orca-files"
+            echo "S3_REGION=us-east-1"
+            echo "S3_ACCESS_KEY=minioadmin"
+            echo "S3_SECRET_KEY=minioadmin"
+            echo "S3_ACCESS_KEY_ID=minioadmin"
+            echo "S3_SECRET_ACCESS_KEY=minioadmin"
+            echo "S3_KEY_PREFIX=managed-agents/"
+            echo "SESSION_JWT_ISSUER=orca-registry"
+            echo "SESSION_JWT_AUDIENCE=ai-gateway"
+            echo "SESSION_JWT_TTL_SECS=300"
+            echo "SESSION_JWT_LLM_ROUTES=llm-messages"
+            echo "SESSION_JWT_LLM_MODELS=claude-sonnet-4-6"
+            echo "REGISTRY_INTERNAL_BASE_URL=http://localhost:8081"
+            echo "AI_GATEWAY_URL=http://localhost:8090/v1/mcp"
+            echo "AI_GATEWAY_ADMIN_PORT=9099"
+            echo "AI_GATEWAY_IMAGE=${AI_GATEWAY_IMAGE}"
+            echo "SANDBOX_RUNTIME=in-memory"
+            echo "HARNESS_WORK_DIR=/var/tmp/orca-harness"
+          } > services/dev/.env
+          chmod 600 services/dev/.env
+
+      - name: Warm ai-gateway image
+        # Smoke-test the external gateway image before `make stack-up` so image
+        # failures are isolated from the service health wait. The helper also
+        # repackages the published binary onto a compatible distroless runtime
+        # when the external image has a glibc/runtime mismatch.
+        run: |
+          set -euo pipefail
+          mkdir -p services/dev/run
+          chmod 700 services/dev/run
+          openssl rand -hex 32 > services/dev/run/internal-service-token
+          chmod 644 services/dev/run/internal-service-token
+          set -a
+          . services/dev/.env
+          set +a
+          prepared_image="$(services/dev/scripts/prepare-ai-gateway-image.sh)"
+          {
+            echo
+            echo "# Resolved by e2e-stack image smoke test."
+            echo "AI_GATEWAY_IMAGE=${prepared_image}"
+          } >> services/dev/.env
+
+      - name: Pre-create compose bind-mount data dirs with permissive perms
+        # On Linux runners the bind-mounted host dirs `services/dev/data/*`
+        # don't exist before `docker compose up` and get created by Docker
+        # as root. Kafka and Pulsar both write through bind mounts and can
+        # crash with "Permission denied" before their healthchecks pass.
+        # Pre-creating the dirs world-writable avoids the dance — local
+        # laptops don't need this because the directory already exists from
+        # prior runs.
+        run: |
+          mkdir -p services/dev/data/kafka services/dev/data/postgres services/dev/data/rustfs services/dev/data/pulsar
+          chmod 777 services/dev/data/kafka services/dev/data/postgres services/dev/data/rustfs services/dev/data/pulsar
+
+      - name: make stack-up (compose infra + native services + healthz wait)
+        # `make stack-up` chains:
+        #   1. dev-up (compose up -d postgres + selected transcript backend + rustfs)
+        #   2. secrets (init-secrets.sh — RSA keypair + gateway YAML)
+        #   3. services-up (start-services.sh — build, migrate, spawn the
+        #      three services, wait for /healthz on each)
+        # If anything fails, start-services.sh's EXIT trap calls
+        # stop-services.sh so we don't leak background processes for the log
+        # dump step below. The compose stack is reaped by the always()
+        # cleanup at the end.
+        run: make stack-up
+
+      - name: Pulsar native client lifecycle regression
+        if: matrix.transcript_backend == 'pulsar'
+        env:
+          PULSAR_SERVICE_URL: pulsar://localhost:6650
+        run: pnpm -F @orca/transcript-store test:integration test/integration/pulsar-store.spec.ts
+
+      - name: Layer A — wire-protocol conformance
+        # No Anthropic traffic — drives /v1/agents, /v1/sessions, /v1/files,
+        # /v1/memory_stores against the registry only. Fast (~30s) and the
+        # cheap blast radius for catching shape regressions before paying the
+        # Anthropic cost in Layer B.
+        run: pnpm e2e:wire
+
+      - name: Deterministic spend — owned Registry, harness, worker and runner
+        if: matrix.transcript_backend == 'postgres'
+        # Real Postgres/S3, production services and Claude SDK, scripted Messages
+        # responses. Owned service environments never inherit provider keys.
+        run: pnpm e2e:spend
+
+      - name: Layer A.5 — ai-gateway MCP forwarding
+        # No Anthropic traffic — starts a fake MCP upstream on the host and
+        # calls the real ai-gateway container's /v1/mcp path. Verifies session
+        # JWT validation, backend/vault allowlists, vault credential injection,
+        # upstream forwarding, and Kafka audit emission.
+        run: pnpm e2e:gateway
+
+      - name: Dump host-service + compose logs on failure
+        # Without this step a CI failure shows only the vitest stderr — the
+        # registry/harness/gateway error that caused it lives in
+        # services/dev/logs/, and any compose-container crash (e.g. Kafka
+        # KRaft startup) lives in `docker compose logs`. `if: failure()` runs
+        # ONLY when an earlier step fails; job-timeout cancellations do not
+        # count as failure(), so we also need `cancelled()` to capture silent
+        # harness hangs and dump services/dev/logs before the 45m job timeout.
+        if: failure() || cancelled()
+        run: |
+          echo "::group::registry.log"
+          cat services/dev/logs/registry.log 2>/dev/null || echo "(no registry log)"
+          echo "::endgroup::"
+          echo "::group::harness.log"
+          cat services/dev/logs/harness.log 2>/dev/null || echo "(no harness log)"
+          echo "::endgroup::"
+          echo "::group::ai-gateway compose logs"
+          docker compose -f services/dev/docker-compose.yml logs --no-color --tail=200 ai-gateway 2>&1 || echo "(no ai-gateway compose logs)"
+          echo "::endgroup::"
+          echo "::group::docker compose logs"
+          docker compose -f services/dev/docker-compose.yml logs --no-color --tail=200 2>&1 || echo "(no compose logs)"
+          echo "::endgroup::"
+          echo "::group::docker container ps -a"
+          docker ps -a 2>&1 || true
+          echo "::endgroup::"
+
+      - name: Upload deterministic spend diagnostics on failure
+        if: (failure() || cancelled()) && matrix.transcript_backend == 'postgres'
+        uses: actions/upload-artifact@v4
+        with:
+          name: spend-diagnostics-${{ matrix.transcript_backend }}
+          path: /tmp/orca-spend-logs-*/
+          if-no-files-found: ignore
+
+      - name: make stack-down (always)
+        # Stop services-down THEN compose-down so the harness/registry get a
+        # graceful shutdown before the selected transcript backend disappears.
+        # `if: always()` so we tear down even after the log-dump step ran on
+        # failure.
+        if: always()
+        run: make stack-down || true
+
+  e2e-sandbox-harness:
+    name: e2e-stack (opensandbox ${{ matrix.harness }}, ${{ matrix.transcript_backend }})
+    # The SDKs exercise the same sandbox lifecycle and resource reservations.
+    runs-on: ubuntu-latest-8-cores
+    needs: changes
+    if: >-
+      ${{ !cancelled()
+      && needs.changes.outputs.stack != 'false'
+      && (github.event_name != 'pull_request'
+          || contains(github.event.pull_request.labels.*.name, 'run-e2e')) }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { transcript_backend: kafka, harness: claude_agent_sdk }
+          - { transcript_backend: postgres, harness: pi_sdk }
+          - { transcript_backend: pulsar, harness: codex_sdk }
+    env:
+      ORCA_E2E_PLAINTEXT_KEY: orca_dev_e2e_sandbox_harness_${{ matrix.transcript_backend }}
+      TRANSCRIPT_STORE_BACKEND: ${{ matrix.transcript_backend }}
+      ORCA_E2E_AGENT_HARNESS: ${{ matrix.harness }}
+      KIND_CLUSTER_NAME: orca-sandbox-harness-${{ matrix.transcript_backend }}
+      KIND_VERSION: v0.32.0
+      KIND_NODE_IMAGE: kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5
+      GVISOR_VERSION: 20260727.0
+      GVISOR_SHA512: 94a7280655629330f02ff06fbec0493b7f2f4041dd145576daeff2340577cde0fb45fe28e5f1d209f7d7c08f70b9c3e333aa1073063b1d132742120763eaf0ad
+      OPEN_SANDBOX_API_KEY: dev-secret
+      OPEN_SANDBOX_TOOL_IMAGE: orca-opensandbox-code-interpreter:e2e
+      SANDBOX_HARNESS_IMAGE: sandbox-harness-claude-code:e2e
+      SANDBOX_HARNESS_TEMPLATE_IMAGE: ghcr.io/orca-ae/sandbox-harness-claude-code:latest
+      # v1.0.19 predates upstream's SSE ping race fix (97a450a7). Pin the
+      # e95681e7 nightly artifact containing that fix, then load it under a
+      # stable local tag because kind does not retain digest-only references.
+      OPEN_SANDBOX_EXECD_SOURCE_IMAGE: sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd@sha256:085b3f1b233a70c4c468712e1bc847375b3c9499daa6a2112cc4b1f02abe5296
+      OPEN_SANDBOX_EXECD_IMAGE: orca-opensandbox-execd:e2e
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Require the selected real-agent provider secret
+        env:
+          ANTHROPIC_API_KEY: ${{ matrix.harness != 'codex_sdk' && secrets.ANTHROPIC_API_KEY || '' }}
+          OPENAI_API_KEY: ${{ matrix.harness == 'codex_sdk' && secrets.OPENAI_API_KEY || '' }}
+        run: |
+          if [[ "${ORCA_E2E_AGENT_HARNESS}" == codex_sdk ]]; then
+            test -n "${OPENAI_API_KEY}" || { echo 'OPENAI_API_KEY is required for the Pulsar Codex SDK leg' >&2; exit 1; }
+          else
+            test -n "${ANTHROPIC_API_KEY}" || { echo 'ANTHROPIC_API_KEY is required for the Kafka Claude and Postgres Pi SDK legs' >&2; exit 1; }
+          fi
+
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+
+      - uses: bufbuild/buf-action@v1
+        with: { setup_only: true }
+
+      - name: Install OS prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            lsof \
+            ripgrep \
+            socat
+
+      - name: Install kind and Helm
+        run: |
+          curl -fsSL --retry 5 --retry-all-errors --connect-timeout 30 --max-time 120 -o /tmp/kind "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-amd64"
+          chmod +x /tmp/kind
+          sudo mv /tmp/kind /usr/local/bin/kind
+          kind version
+          curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+      - name: pnpm install
+        run: bash .github/scripts/pnpm-install-with-retry.sh
+
+      - name: pnpm proto:gen
+        run: pnpm proto:gen
+
+      - name: Free disk space for OpenSandbox images
+        # The code-interpreter image is large and `kind load docker-image`
+        # temporarily needs space for both Docker's export and containerd's
+        # imported layers. GitHub's runner ships unrelated SDK caches that can
+        # otherwise exhaust the root filesystem before the import starts.
+        run: |
+          echo "Disk usage before cleanup:"
+          df -h /
+          docker system df
+          sudo swapoff -a || true
+          sudo rm -f /mnt/swapfile
+          sudo rm -rf \
+            /opt/ghc \
+            /opt/hostedtoolcache/CodeQL \
+            /usr/local/.ghcup \
+            /usr/local/lib/android \
+            /usr/local/swift \
+            /usr/local/share/powershell \
+            /usr/share/dotnet
+          sudo apt-get clean
+          docker system prune --all --force
+          echo "Disk usage after cleanup:"
+          df -h /
+          docker system df
+
+      # Pull after `docker system prune`, which would otherwise delete the
+      # not-yet-used image, and before the long image builds, so an unavailable
+      # release fails the leg early. The image is public; no login is needed.
+      - name: Pull released ai-gateway image
+        run: |
+          set -euo pipefail
+          docker pull --platform linux/amd64 "${AI_GATEWAY_IMAGE}"
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "${AI_GATEWAY_IMAGE}")" = 'linux/amd64'
+
+      - name: Create kind cluster
+        run: |
+          kind create cluster \
+            --name "${KIND_CLUSTER_NAME}" \
+            --image "${KIND_NODE_IMAGE}" \
+            --wait 120s
+
+      - name: Install and verify gVisor in kind
+        run: |
+          set -euo pipefail
+          node="${KIND_CLUSTER_NAME}-control-plane"
+          docker exec \
+            -e GVISOR_VERSION="${GVISOR_VERSION}" \
+            -e GVISOR_SHA512="${GVISOR_SHA512}" \
+            "${node}" sh -ceu '
+            apt-get update >/dev/null
+            apt-get install -y --no-install-recommends bzip2 >/dev/null
+            archive_url="https://storage.googleapis.com/gvisor/releases/release/${GVISOR_VERSION}/x86_64/gvisor.tar.bz2"
+            workdir="$(mktemp -d)"
+            trap "rm -rf ${workdir}" EXIT
+            archive="${workdir}/gvisor.tar.bz2"
+            curl -fsSL --retry 5 --retry-all-errors -o "${archive}" "${archive_url}"
+            printf "%s  %s\n" "${GVISOR_SHA512}" "${archive}" | sha512sum -c -
+            tar -xjf "${archive}" -C /usr/local/bin
+            test -x /usr/local/bin/runsc
+            test -x /usr/local/bin/containerd-shim-runsc-v1
+            test -x /usr/local/bin/gvisor-bin/checkpointgofer
+            test -x /usr/local/bin/gvisor-bin/runsc-metric-server
+            /usr/local/bin/runsc --version
+            if ! grep -Fq "containerd.runtimes.runsc" /etc/containerd/config.toml; then
+              config_version="$(sed -nE "s/^[[:space:]]*version[[:space:]]*=[[:space:]]*([0-9]+).*$/\\1/p" /etc/containerd/config.toml | head -n1)"
+              case "${config_version}" in
+                3)
+                  printf "\n%s\n%s\n" \
+                    "[plugins.\"io.containerd.cri.v1.runtime\".containerd.runtimes.runsc]" \
+                    "  runtime_type = \"io.containerd.runsc.v1\"" \
+                    >> /etc/containerd/config.toml
+                  ;;
+                2)
+                  printf "\n%s\n%s\n" \
+                    "[plugins.\"io.containerd.grpc.v1.cri\".containerd.runtimes.runsc]" \
+                    "  runtime_type = \"io.containerd.runsc.v1\"" \
+                    >> /etc/containerd/config.toml
+                  ;;
+                *)
+                  echo "unsupported containerd config version: ${config_version:-unset}" >&2
+                  exit 1
+                  ;;
+              esac
+            fi
+            install -d -m 0755 /etc/systemd/system/containerd.service.d
+            printf "%s\n%s\n" \
+              "[Service]" \
+              "Environment=\"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\"" \
+              >/etc/systemd/system/containerd.service.d/10-gvisor-path.conf
+            systemctl daemon-reload
+            systemctl restart containerd
+            systemctl is-active --quiet containerd
+          '
+
+          cat <<YAML | kubectl apply -f -
+          apiVersion: node.k8s.io/v1
+          kind: RuntimeClass
+          metadata:
+            name: gvisor
+          handler: runsc
+          ---
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: orca-gvisor-fuse-smoke
+          spec:
+            runtimeClassName: gvisor
+            restartPolicy: Never
+            containers:
+              - name: smoke
+                image: alpine:3.21
+                command: [sh, -c, 'uname -r; test -c /dev/fuse; exec 9<>/dev/fuse; sleep 300']
+                securityContext:
+                  capabilities:
+                    add: [SETFCAP, SYS_ADMIN]
+          YAML
+          if ! kubectl wait \
+            --for=condition=Ready \
+            pod/orca-gvisor-fuse-smoke \
+            --timeout=120s; then
+            kubectl describe pod/orca-gvisor-fuse-smoke || true
+            kubectl get events --sort-by=.lastTimestamp || true
+            exit 1
+          fi
+          kubectl exec pod/orca-gvisor-fuse-smoke -- uname -r | grep -qi gvisor
+          kubectl exec pod/orca-gvisor-fuse-smoke -- \
+            sh -c 'test -c /dev/fuse && exec 9<>/dev/fuse'
+          kubectl delete pod/orca-gvisor-fuse-smoke --wait=true
+
+      - name: Check out pinned OpenSandbox source and validate chart overlay
+        run: |
+          set -euo pipefail
+          git init /tmp/OpenSandbox
+          git -C /tmp/OpenSandbox remote add origin https://github.com/alibaba/OpenSandbox.git
+          git -C /tmp/OpenSandbox fetch --depth 1 origin "${OPEN_SANDBOX_SOURCE_REF}"
+          git -C /tmp/OpenSandbox checkout --detach FETCH_HEAD
+          git -C /tmp/OpenSandbox apply --check \
+            "${GITHUB_WORKSPACE}/services/harness-server/sandbox-templates/orca-opensandbox-server/0001-pin-server-build-inputs.patch"
+          git -C /tmp/OpenSandbox apply \
+            "${GITHUB_WORKSPACE}/services/harness-server/sandbox-templates/orca-opensandbox-server/0001-pin-server-build-inputs.patch"
+          git -C /tmp/OpenSandbox diff --check
+          grep -Eq '^FROM ghcr\.io/astral-sh/uv:[^@[:space:]]+@sha256:[0-9a-f]{64} AS uv$' \
+            /tmp/OpenSandbox/server/Dockerfile
+          grep -Eq '^FROM python:[^@[:space:]]+@sha256:[0-9a-f]{64} AS builder$' \
+            /tmp/OpenSandbox/server/Dockerfile
+          grep -Eq '^FROM python:[^@[:space:]]+@sha256:[0-9a-f]{64} AS runtime$' \
+            /tmp/OpenSandbox/server/Dockerfile
+          grep -Fq 'COPY --from=uv /uv /uvx /usr/local/bin/' \
+            /tmp/OpenSandbox/server/Dockerfile
+          if grep -Eq 'curl.*astral\.sh/uv|^FROM python:[^@[:space:]]+([[:space:]]|$)' \
+            /tmp/OpenSandbox/server/Dockerfile; then
+            echo 'OpenSandbox server Dockerfile contains mutable bootstrap input' >&2
+            exit 1
+          fi
+
+          git -C /tmp/OpenSandbox worktree add --detach /tmp/OpenSandbox-overlay-test HEAD
+          for file in batchsandbox_provider.py provider_common.py security_context.py; do
+            install -m 0644 \
+              "${GITHUB_WORKSPACE}/charts/opensandbox-patches/files/${file}" \
+              "/tmp/OpenSandbox-overlay-test/server/opensandbox_server/services/k8s/${file}"
+          done
+          install -m 0644 \
+            "${GITHUB_WORKSPACE}/charts/opensandbox-patches/test/test_orca_patch.py" \
+            /tmp/OpenSandbox-overlay-test/server/tests/k8s/test_orca_patch.py
+          python3 -m py_compile \
+            /tmp/OpenSandbox-overlay-test/server/opensandbox_server/services/k8s/batchsandbox_provider.py \
+            /tmp/OpenSandbox-overlay-test/server/opensandbox_server/services/k8s/provider_common.py \
+            /tmp/OpenSandbox-overlay-test/server/opensandbox_server/services/k8s/security_context.py
+          # Fetch the pinned interpreter separately so transient GitHub 5xx
+          # failures retry setup without retrying failed overlay tests.
+          for attempt in 1 2 3; do
+            if pipx run uv==0.9.25 python install 3.10; then
+              break
+            elif [[ "${attempt}" == 3 ]]; then
+              exit 1
+            fi
+            sleep 15
+          done
+          pipx run uv==0.9.25 run \
+            --project /tmp/OpenSandbox-overlay-test/server \
+            --frozen \
+            pytest /tmp/OpenSandbox-overlay-test/server/tests/k8s/test_orca_patch.py -q
+          pipx run uv==0.9.25 run \
+            --project /tmp/OpenSandbox-overlay-test/server \
+            --frozen \
+            ruff check \
+              /tmp/OpenSandbox-overlay-test/server/opensandbox_server/services/k8s/batchsandbox_provider.py \
+              /tmp/OpenSandbox-overlay-test/server/opensandbox_server/services/k8s/provider_common.py \
+              /tmp/OpenSandbox-overlay-test/server/opensandbox_server/services/k8s/security_context.py \
+              /tmp/OpenSandbox-overlay-test/server/tests/k8s/test_orca_patch.py
+
+      - name: Build and validate OpenSandbox server and agent images
+        run: |
+          docker build \
+            --tag "${OPEN_SANDBOX_SERVER_IMAGE_REPOSITORY}:${OPEN_SANDBOX_SERVER_IMAGE_TAG}" \
+            /tmp/OpenSandbox/server
+          docker run --rm \
+            --entrypoint python \
+            "${OPEN_SANDBOX_SERVER_IMAGE_REPOSITORY}:${OPEN_SANDBOX_SERVER_IMAGE_TAG}" \
+            -c 'import inspect; from opensandbox_server.services.k8s import batchsandbox_provider, provider_common, security_context; source = "\n".join((inspect.getsource(batchsandbox_provider), inspect.getsource(provider_common), inspect.getsource(security_context))); assert "ORCA_TRUSTED_SANDBOX_WORKLOADS" not in source; assert "hostUsers" not in source; assert "SETFCAP" not in source; assert "procMount" not in source; assert "fuse_device_enabled" not in source'
+          docker build \
+            --tag "${OPEN_SANDBOX_TOOL_IMAGE}" \
+            -f services/harness-server/sandbox-templates/orca-opensandbox/Dockerfile \
+            .
+          docker build \
+            --tag "${SANDBOX_HARNESS_IMAGE}" \
+            --build-arg DEFAULT_AGENT=claude-code \
+            -f services/sandbox-harness/Dockerfile \
+            .
+          docker run --rm --privileged \
+            --entrypoint /bin/bash \
+            "${OPEN_SANDBOX_TOOL_IMAGE}" -lc '
+              set -euo pipefail
+              mkdir -p /mnt/memory/helper-test
+
+              printf "%s\n" "touch /tmp/orca-bash-env-pwn" > /tmp/bash-env
+              set +e
+              BASH_ENV=/tmp/bash-env ORCA_S3_ACCESS_KEY_ID=x ORCA_S3_SECRET_ACCESS_KEY=y \
+                /usr/local/bin/orca-s3fs-mount bad /bad bad >/tmp/out 2>/tmp/err
+              rc=$?
+              set -e
+              test "$rc" = 64
+              test ! -e /tmp/orca-bash-env-pwn
+
+              set +e
+              ORCA_S3_ACCESS_KEY_ID=x ORCA_S3_SECRET_ACCESS_KEY=y \
+                /usr/local/bin/orca-s3fs-mount bucket /mnt/memory/helper-test \
+                url=http://example.invalid,credlib=/tmp/pwn.so >/tmp/out 2>/tmp/err
+              rc=$?
+              set -e
+              test "$rc" = 64
+              grep -Fq "unsupported s3fs option" /tmp/err
+
+              ln -s /tmp /mnt/memory/escape
+              set +e
+              ORCA_S3_ACCESS_KEY_ID=x ORCA_S3_SECRET_ACCESS_KEY=y \
+                /usr/local/bin/orca-s3fs-mount bucket /mnt/memory/escape \
+                url=http://example.invalid >/tmp/out 2>/tmp/err
+              rc=$?
+              set -e
+              test "$rc" = 64
+              grep -Fq "resolves outside" /tmp/err
+
+              mkdir -m 0700 /run/orca-s3fs-credentials.lock
+              set +e
+              timeout 1s env ORCA_S3_ACCESS_KEY_ID=x ORCA_S3_SECRET_ACCESS_KEY=y \
+                /usr/local/bin/orca-s3fs-mount bucket /mnt/memory/helper-test \
+                url=http://example.invalid >/tmp/out 2>/tmp/err
+              rc=$?
+              set -e
+              test "$rc" = 124
+              test -d /run/orca-s3fs-credentials.lock
+              test ! -e /root/.aws/credentials
+              rmdir /run/orca-s3fs-credentials.lock
+
+              install -d -m 0700 /root/.aws
+              printf "%s\n" sentinel > /root/.aws/credentials
+              set +e
+              ORCA_S3_ACCESS_KEY_ID=x ORCA_S3_SECRET_ACCESS_KEY=y \
+                /usr/local/bin/orca-s3fs-mount bucket /mnt/memory/helper-test \
+                url=http://example.invalid >/tmp/out 2>/tmp/err
+              rc=$?
+              set -e
+              test "$rc" = 1
+              grep -Fq "refusing to replace existing" /tmp/err
+              test "$(cat /root/.aws/credentials)" = sentinel
+              rm -f /root/.aws/credentials
+              rmdir /root/.aws
+
+              mv /usr/bin/s3fs /usr/bin/s3fs.real
+              cat > /usr/bin/s3fs <<"EOF"
+          #!/bin/sh
+          set -eu
+          test -z "${ORCA_S3_ACCESS_KEY_ID:-}"
+          test -z "${ORCA_S3_SECRET_ACCESS_KEY:-}"
+          grep -Fq "aws_access_key_id = access" /root/.aws/credentials
+          grep -Fq "aws_secret_access_key = secret" /root/.aws/credentials
+          exit 42
+          EOF
+              chmod 0755 /usr/bin/s3fs
+              set +e
+              ORCA_S3_ACCESS_KEY_ID=access ORCA_S3_SECRET_ACCESS_KEY=secret \
+                /usr/local/bin/orca-s3fs-mount bucket /mnt/memory/helper-test \
+                url=http://example.invalid >/tmp/out 2>/tmp/err
+              rc=$?
+              set -e
+              test "$rc" = 42
+              test ! -e /root/.aws/credentials
+              test ! -e /run/orca-s3fs-credentials.lock
+            '
+          # OpenSandbox's default BatchSandbox template can still name the
+          # published GHCR image even when the lifecycle request supplies a
+          # local image. Preload that exact tag so kind uses the local build
+          # instead of attempting an anonymous GHCR pull.
+          docker tag "${SANDBOX_HARNESS_IMAGE}" "${SANDBOX_HARNESS_TEMPLATE_IMAGE}"
+
+      - name: Reclaim build cache before kind image imports
+        # The shared SDK image is imported alongside the large interpreter.
+        # Release intermediate build layers before Docker export + containerd
+        # extraction need their peak disk space. Keep all tagged runtime images.
+        run: |
+          docker builder prune --all --force
+          df -h /
+          docker system df
+
+      - name: Load OpenSandbox images into kind
+        run: |
+          bash .github/scripts/load-kind-image-with-retry.sh \
+            "${OPEN_SANDBOX_SERVER_IMAGE_REPOSITORY}:${OPEN_SANDBOX_SERVER_IMAGE_TAG}" \
+            "${KIND_CLUSTER_NAME}"
+          # This image is about 7 GB and normally imports in 6-7 minutes. Slow
+          # hosted runners need more than the script's generic 8-minute cap;
+          # retrying a timed-out partial containerd import only consumes more disk.
+          # Stream directly into these Docker/overlayfs nodes to avoid a second
+          # 7 GB host archive while containerd stores and unpacks the image.
+          KIND_IMAGE_LOAD_STREAM=1 KIND_IMAGE_LOAD_TIMEOUT=20m KIND_IMAGE_LOAD_MAX_ATTEMPTS=1 \
+            bash .github/scripts/load-kind-image-with-retry.sh \
+            "${OPEN_SANDBOX_TOOL_IMAGE}" \
+            "${KIND_CLUSTER_NAME}"
+          bash .github/scripts/load-kind-image-with-retry.sh \
+            "${SANDBOX_HARNESS_IMAGE}" \
+            "${KIND_CLUSTER_NAME}"
+          bash .github/scripts/load-kind-image-with-retry.sh \
+            "${SANDBOX_HARNESS_TEMPLATE_IMAGE}" \
+            "${KIND_CLUSTER_NAME}"
+
+      - name: Preload OpenSandbox runtime images
+        run: |
+          set -euo pipefail
+          docker pull "${OPEN_SANDBOX_EXECD_SOURCE_IMAGE}"
+          docker tag "${OPEN_SANDBOX_EXECD_SOURCE_IMAGE}" "${OPEN_SANDBOX_EXECD_IMAGE}"
+          bash .github/scripts/load-kind-image-with-retry.sh \
+            "${OPEN_SANDBOX_EXECD_IMAGE}" \
+            "${KIND_CLUSTER_NAME}"
+
+      - name: Deploy OpenSandbox into kind
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/OpenSandbox/kubernetes/charts/opensandbox/charts
+          helm package /tmp/OpenSandbox/kubernetes/charts/opensandbox-controller \
+            -d /tmp/OpenSandbox/kubernetes/charts/opensandbox/charts
+          helm package /tmp/OpenSandbox/kubernetes/charts/opensandbox-server \
+            -d /tmp/OpenSandbox/kubernetes/charts/opensandbox/charts
+
+          helm lint "${GITHUB_WORKSPACE}/charts/opensandbox-patches"
+          helm upgrade --install opensandbox-patches \
+            "${GITHUB_WORKSPACE}/charts/opensandbox-patches" \
+            --namespace opensandbox-system \
+            --create-namespace \
+            --wait \
+            --timeout 2m
+          cat > /tmp/opensandbox-values.yaml <<YAML
+          opensandbox-controller:
+            controller:
+              replicaCount: 1
+              snapshot:
+                containerdSocketPath: ""
+          opensandbox-server:
+            server:
+              image:
+                repository: "${OPEN_SANDBOX_SERVER_IMAGE_REPOSITORY}"
+                tag: "${OPEN_SANDBOX_SERVER_IMAGE_TAG}"
+              env:
+                - name: ORCA_ALLOW_TAGGED_SANDBOX_IMAGES
+                  value: 'true'
+                - name: ORCA_TRUSTED_SANDBOX_WORKLOADS
+                  value: >-
+                    [{"image":"${OPEN_SANDBOX_TOOL_IMAGE}","entrypoint":["/opt/code-interpreter/code-interpreter.sh"]},{"image":"${SANDBOX_HARNESS_TEMPLATE_IMAGE}","entrypoint":["/usr/local/bin/orca-sandbox-harness"]}]
+              replicaCount: 1
+              resources:
+                requests:
+                  cpu: "250m"
+                  memory: "512Mi"
+                limits:
+                  cpu: "1"
+                  memory: "2Gi"
+              volumeMounts:
+                - name: opensandbox-server-gvisor-fuse-patch
+                  mountPath: /app/opensandbox_server/services/k8s/batchsandbox_provider.py
+                  subPath: batchsandbox_provider.py
+                  readOnly: true
+                - name: opensandbox-server-gvisor-fuse-patch
+                  mountPath: /app/opensandbox_server/services/k8s/provider_common.py
+                  subPath: provider_common.py
+                  readOnly: true
+                - name: opensandbox-server-gvisor-fuse-patch
+                  mountPath: /app/opensandbox_server/services/k8s/security_context.py
+                  subPath: security_context.py
+                  readOnly: true
+              volumes:
+                - name: opensandbox-server-gvisor-fuse-patch
+                  configMap:
+                    name: opensandbox-server-gvisor-fuse-patch
+            configToml: |
+              [server]
+              host = "0.0.0.0"
+              port = 80
+              api_key = "dev-secret"
+
+              [log]
+              level = "INFO"
+
+              [runtime]
+              type = "kubernetes"
+              execd_image = "${OPEN_SANDBOX_EXECD_IMAGE}"
+
+              [kubernetes]
+              kubeconfig_path = ""
+              namespace = "opensandbox"
+              informer_enabled = true
+              informer_resync_seconds = 300
+              informer_watch_timeout_seconds = 60
+              snapshot_create_timeout_seconds = 900
+              sandbox_create_timeout_seconds = 300
+              workload_provider = "batchsandbox"
+              image_pull_policy = "IfNotPresent"
+
+              [secure_runtime]
+              type = "gvisor"
+              k8s_runtime_class = "gvisor"
+
+              [egress]
+              image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:v1.1.1"
+              mode = "dns+nft"
+          YAML
+          helm upgrade --install opensandbox /tmp/OpenSandbox/kubernetes/charts/opensandbox \
+            --namespace opensandbox-system \
+            --create-namespace \
+            -f /tmp/opensandbox-values.yaml \
+            --wait \
+            --timeout 10m
+          kubectl -n opensandbox-system rollout status deployment/opensandbox-server --timeout=5m
+          kubectl -n opensandbox-system rollout status deployment/opensandbox-controller-manager --timeout=5m
+          test "$(kubectl -n opensandbox-system get deployment opensandbox-server -o jsonpath='{.spec.template.spec.containers[?(@.name=="main")].image}')" = \
+            "${OPEN_SANDBOX_SERVER_IMAGE_REPOSITORY}:${OPEN_SANDBOX_SERVER_IMAGE_TAG}"
+          helm status opensandbox-patches --namespace opensandbox-system >/dev/null
+          kubectl get validatingadmissionpolicy opensandbox-gvisor-fuse >/dev/null
+          kubectl get validatingadmissionpolicybinding opensandbox-gvisor-fuse >/dev/null
+          kubectl get namespace opensandbox -o json | jq -e '
+            .metadata.annotations["meta.helm.sh/release-name"] == "opensandbox-patches"
+          '
+          patch_configmap=/tmp/opensandbox-server-patch-configmap.json
+          kubectl -n opensandbox-system get configmap \
+            opensandbox-server-gvisor-fuse-patch -o json > "${patch_configmap}"
+          jq -e '
+            (.data | keys | sort) ==
+              ["batchsandbox_provider.py", "provider_common.py", "security_context.py"]
+            and (.data["batchsandbox_provider.py"] | contains("ORCA_TRUSTED_SANDBOX_WORKLOADS"))
+            and (.data["batchsandbox_provider.py"] | contains("_GVISOR_RUNTIME_CLASS"))
+            and (.data["batchsandbox_provider.py"] | contains("orca.fuse.device"))
+            and (.data["provider_common.py"] | contains("SYS_ADMIN"))
+            and (.data["provider_common.py"] | contains("SETFCAP"))
+            and ((.data["provider_common.py"] | contains("fuse_device_enabled")) | not)
+            and ((.data["security_context.py"] | contains("procMount")) | not)
+          ' "${patch_configmap}"
+          kubectl -n opensandbox-system get deployment opensandbox-server -o json | jq -e '
+            (.spec.template.spec.volumes | any(
+              .name == "opensandbox-server-gvisor-fuse-patch"
+              and .configMap.name == "opensandbox-server-gvisor-fuse-patch"
+            ))
+            and ([
+              .spec.template.spec.containers[]
+              | select(.name == "main")
+              | .volumeMounts[]
+              | select(.name == "opensandbox-server-gvisor-fuse-patch")
+              | .subPath
+            ] | sort) ==
+              ["batchsandbox_provider.py", "provider_common.py", "security_context.py"]
+            and ([
+              .spec.template.spec.containers[]
+              | select(.name == "main")
+              | .volumeMounts[]
+              | select(.name == "opensandbox-server-gvisor-fuse-patch")
+              | .mountPath
+            ] | sort) == [
+              "/app/opensandbox_server/services/k8s/batchsandbox_provider.py",
+              "/app/opensandbox_server/services/k8s/provider_common.py",
+              "/app/opensandbox_server/services/k8s/security_context.py"
+            ]
+            and ([
+              .spec.template.spec.containers[]
+              | select(.name == "main")
+              | .volumeMounts[]
+              | select(.name == "opensandbox-server-gvisor-fuse-patch")
+              | .readOnly
+            ] | all(. == true))
+          '
+          for file in batchsandbox_provider.py provider_common.py security_context.py; do
+            configmap_sha="$(
+              jq -j --arg file "${file}" '.data[$file]' "${patch_configmap}" \
+                | sha256sum \
+                | awk '{print $1}'
+            )"
+            mounted_sha="$(
+              kubectl -n opensandbox-system exec deployment/opensandbox-server -c main -- \
+                python -c 'import hashlib, pathlib, sys; print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())' \
+                "/app/opensandbox_server/services/k8s/${file}"
+            )"
+            test "${mounted_sha}" = "${configmap_sha}"
+          done
+          kubectl -n opensandbox-system exec deployment/opensandbox-server -c main -- \
+            python -c 'import inspect; from opensandbox_server.services.k8s import batchsandbox_provider, provider_common, security_context; batch = inspect.getsource(batchsandbox_provider); common = inspect.getsource(provider_common); serializer = inspect.getsource(security_context); assert "ORCA_TRUSTED_SANDBOX_WORKLOADS" in batch and "_GVISOR_RUNTIME_CLASS" in batch and "orca.fuse.device" in batch and "does not support pool mode" in batch; assert "SETFCAP" in common and "SYS_ADMIN" in common and "Unconfined" in common and "fuse_device_enabled" not in common and "security_context.privileged = True" not in common; assert "procMount" not in serializer'
+
+      - name: Port-forward OpenSandbox server
+        run: |
+          mkdir -p services/dev/logs services/dev/run
+          .github/scripts/supervise-kubectl-port-forward.sh \
+            services/dev/logs/opensandbox-port-forward.log \
+            -n opensandbox-system port-forward svc/opensandbox-server 18080:80 &
+          echo "$!" > services/dev/run/opensandbox-port-forward.pid
+          for _ in {1..60}; do
+            if curl -fsS -H "OPEN-SANDBOX-API-KEY: ${OPEN_SANDBOX_API_KEY}" \
+              http://localhost:18080/v1/sandboxes >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 2
+          done
+          cat services/dev/logs/opensandbox-port-forward.log || true
+          exit 1
+
+      - name: Verify generated gVisor FUSE workload security context
+        run: |
+          set -euo pipefail
+
+          if kubectl -n opensandbox apply -f - <<'YAML'; then
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: admission-missing-gvisor
+          spec:
+            containers:
+              - name: test
+                image: alpine:3.21
+          YAML
+            echo 'admission accepted Pod without runtimeClassName=gvisor' >&2
+            exit 1
+          fi
+          if kubectl -n opensandbox apply -f - <<'YAML'; then
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: admission-privileged
+          spec:
+            runtimeClassName: gvisor
+            containers:
+              - name: test
+                image: alpine:3.21
+                securityContext:
+                  privileged: true
+          YAML
+            echo 'admission accepted privileged Pod' >&2
+            exit 1
+          fi
+
+          isolation_rejected_status="$(
+            curl -sS \
+              -o /tmp/opensandbox-untrusted-isolation.json \
+              -w '%{http_code}' \
+              -X POST \
+              -H "OPEN-SANDBOX-API-KEY: ${OPEN_SANDBOX_API_KEY}" \
+              -H 'content-type: application/json' \
+              --data '{
+                "image": {"uri": "alpine:3.21"},
+                "entrypoint": ["sh", "-c", "sleep 300"],
+                "resourceLimits": {"cpu": "100m", "memory": "128Mi"},
+                "secureAccess": false,
+                "timeout": 300,
+                "extensions": {"bootstrap.execd.isolation": "enable"}
+              }' \
+              http://localhost:18080/v1/sandboxes
+          )"
+          test "${isolation_rejected_status}" -ge 400
+          test "${isolation_rejected_status}" -lt 500
+          grep -Fq 'require bootstrap.execd.isolation=enable' /tmp/opensandbox-untrusted-isolation.json
+          rejected_status="$(
+            curl -sS \
+              -o /tmp/opensandbox-untrusted-fuse.json \
+              -w '%{http_code}' \
+              -X POST \
+              -H "OPEN-SANDBOX-API-KEY: ${OPEN_SANDBOX_API_KEY}" \
+              -H 'content-type: application/json' \
+              --data '{
+                "image": {"uri": "alpine:3.21"},
+                "entrypoint": ["sh", "-c", "sleep 300"],
+                "resourceLimits": {"cpu": "100m", "memory": "128Mi"},
+                "secureAccess": false,
+                "timeout": 300,
+                "extensions": {
+                  "bootstrap.execd.isolation": "enable",
+                  "orca.fuse.device": "enable"
+                }
+              }' \
+              http://localhost:18080/v1/sandboxes
+          )"
+          test "${rejected_status}" -ge 400
+          test "${rejected_status}" -lt 500
+          grep -Fq 'ORCA_TRUSTED_SANDBOX_WORKLOADS' /tmp/opensandbox-untrusted-fuse.json
+          sandbox_id="$(
+            curl -fsS \
+              -X POST \
+              -H "OPEN-SANDBOX-API-KEY: ${OPEN_SANDBOX_API_KEY}" \
+              -H 'content-type: application/json' \
+              --data "$(jq -cn \
+                --arg image "${OPEN_SANDBOX_TOOL_IMAGE}" \
+                '{
+                  image: {uri: $image},
+                  entrypoint: ["/opt/code-interpreter/code-interpreter.sh"],
+                  resourceLimits: {cpu: "250m", memory: "1Gi"},
+                  secureAccess: false,
+                  timeout: 300,
+                  metadata: {owner: "orca-fuse-security-smoke"},
+                  extensions: {
+                    "bootstrap.execd.isolation": "enable",
+                    "orca.fuse.device": "enable"
+                  }
+                }')" \
+              http://localhost:18080/v1/sandboxes \
+              | jq -er '.id'
+          )"
+          cleanup() {
+            curl -fsS \
+              -X DELETE \
+              -H "OPEN-SANDBOX-API-KEY: ${OPEN_SANDBOX_API_KEY}" \
+              "http://localhost:18080/v1/sandboxes/${sandbox_id}" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          for _ in {1..60}; do
+            if kubectl -n opensandbox get "pod/${sandbox_id}-0" >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+          kubectl -n opensandbox wait \
+            --for=condition=Ready \
+            "pod/${sandbox_id}-0" \
+            --timeout=5m
+          kubectl -n opensandbox get "pod/${sandbox_id}-0" -o json | jq -e '
+            (.spec.containers[] | select(.name == "sandbox")) as $sandbox
+            | (.spec.runtimeClassName == "gvisor")
+              and ((.spec | has("hostUsers")) | not)
+              and ((.spec.hostNetwork // false) == false)
+              and ((.spec.hostPID // false) == false)
+              and ((.spec.hostIPC // false) == false)
+              and (($sandbox.securityContext.privileged // false) == false)
+              and ((($sandbox.securityContext.capabilities.add // []) | sort) == ["SETFCAP", "SYS_ADMIN"])
+              and (($sandbox.securityContext | has("procMount")) | not)
+              and ($sandbox.securityContext.seccompProfile.type == "Unconfined")
+              and ($sandbox.securityContext.appArmorProfile.type == "Unconfined")
+              and (($sandbox.volumeMounts // []) | all(.mountPath != "/dev/fuse"))
+              and ((.spec.volumes // []) | all(has("hostPath") | not))
+              and ((.spec.initContainers // []) | all((.securityContext.privileged // false) == false))
+          '
+          kubectl -n opensandbox exec "pod/${sandbox_id}-0" -c sandbox -- \
+            uname -r | grep -qi gvisor
+          kubectl -n opensandbox exec "pod/${sandbox_id}-0" -c sandbox -- \
+            bash -lc 'test -c /dev/fuse && exec 9<>/dev/fuse'
+          kubectl -n opensandbox exec "pod/${sandbox_id}-0" -c sandbox -- \
+            bwrap \
+              --new-session \
+              --die-with-parent \
+              --unshare-user \
+              --unshare-pid \
+              --uid 1000 \
+              --gid 1000 \
+              --cap-drop ALL \
+              --ro-bind / / \
+              --dev /dev \
+              --proc /proc \
+              -- true
+
+      - name: Expose host Registry and Kafka to OpenSandbox
+        run: |
+          set -euo pipefail
+          HOST_GATEWAY_IP="$(
+            docker inspect "${KIND_CLUSTER_NAME}-control-plane" \
+              --format '{{(index .NetworkSettings.Networks "kind").Gateway}}'
+          )"
+          test -n "${HOST_GATEWAY_IP}"
+          echo "OPEN_SANDBOX_HOST_GATEWAY_IP=${HOST_GATEWAY_IP}" >> "${GITHUB_ENV}"
+          cat <<YAML | kubectl apply -f -
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: registry-host
+            namespace: opensandbox
+          spec:
+            ports:
+              - name: http
+                port: 8080
+                targetPort: 8080
+              - name: internal
+                port: 8081
+                targetPort: 8081
+              - name: mcp
+                port: 8090
+                targetPort: 8090
+          ---
+          apiVersion: v1
+          kind: Endpoints
+          metadata:
+            name: registry-host
+            namespace: opensandbox
+          subsets:
+            - addresses:
+                - ip: ${HOST_GATEWAY_IP}
+              ports:
+                - name: http
+                  port: 8080
+                - name: internal
+                  port: 8081
+                - name: mcp
+                  port: 8090
+          YAML
+
+          # The Docker broker advertises its DOCKER listener as kafka:29092.
+          # Give that name the same meaning inside the Gateway's Kind namespace,
+          # with the endpoint forwarding to the runner's published port 29092.
+          cat <<YAML | kubectl -n opensandbox-system apply -f -
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: kafka
+          spec:
+            ports:
+              - name: broker
+                port: 29092
+                targetPort: 29092
+          ---
+          apiVersion: v1
+          kind: Endpoints
+          metadata:
+            name: kafka
+          subsets:
+            - addresses:
+                - ip: ${HOST_GATEWAY_IP}
+              ports:
+                - name: broker
+                  port: 29092
+          YAML
+
+      - name: Write services/dev/.env for OpenSandbox stack-up
+        env:
+          ANTHROPIC_API_KEY: ${{ matrix.harness != 'codex_sdk' && secrets.ANTHROPIC_API_KEY || '' }}
+          OPENAI_API_KEY: ${{ matrix.harness == 'codex_sdk' && secrets.OPENAI_API_KEY || '' }}
+        run: |
+          umask 077
+          mkdir -p services/dev
+          {
+            echo "# Generated by .github/workflows/e2e-stack.yml — do not commit."
+            echo "DATABASE_URL=postgres://orca:orca@localhost:5432/registry"
+            echo "TRANSCRIPT_STORE_BACKEND=${TRANSCRIPT_STORE_BACKEND}"
+            echo "TRANSCRIPT_STORE_DATABASE_URL=postgres://orca:orca@localhost:5432/transcriptstore"
+            echo "FILESTORE_DATABASE_URL=postgres://orca:orca@localhost:5432/filestore"
+            echo "MEMORYSTORE_DATABASE_URL=postgres://orca:orca@localhost:5432/memorystore"
+            echo "KAFKA_BROKERS=localhost:9092"
+            echo "KAFKA_TOPIC_REDISCOVER_INTERVAL_MS=5000"
+            echo 'PULSAR_MEM="-Xms256m -Xmx768m -XX:MaxDirectMemorySize=512m"'
+            echo "S3_ENDPOINT=http://${OPEN_SANDBOX_HOST_GATEWAY_IP}:9000"
+            echo "S3_BUCKET=orca-files"
+            echo "S3_REGION=us-east-1"
+            echo "S3_ACCESS_KEY=minioadmin"
+            echo "S3_SECRET_KEY=minioadmin"
+            echo "S3_ACCESS_KEY_ID=minioadmin"
+            echo "S3_SECRET_ACCESS_KEY=minioadmin"
+            echo "S3_KEY_PREFIX=managed-agents/"
+            echo "SESSION_JWT_ISSUER=orca-registry"
+            echo "SESSION_JWT_AUDIENCE=ai-gateway"
+            echo "SESSION_JWT_TTL_SECS=300"
+            if [[ "${ORCA_E2E_AGENT_HARNESS}" == codex_sdk ]]; then
+              echo "SESSION_JWT_LLM_ROUTES=llm-responses"
+              echo "SESSION_JWT_LLM_MODELS=gpt-5.4"
+            elif [[ "${ORCA_E2E_AGENT_HARNESS}" == pi_sdk ]]; then
+              echo "SESSION_JWT_LLM_ROUTES=llm-pi-anthropic-anthropic-messages"
+              echo "SESSION_JWT_LLM_MODELS=claude-sonnet-4-6"
+              mkdir -p services/dev/run
+              node scripts/render-pi-gateway-config.mjs services/dev/ai-gateway-config.yaml services/dev/run/pi-gateway-config.yaml
+              # This step uses umask 077 for .env, but Gateway runs as a
+              # non-root user and must read the bind-mounted static config.
+              chmod 644 services/dev/run/pi-gateway-config.yaml
+              echo "AI_GATEWAY_CONFIG_FILE=./run/pi-gateway-config.yaml"
+            else
+              echo "SESSION_JWT_LLM_ROUTES=llm-messages"
+              echo "SESSION_JWT_LLM_MODELS=claude-sonnet-4-6"
+            fi
+            echo "REGISTRY_INTERNAL_BASE_URL=http://localhost:8081"
+            echo "AI_GATEWAY_REGISTRY_USAGE_ENABLED=true"
+            echo "GIT_CREDS_PUBLIC_URL=http://registry-host.opensandbox.svc.cluster.local:8080/v1/git-creds"
+            echo "AI_GATEWAY_URL=http://localhost:8090/v1/mcp"
+            echo "AI_GATEWAY_ADMIN_PORT=9099"
+            echo "LLM_GATEWAY_URL=http://ai-gateway.opensandbox-system.svc.cluster.local:8090/v1"
+            echo "AI_GATEWAY_IMAGE=${AI_GATEWAY_IMAGE}"
+            echo "SANDBOX_RUNTIME=opensandbox"
+            echo "OPEN_SANDBOX_DOMAIN=localhost:18080"
+            echo "OPEN_SANDBOX_PROTOCOL=http"
+            echo "OPEN_SANDBOX_API_KEY=${OPEN_SANDBOX_API_KEY}"
+            echo "OPEN_SANDBOX_IMAGE=${OPEN_SANDBOX_TOOL_IMAGE}"
+            echo "OPEN_SANDBOX_ENTRYPOINT=/opt/code-interpreter/code-interpreter.sh"
+            echo "OPEN_SANDBOX_TIMEOUT_SECONDS=1800"
+            echo "OPEN_SANDBOX_USE_SERVER_PROXY=true"
+            echo "OPEN_SANDBOX_REQUEST_TIMEOUT_SECONDS=300"
+            echo "OPEN_SANDBOX_RESOURCE_CPU=250m"
+            echo "OPEN_SANDBOX_RESOURCE_MEMORY=1Gi"
+            echo "HARNESS_WORK_DIR=/var/tmp/orca-harness"
+            # Keep completed runners warm long enough for the multi-workspace
+            # archive e2e to observe the sentinel-driven teardown explicitly.
+            echo "SESSION_IDLE_TIMEOUT_MS=300000"
+            # Separate SDKs use the selected provider key. Colocated SDKs receive
+            # only a scoped session JWT for their native Gateway protocol.
+            printf 'ANTHROPIC_API_KEY=%q\n' "${ANTHROPIC_API_KEY}"
+            printf 'OPENAI_API_KEY=%q\n' "${OPENAI_API_KEY}"
+            echo "ORCA_E2E_AGENT_HARNESS=${ORCA_E2E_AGENT_HARNESS}"
+          } > services/dev/.env
+          chmod 600 services/dev/.env
+
+      - name: Warm ai-gateway image
+        run: |
+          set -euo pipefail
+          mkdir -p services/dev/run
+          chmod 700 services/dev/run
+          openssl rand -hex 32 > services/dev/run/internal-service-token
+          chmod 644 services/dev/run/internal-service-token
+          set -a
+          . services/dev/.env
+          set +a
+          prepared_image="$(services/dev/scripts/prepare-ai-gateway-image.sh)"
+          {
+            echo
+            echo "# Resolved by e2e-stack image smoke test."
+            echo "AI_GATEWAY_IMAGE=${prepared_image}"
+          } >> services/dev/.env
+
+      - name: Deploy in-cluster ai-gateway for sandbox pods
+        env:
+          ANTHROPIC_API_KEY: ${{ matrix.harness != 'codex_sdk' && secrets.ANTHROPIC_API_KEY || '' }}
+          OPENAI_API_KEY: ${{ matrix.harness == 'codex_sdk' && secrets.OPENAI_API_KEY || '' }}
+        run: |
+          set -euo pipefail
+          set -a
+          . services/dev/.env
+          set +a
+          kind load docker-image "${AI_GATEWAY_IMAGE}" --name "${KIND_CLUSTER_NAME}"
+          ANTHROPIC_KEY_VALUE="${ANTHROPIC_API_KEY:-}"
+          OPENAI_KEY_VALUE="${OPENAI_API_KEY:-}"
+          gateway_config=services/dev/ai-gateway-llm-config.yaml
+          if [[ "${ORCA_E2E_AGENT_HARNESS}" == pi_sdk ]]; then
+            node scripts/render-pi-gateway-config.mjs "$gateway_config" /tmp/pi-gateway-llm.yaml
+            gateway_config=/tmp/pi-gateway-llm.yaml
+          fi
+          if [[ "${ORCA_E2E_AGENT_HARNESS}" != claude_agent_sdk ]]; then
+            # Harness-server commits the SDK's terminal usage. This Gateway still
+            # authenticates and meters native requests but has no Registry/Kafka sink.
+            python3 - "$gateway_config" <<'PYCODE'
+          from pathlib import Path
+          import sys
+          source = Path(sys.argv[1]).read_text()
+          assert source.count('  usage_sinks:') == 1
+          Path('/tmp/native-sdk-gateway.yaml').write_text(source.split('  usage_sinks:')[0] + '  usage_sinks: []\n')
+          PYCODE
+            gateway_config=/tmp/native-sdk-gateway.yaml
+          fi
+          kubectl create namespace opensandbox-system --dry-run=client -o yaml | kubectl apply -f -
+          kubectl -n opensandbox-system create configmap ai-gateway-llm-config \
+            --from-file="config.yaml=${gateway_config}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+          kubectl -n opensandbox-system create secret generic ai-gateway-session-jwt \
+            --from-file=session-jwt-pub.pem=services/dev/secrets/session-jwt-pub.pem \
+            --dry-run=client -o yaml | kubectl apply -f -
+          kubectl -n opensandbox-system create secret generic ai-gateway-registry-internal-token \
+            --from-file=token=services/dev/run/internal-service-token \
+            --dry-run=client -o yaml | kubectl apply -f -
+          kubectl -n opensandbox-system create secret generic ai-gateway-llm-env \
+            --from-literal=OPENAI_API_KEY="${OPENAI_KEY_VALUE}" \
+            --from-literal=ANTHROPIC_API_KEY="${ANTHROPIC_KEY_VALUE}" \
+            --from-literal=ORCA_VAULT__ws_e2e_tests__anthropic_api_key="${ANTHROPIC_KEY_VALUE}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+          cat <<YAML | kubectl -n opensandbox-system apply -f -
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: ai-gateway
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: ai-gateway
+            template:
+              metadata:
+                labels:
+                  app: ai-gateway
+              spec:
+                securityContext:
+                  fsGroup: 65532
+                  fsGroupChangePolicy: OnRootMismatch
+                containers:
+                  - name: ai-gateway
+                    image: ${AI_GATEWAY_IMAGE}
+                    imagePullPolicy: IfNotPresent
+                    ports:
+                      - name: data
+                        containerPort: 8090
+                      - name: admin
+                        containerPort: 9099
+                    envFrom:
+                      - secretRef:
+                          name: ai-gateway-llm-env
+                    volumeMounts:
+                      - name: config
+                        mountPath: /etc/orca-gateway/config.yaml
+                        subPath: config.yaml
+                        readOnly: true
+                      - name: session-jwt
+                        mountPath: /etc/orca-gateway/session-jwt-pub.pem
+                        subPath: session-jwt-pub.pem
+                        readOnly: true
+                      - name: registry-internal-token
+                        mountPath: /var/run/secrets/orca/registry-internal
+                        readOnly: true
+                volumes:
+                  - name: config
+                    configMap:
+                      name: ai-gateway-llm-config
+                  - name: session-jwt
+                    secret:
+                      secretName: ai-gateway-session-jwt
+                  - name: registry-internal-token
+                    secret:
+                      secretName: ai-gateway-registry-internal-token
+                      defaultMode: 0440
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: ai-gateway
+          spec:
+            selector:
+              app: ai-gateway
+            ports:
+              - name: data
+                port: 8090
+                targetPort: data
+              - name: admin
+                port: 9099
+                targetPort: admin
+          YAML
+          kubectl -n opensandbox-system rollout status deployment/ai-gateway --timeout=2m
+
+      - name: Pre-create compose bind-mount data dirs with permissive perms
+        run: |
+          mkdir -p services/dev/data/kafka services/dev/data/postgres services/dev/data/rustfs services/dev/data/pulsar
+          chmod 777 services/dev/data/kafka services/dev/data/postgres services/dev/data/rustfs services/dev/data/pulsar
+
+      - name: make stack-up (OpenSandbox runtime)
+        run: |
+          if [[ "${TRANSCRIPT_STORE_BACKEND}" == pulsar ]]; then
+            # Native failures need a stack, not just the launcher's SIGSEGV.
+            if ! command -v gdb >/dev/null; then
+              sudo apt-get update -qq
+              sudo apt-get install -y gdb
+            fi
+            mkdir -p services/dev/logs
+            sudo sysctl -w "kernel.core_pattern=${GITHUB_WORKSPACE}/services/dev/logs/core.%e.%p"
+            ulimit -c unlimited
+          fi
+          make stack-up
+
+      - name: OpenSandbox FUSE S3 round-trip smoke
+        env:
+          OPEN_SANDBOX_DOMAIN: localhost:18080
+          OPEN_SANDBOX_PROTOCOL: http
+          OPEN_SANDBOX_API_KEY: ${{ env.OPEN_SANDBOX_API_KEY }}
+          OPEN_SANDBOX_RESOURCE_CPU: 250m
+          OPEN_SANDBOX_RESOURCE_MEMORY: 1Gi
+          S3_BUCKET: orca-files
+          S3_ACCESS_KEY_ID: minioadmin
+          S3_SECRET_ACCESS_KEY: minioadmin
+        run: |
+          export S3_ENDPOINT="http://${OPEN_SANDBOX_HOST_GATEWAY_IP}:9000"
+          curl -fsS "http://${OPEN_SANDBOX_HOST_GATEWAY_IP}:9000/health/ready"
+          for image in "${OPEN_SANDBOX_TOOL_IMAGE}" "${SANDBOX_HARNESS_TEMPLATE_IMAGE}"; do
+            echo "::group::FUSE smoke ${image}"
+            if [[ "${image}" == "${OPEN_SANDBOX_TOOL_IMAGE}" ]]; then
+              entrypoint=/opt/code-interpreter/code-interpreter.sh
+              file_owner=ubuntu
+            else
+              entrypoint=/usr/local/bin/orca-sandbox-harness
+              file_owner=node
+            fi
+            OPEN_SANDBOX_IMAGE="${image}" \
+              OPEN_SANDBOX_ENTRYPOINT="${entrypoint}" \
+              OPEN_SANDBOX_FILE_OWNER="${file_owner}" \
+              pnpm -F @orca/harness-server exec vitest run \
+                -c vitest.integration.config.ts \
+                test/integration/opensandbox-sandbox.spec.ts \
+                -t 'mounts S3 through s3fs' \
+                --reporter=basic
+            echo "::endgroup::"
+          done
+
+      - name: Layer B — ${{ env.ORCA_E2E_AGENT_HARNESS }} separate on OpenSandbox
+        env:
+          ANTHROPIC_API_KEY: ${{ matrix.harness != 'codex_sdk' && secrets.ANTHROPIC_API_KEY || '' }}
+          OPENAI_API_KEY: ${{ matrix.harness == 'codex_sdk' && secrets.OPENAI_API_KEY || '' }}
+        timeout-minutes: 35
+        run: pnpm e2e:agent
+
+      - name: Layer B.1 — sandbox harness mode
+        env:
+          ANTHROPIC_API_KEY: ${{ matrix.harness != 'codex_sdk' && secrets.ANTHROPIC_API_KEY || '' }}
+          OPENAI_API_KEY: ${{ matrix.harness == 'codex_sdk' && secrets.OPENAI_API_KEY || '' }}
+          ORCA_E2E_AGENT_HARNESS: ${{ matrix.harness }}
+          GITHUB_TOKEN: ${{ github.token }}
+          ORCA_E2E_SANDBOX_HARNESS: '1'
+          ORCA_E2E_GATEWAY_KAFKA_USAGE_TOPIC: ${{ matrix.harness == 'claude_agent_sdk' && 'orca.e2e.gateway-usage' || '' }}
+          # Release each case's sandboxes instead of keeping CPU requests
+          # reserved until idle/TTL expiry on the single-node kind cluster.
+          ORCA_E2E_SANDBOX_HARNESS_KEEP_RESOURCES: '0'
+        timeout-minutes: 45
+        run: pnpm e2e:agent:sandbox
+
+      - name: Dump sandbox harness logs on failure
+        if: failure() || cancelled()
+        run: |
+          echo "::group::registry.log"
+          cat services/dev/logs/registry.log 2>/dev/null || echo "(no registry log)"
+          echo "::endgroup::"
+          echo "::group::harness.log"
+          cat services/dev/logs/harness.log 2>/dev/null || echo "(no harness log)"
+          echo "::endgroup::"
+          echo "::group::native crash backtraces"
+          shopt -s nullglob
+          for core in services/dev/logs/core.*; do
+            # Print symbols only. Raw cores and frame arguments can contain
+            # provider credentials, so neither is uploaded or printed.
+            timeout 30s gdb --batch \
+              -ex 'set print frame-arguments none' -ex 'set print entry-values no' \
+              -ex 'thread apply all bt' "$(command -v node)" "${core}" 2>&1 || true
+          done
+          echo "::endgroup::"
+          echo "::group::opensandbox port-forward"
+          cat services/dev/logs/opensandbox-port-forward.log 2>/dev/null || echo "(no opensandbox port-forward log)"
+          echo "::endgroup::"
+          echo "::group::opensandbox Helm releases"
+          helm list --namespace opensandbox-system --all 2>&1 || true
+          helm status opensandbox-patches --namespace opensandbox-system 2>&1 || true
+          helm status opensandbox --namespace opensandbox-system 2>&1 || true
+          kubectl -n opensandbox-system get configmap \
+            opensandbox-server-gvisor-fuse-patch -o json 2>/dev/null \
+            | jq '.data | keys' 2>&1 || true
+          echo "::endgroup::"
+          echo "::group::opensandbox-system pods"
+          kubectl -n opensandbox-system get pods -o wide 2>&1 || true
+          kubectl -n opensandbox-system logs deploy/ai-gateway --tail=200 2>&1 || true
+          kubectl -n opensandbox-system logs deploy/opensandbox-server --tail=200 2>&1 || true
+          kubectl -n opensandbox-system logs deploy/opensandbox-controller-manager --tail=200 2>&1 || true
+          echo "::endgroup::"
+          echo "::group::opensandbox sandbox resources"
+          kubectl -n opensandbox get batchsandboxes,pods -o wide 2>&1 || true
+          kubectl -n opensandbox get batchsandboxes -o yaml 2>&1 || true
+          kubectl -n opensandbox describe batchsandboxes 2>&1 || true
+          kubectl -n opensandbox describe pods 2>&1 || true
+          kubectl -n opensandbox get events --sort-by=.lastTimestamp 2>&1 || true
+          echo "::endgroup::"
+          echo "::group::opensandbox sandbox pods"
+          kubectl -n opensandbox get pods -o wide 2>&1 || true
+          kubectl -n opensandbox logs --all-containers --tail=200 -l owner=orca-managed-agents 2>&1 || true
+          echo "::endgroup::"
+          echo "::group::docker compose logs"
+          docker compose -f services/dev/docker-compose.yml ps -a 2>&1 || true
+          docker inspect dev-pulsar-1 2>&1 || true
+          docker compose -f services/dev/docker-compose.yml logs --no-color --tail=200 2>&1 || echo "(no compose logs)"
+          echo "::endgroup::"
+
+      - name: make stack-down (always)
+        if: always()
+        run: make stack-down || true
+
+      - name: Stop OpenSandbox port-forward and kind cluster (always)
+        if: always()
+        run: |
+          if [[ -f services/dev/run/opensandbox-port-forward.pid ]]; then
+            port_forward_pid="$(cat services/dev/run/opensandbox-port-forward.pid)"
+            kill "${port_forward_pid}" 2>/dev/null || true
+            for _ in {1..20}; do
+              if ! kill -0 "${port_forward_pid}" 2>/dev/null; then
+                break
+              fi
+              sleep 0.1
+            done
+            kill -KILL "${port_forward_pid}" 2>/dev/null || true
+          fi
+          kind delete cluster --name "${KIND_CLUSTER_NAME}" || true
+
+  e2e-internal-auth-kubernetes:
+    name: e2e internal auth (Kubernetes TokenReview)
+    runs-on: ubuntu-latest
+    needs: changes
+    if: >-
+      ${{ !cancelled()
+      && needs.changes.outputs.stack != 'false'
+      && (github.event_name != 'pull_request'
+          || contains(github.event.pull_request.labels.*.name, 'run-e2e')) }}
+    timeout-minutes: 20
+    env:
+      KIND_CLUSTER_NAME: orca-internal-auth
+      INTERNAL_AUTH_E2E_AUDIENCE: orca-registry-internal
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+
+      - name: Install kind
+        run: |
+          curl -fsSL --retry 5 --retry-all-errors --connect-timeout 30 --max-time 120 -o /tmp/kind https://kind.sigs.k8s.io/dl/v0.24.0/kind-linux-amd64
+          chmod +x /tmp/kind
+          sudo mv /tmp/kind /usr/local/bin/kind
+
+      - name: pnpm install
+        run: bash .github/scripts/pnpm-install-with-retry.sh
+
+      - name: Create TokenReview fixtures
+        run: |
+          set -euo pipefail
+          kind create cluster --name "${KIND_CLUSTER_NAME}" --wait 120s
+          kubectl create namespace orca-internal-auth-e2e
+          for account in registry harness ai-gateway observability-exporter other; do
+            kubectl -n orca-internal-auth-e2e create serviceaccount "${account}"
+          done
+          kubectl create clusterrolebinding orca-registry-tokenreview-e2e \
+            --clusterrole=system:auth-delegator \
+            --serviceaccount=orca-internal-auth-e2e:registry
+
+          reviewer_token="$(kubectl -n orca-internal-auth-e2e create token registry --duration=10m)"
+          api_server="$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')"
+          kubectl config view --raw --minify \
+            -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' \
+            | base64 --decode > /tmp/orca-internal-auth-ca.crt
+          kubectl config --kubeconfig=/tmp/orca-internal-auth-kubeconfig set-cluster kind \
+            --server="${api_server}" \
+            --certificate-authority=/tmp/orca-internal-auth-ca.crt \
+            --embed-certs=true
+          kubectl config --kubeconfig=/tmp/orca-internal-auth-kubeconfig set-credentials registry \
+            --token="${reviewer_token}"
+          kubectl config --kubeconfig=/tmp/orca-internal-auth-kubeconfig set-context registry \
+            --cluster=kind \
+            --user=registry
+          kubectl config --kubeconfig=/tmp/orca-internal-auth-kubeconfig use-context registry
+
+          {
+            echo "KUBECONFIG=/tmp/orca-internal-auth-kubeconfig"
+            echo "INTERNAL_AUTH_E2E_HARNESS_SUBJECT=system:serviceaccount:orca-internal-auth-e2e:harness"
+            echo "INTERNAL_AUTH_E2E_AI_GATEWAY_SUBJECT=system:serviceaccount:orca-internal-auth-e2e:ai-gateway"
+            echo "INTERNAL_AUTH_E2E_OBSERVABILITY_EXPORTER_SUBJECT=system:serviceaccount:orca-internal-auth-e2e:observability-exporter"
+            echo "INTERNAL_AUTH_E2E_HARNESS_TOKEN=$(kubectl -n orca-internal-auth-e2e create token harness --audience="${INTERNAL_AUTH_E2E_AUDIENCE}" --duration=10m)"
+            echo "INTERNAL_AUTH_E2E_AI_GATEWAY_TOKEN=$(kubectl -n orca-internal-auth-e2e create token ai-gateway --audience="${INTERNAL_AUTH_E2E_AUDIENCE}" --duration=10m)"
+            echo "INTERNAL_AUTH_E2E_OBSERVABILITY_EXPORTER_TOKEN=$(kubectl -n orca-internal-auth-e2e create token observability-exporter --audience="${INTERNAL_AUTH_E2E_AUDIENCE}" --duration=10m)"
+            echo "INTERNAL_AUTH_E2E_WRONG_AUDIENCE_TOKEN=$(kubectl -n orca-internal-auth-e2e create token harness --audience=wrong-audience --duration=10m)"
+            echo "INTERNAL_AUTH_E2E_UNKNOWN_SUBJECT_TOKEN=$(kubectl -n orca-internal-auth-e2e create token other --audience="${INTERNAL_AUTH_E2E_AUDIENCE}" --duration=10m)"
+          } >> "${GITHUB_ENV}"
+
+      - name: Verify Kubernetes ServiceAccount internal auth
+        run: |
+          set -euo pipefail
+          for name in \
+            KUBECONFIG \
+            INTERNAL_AUTH_E2E_HARNESS_SUBJECT \
+            INTERNAL_AUTH_E2E_AI_GATEWAY_SUBJECT \
+            INTERNAL_AUTH_E2E_OBSERVABILITY_EXPORTER_SUBJECT \
+            INTERNAL_AUTH_E2E_HARNESS_TOKEN \
+            INTERNAL_AUTH_E2E_AI_GATEWAY_TOKEN \
+            INTERNAL_AUTH_E2E_OBSERVABILITY_EXPORTER_TOKEN \
+            INTERNAL_AUTH_E2E_WRONG_AUDIENCE_TOKEN \
+            INTERNAL_AUTH_E2E_UNKNOWN_SUBJECT_TOKEN; do
+            test -n "${!name:-}"
+          done
+          pnpm -F @orca/registry-service-ts test:e2e:internal-auth-kubernetes
+
+      - name: Delete kind cluster (always)
+        if: always()
+        run: kind delete cluster --name "${KIND_CLUSTER_NAME}" || true
+
+  e2e-stack:
+    needs:
+      - changes
+      - e2e-stack-backend
+      - e2e-sandbox-harness
+      - e2e-internal-auth-kubernetes
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Require all backend e2e jobs
+        # This job id is no longer a required status check — the suites moved
+        # off per-PR runs, so gating merges on it would block every PR that did
+        # not opt in. It remains the single verdict for the workflow: the Slack
+        # notifier keys off this job's result, and it is what a reader looks at
+        # to decide whether a `main` or scheduled run was good.
+        #
+        # The rule is a single expectation derived from the run's context, not a
+        # per-job allowance:
+        #
+        #   PR without the `run-e2e` label -> every job MUST be skipped
+        #   filter says stack unaffected   -> every job MUST be skipped
+        #   anything else                  -> every job MUST succeed
+        #
+        # Accepting "success or skipped" per job looks equivalent and is not.
+        # A job that times out records as `cancelled`, and a cancelled need
+        # cascades its dependents to `skipped` — so a per-job allowance would
+        # report this check green over a run that proved nothing. That
+        # happened before the rule was tightened, when a timed-out
+        # image-preparation job skipped both matrices.
+        #
+        # A skip is legitimate for exactly two reasons — the event did not ask
+        # for a run, or the filter said the stack was unaffected. Both are
+        # decided here, once, and the suites' own `if:` conditions must agree
+        # with this block: if they run when it expects `skipped` (or skip when
+        # it expects `success`) every run reports a false verdict.
+        #
+        # `always()` (not `!cancelled()`) so a cancelled run lands in the
+        # `success` branch and fails loudly; skipping this job would report it
+        # as Success instead.
+        #
+        # A broken `changes` job needs no special case: the suites gate on
+        # `!= 'false'`, so an unset output runs them, and an unset output is not
+        # `'false'` here either — expectation stays `success`, which is what
+        # they will have produced.
+        #
+        # Results arrive through `env:` so the comparison runs in bash against
+        # named variables, and the rule is written once in `check` rather than
+        # restated per job — copies of a condition are how one of them ends up
+        # saying something different.
+        env:
+          EVENT: ${{ github.event_name }}
+          LABELED: ${{ contains(github.event.pull_request.labels.*.name, 'run-e2e') }}
+          CHANGES: ${{ needs.changes.result }}
+          STACK: ${{ needs.changes.outputs.stack }}
+          BACKEND: ${{ needs.e2e-stack-backend.result }}
+          SANDBOX: ${{ needs.e2e-sandbox-harness.result }}
+          INTERNAL_AUTH: ${{ needs.e2e-internal-auth-kubernetes.result }}
+        run: |
+          if [[ "$EVENT" == "pull_request" && "$LABELED" != "true" ]]; then
+            expect=skipped
+            echo "pull_request without the run-e2e label; every suite must be skipped."
+            echo "Label this PR \`run-e2e\` to run the stack suites before merging."
+          elif [[ "$CHANGES" == "success" && "$STACK" == "false" ]]; then
+            expect=skipped
+            echo "changed-areas said the stack is unaffected; every suite must be skipped."
+          else
+            expect=success
+            echo "stack affected (or filter unavailable); every suite must pass."
+          fi
+
+          failed=0
+          check() {
+            if [[ "$2" == "$expect" ]]; then
+              echo "ok: $1 = $2"
+            else
+              echo "::error::$1 = $2 (expected $expect)"
+              failed=1
+            fi
+          }
+          check "e2e-stack backend matrix" "$BACKEND"
+          check "e2e OpenSandbox real-agent matrix" "$SANDBOX"
+          check "e2e Kubernetes internal auth" "$INTERNAL_AUTH"
+          [[ $failed -eq 0 ]] || exit 1
+          echo "All e2e-stack jobs $expect, as expected."
+
+  # Keys off the aggregator above, which already reduces four jobs to one
+  # verdict. Deliberately NOT a member of that job's `needs:` list — the list is
+  # exhaustive and its expectation uniform, so a sibling added there would be
+  # measured against `expect` and break the verdict it is reporting on.
+  #
+  # Not on `pull_request`: a labelled PR's failure is already visible on the PR
+  # itself, and a fork PR has no secrets to post with.
+  #
+  # Nothing else in this repo tells a human that CI failed. Since the suites no
+  # longer block a merge, a silent red run on `main` would sit unnoticed until
+  # the next person to label a PR tripped over it.
+  notify-failure:
+    needs: e2e-stack
+    if: ${{ always() && needs.e2e-stack.result == 'failure' && github.event_name != 'pull_request' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/notify-slack-failure
+        with:
+          webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}

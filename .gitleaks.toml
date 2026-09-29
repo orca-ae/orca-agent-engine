@@ -1,0 +1,22 @@
+# Copyright The Orca Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# gitleaks configuration: the default rules, plus an allowlist for test fixtures and
+# known false positives. Keep each entry narrow and say why it is safe.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Test-only key material and known false positives"
+# Throwaway keys that exist only to exercise TLS and JWT code paths in tests.
+paths = [
+  '''packages/transcript-store/test/unit/kafka/tls-fixture\.ts''',
+  '''services/registry-service-ts/test/fixtures/session-jwt-private\.pem''',
+]
+regexTarget = "line"
+regexes = [
+  # An object-key prefix option, not a credential.
+  '''s3KeyPrefix''',
+  # A fake JWT in a unit test: {"alg":"HS256"}.{"exp":2000000000}.signature
+  '''eyJhbGciOiJIUzI1NiJ9\.eyJleHAiOjIwMDAwMDAwMDB9\.signature''',
+]

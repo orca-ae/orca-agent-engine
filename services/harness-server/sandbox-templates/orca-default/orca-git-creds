@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# Copyright The Orca Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# Orca git credential helper.
+#
+# Bridges git's credential-helper protocol (stdin key=value records, blank
+# line terminator) to the registry's `POST /v1/git-creds` endpoint. The image
+# configures it system-wide as git's credential.helper at build time; harness
+# injects ORCA_GIT_CREDS_URL + ORCA_GIT_CREDS_TOKEN per session.
+#
+# Protocol:
+#   - git invokes us with action arg ("get", "store", or "erase") and pipes
+#     a stream of `key=value\n` lines terminated by a blank line on stdin.
+#   - We respond on "get" by echoing username= + password= back on stdout in
+#     the same format. "store" / "erase" are no-ops (the registry owns the
+#     credential lifecycle, not the sandbox).
+#   - Returning 0 with empty output == "no creds" (git falls through). We
+#     ALWAYS exit 0 on miss / failure: returning non-zero would surface the
+#     curl/jq error to the user as a clone failure instead of falling back
+#     to anonymous git, which is the wrong UX for public repos.
+#
+# Env contract (injected by harness; absent values mean anonymous fallback):
+#   ORCA_GIT_CREDS_URL    — registry endpoint, e.g. https://registry/v1/git-creds
+#   ORCA_GIT_CREDS_TOKEN  — short-lived JWT scoped to this session
+#   SANDBOX_RUNTIME       — set to 1 by the nested Claude sandbox runtime
+set -euo pipefail
+
+# Action arg ("get"/"store"/"erase"). store/erase are no-ops — the helper is
+# stateless; the registry is the source of truth.
+action="${1:-get}"
+
+if [ "${action}" != "get" ]; then
+    # Drain stdin so git doesn't block, then exit silently.
+    cat >/dev/null
+    exit 0
+fi
+
+# Required env. Missing = silent miss (helper is a no-op when the harness
+# didn't wire creds for this session).
+if [ -z "${ORCA_GIT_CREDS_URL:-}" ] || [ -z "${ORCA_GIT_CREDS_TOKEN:-}" ]; then
+    cat >/dev/null
+    exit 0
+fi
+
+protocol=""
+host=""
+path=""
+
+# Parse stdin: `key=value\n` until a blank line. Anything else we ignore.
+while IFS= read -r line; do
+    if [ -z "${line}" ]; then
+        break
+    fi
+    key="${line%%=*}"
+    value="${line#*=}"
+    case "${key}" in
+        protocol) protocol="${value}" ;;
+        host)     host="${value}" ;;
+        path)     path="${value}" ;;
+    esac
+done
+
+# Build the JSON body. jq -n keeps us safe from shell-injection if a host
+# header contains quotes or backslashes.
+body="$(jq -n \
+    --arg protocol "${protocol}" \
+    --arg host "${host}" \
+    --arg path "${path}" \
+    '{protocol: $protocol, host: $host, path: $path}')"
+
+# Claude's Linux sandbox runtime removes the child network namespace and routes
+# allowed traffic through its HTTP proxy. It also puts `.local` in NO_PROXY,
+# which would make cluster-local registry endpoints bypass that only usable
+# network path. Force this callback through the sandbox proxy while leaving the
+# ordinary (non-nested) sandbox path unchanged.
+curl_proxy_args=()
+if [ "${SANDBOX_RUNTIME:-}" = "1" ]; then
+    curl_proxy_args=(--noproxy '')
+fi
+
+# 5s connect / 10s total. Silent on failure — exit 0, output nothing.
+response="$(
+    curl --silent --show-error --fail \
+        --connect-timeout 5 \
+        --max-time 10 \
+        ${curl_proxy_args[@]+"${curl_proxy_args[@]}"} \
+        --header "Authorization: Bearer ${ORCA_GIT_CREDS_TOKEN}" \
+        --header 'Content-Type: application/json' \
+        --data "${body}" \
+        "${ORCA_GIT_CREDS_URL}" 2>/dev/null
+)" || exit 0
+
+# Parse out username + password. Missing fields = silent miss.
+username="$(printf '%s' "${response}" | jq -r '.username // empty' 2>/dev/null)" || exit 0
+password="$(printf '%s' "${response}" | jq -r '.password // empty' 2>/dev/null)" || exit 0
+
+if [ -z "${username}" ] || [ -z "${password}" ]; then
+    exit 0
+fi
+
+# Echo back in git's credential-helper format. Trailing blank line not
+# required (git reads until EOF or blank), but harmless.
+printf 'username=%s\n' "${username}"
+printf 'password=%s\n' "${password}"
+exit 0

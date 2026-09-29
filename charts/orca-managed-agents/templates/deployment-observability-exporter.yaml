@@ -1,0 +1,146 @@
+{{- $exporter := default (dict) .Values.observabilityExporter -}}
+{{- if (dig "enabled" false $exporter) }}
+{{- $kafkaState := eq (dig "stateBackend" "kafka" $exporter) "kafka" -}}
+{{- /* Check here before dereferencing image fields: validation.yaml is not guaranteed to render first. */ -}}
+{{- $image := default (dict) .Values.images.observabilityExporter -}}
+{{- $migrationMessage := "exporter workload defaults are missing; enabling an exporter from a pre-workload release requires --reset-values -f <complete-operator-values.yaml>, not --reuse-values; preserve all existing operator overrides in that file" -}}
+{{- if or (empty $image.repository) (empty $image.pullPolicy) -}}
+{{- fail $migrationMessage -}}
+{{- end -}}
+{{- range $key := list "replicaCount" "resources" "startupProbe" "readinessProbe" "livenessProbe" -}}
+{{- if not (hasKey $exporter $key) -}}
+{{- fail $migrationMessage -}}
+{{- end -}}
+{{- end -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "orca-managed-agents.fullname" . }}-observability-exporter
+  labels:
+    {{- include "orca-managed-agents.labels" . | nindent 4 }}
+    app.kubernetes.io/component: observability-exporter
+spec:
+  replicas: {{ $exporter.replicaCount }}
+  {{- if $kafkaState }}
+  strategy:
+    type: Recreate
+    # Explicitly clear server-defaulted RollingUpdate settings on Helm upgrades.
+    rollingUpdate: null
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "orca-managed-agents.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: observability-exporter
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap-observability-exporter.yaml") . | sha256sum }}
+        {{- if and .Values.secrets.create (not .Values.secrets.existingSecret) }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with $exporter.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "orca-managed-agents.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: observability-exporter
+        {{- with $exporter.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "orca-managed-agents.observabilityExporterServiceAccountName" . }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: observability-exporter
+          image: "{{ .Values.images.observabilityExporter.repository }}:{{ .Values.images.observabilityExporter.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.images.observabilityExporter.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: {{ include "orca-managed-agents.fullname" . }}-observability-exporter-config
+            {{- with $exporter.extraEnvFrom }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          env:
+            {{- if (dig "schemaRegistry" "url" "" .Values.transcriptStore.kafka) }}
+            {{- range $key := list "KAFKA_SCHEMA_REGISTRY_USERNAME" "KAFKA_SCHEMA_REGISTRY_PASSWORD" }}
+            {{- if not (hasKey (default (dict) $exporter.secretKeyRefs) $key) }}
+            {{- include "orca-managed-agents.secretEnv" (dict "ctx" $ "key" $key "refs" (dict) "optional" true) | nindent 12 }}
+            {{- end }}
+            {{- end }}
+            {{- end }}
+            {{- range $key, $ref := $exporter.secretKeyRefs }}
+            - name: {{ $key }}
+              valueFrom:
+                secretKeyRef:
+                  {{- toYaml $ref | nindent 18 }}
+            {{- end }}
+            {{- with $exporter.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          volumeMounts:
+            {{- if $kafkaState }}
+            - name: exporter-state
+              mountPath: /var/run/orca/exporter-state
+            {{- end }}
+            - name: registry-internal-token
+              mountPath: {{ .Values.internalAuth.tokenMountPath | quote }}
+              readOnly: true
+            {{- with $exporter.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with $exporter.startupProbe }}
+          startupProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $exporter.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $exporter.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml $exporter.resources | nindent 12 }}
+      volumes:
+        {{- if $kafkaState }}
+        - name: exporter-state
+          emptyDir:
+            sizeLimit: {{ default "2Gi" $exporter.kafkaStateSizeLimit | quote }}
+        {{- end }}
+        - name: registry-internal-token
+          projected:
+            defaultMode: 0440
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  audience: {{ .Values.internalAuth.audience | quote }}
+                  expirationSeconds: {{ .Values.internalAuth.tokenExpirationSeconds }}
+        {{- with $exporter.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with $exporter.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $exporter.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $exporter.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

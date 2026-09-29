@@ -1,0 +1,867 @@
+# Copyright The Orca Authors
+# SPDX-License-Identifier: Apache-2.0
+
+nameOverride: ''
+fullnameOverride: ''
+
+imagePullSecrets: []
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ['ALL']
+
+images:
+  # registry, harness and observabilityExporter are built by this repository's release workflow. An
+  # empty tag defaults to the chart appVersion, so a packaged release
+  # (`helm package --app-version <version>`) pins exactly the images the same
+  # tag published; the release workflow also points the repositories at the
+  # registry it pushed to.
+  registry:
+    repository: ghcr.io/orca-ae/orca-registry-service-ts
+    tag: ''
+    pullPolicy: IfNotPresent
+  harness:
+    repository: ghcr.io/orca-ae/orca-harness-server
+    tag: ''
+    pullPolicy: IfNotPresent
+  observabilityExporter:
+    repository: ghcr.io/orca-ae/orca-observability-exporter
+    tag: ''
+    pullPolicy: IfNotPresent
+  # ai-gateway ships from its own repository on an independent release train,
+  # so its tag stays an explicit pin and never derives from appVersion.
+  aiGateway:
+    repository: ghcr.io/orca-ae/orca-ai-gateway
+    tag: v0.4.3-rc.3
+    pullPolicy: IfNotPresent
+  # orca-cli ships independently from this repository. Its image tags are the
+  # release version without the leading "v"; pin the multi-platform
+  # manifest digest so the toolset pod always runs the verified
+  # v0.2.0 artifact from the CLI's release workflow.
+  toolset:
+    repository: ghcr.io/orca-ae/orca-cli
+    tag: '0.2.0'
+    digest: sha256:e60de0b9de6c09fba7ea8e01b21b95a92f37e306ee00305d4bc8ac9c9b511df1
+    pullPolicy: IfNotPresent
+  # sandboxHarness images are never deployed by this chart — harness-server
+  # requests them per-session from OpenSandbox. The repository/tag here (same
+  # empty-tag-defaults-to-appVersion convention as registry/harness) become
+  # the SANDBOX_HARNESS_CLAUDE_CODE_IMAGE env var in the harness ConfigMap,
+  # which overrides @orca/harness-catalog's build-time default at runtime.
+  # codex has no release build yet, so it has no override here.
+  #
+  # Release charts pin the pushed multi-platform manifest for reproducibility.
+  # When digest is set, the ConfigMap renders "<repository>@<digest>" (tag is
+  # ignored); otherwise it renders "<repository>:<tag>". OpenSandbox repository
+  # trust accepts either form with the exact authorized entrypoint. The
+  # ghcr.io/orca-ae default below is one of the patched server's default
+  # trusted repositories; a mirror is trusted once its registry/namespace is
+  # listed in ORCA_TRUSTED_SANDBOX_REPOSITORY_PREFIXES, or by explicit policy.
+  # Legacy ORCA_TRUSTED_SANDBOX_WORKLOADS entries still match exact image strings
+  # and require digests unless local/CI ORCA_ALLOW_TAGGED_SANDBOX_IMAGES=true.
+  sandboxHarness:
+    claudeCode:
+      repository: ghcr.io/orca-ae/sandbox-harness-claude-code
+      tag: ''
+      # Full manifest-list digest, for example
+      # sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
+      digest: ''
+
+secrets:
+  # create=true renders one Secret from the inline values below. Set both
+  # create=false and existingSecret='' when every credential is delivered by an
+  # external pipeline (bootstrap Secrets, external-secrets-operator, SOPS): the
+  # chart then emits no secretKeyRef of its own and each component's
+  # `secretKeyRefs` / `extraEnvFrom` becomes the only credential source.
+  create: true
+  existingSecret: ''
+  values:
+    databaseUrl: ''
+    transcriptStoreDatabaseUrl: ''
+    filestoreDatabaseUrl: ''
+    memorystoreDatabaseUrl: ''
+    sessionJwtPrivateKeyPem: ''
+    sessionJwtPublicKeyPem: ''
+    anthropicApiKey: ''
+    # Direct codex_sdk separate egress only; Gateway credentials use aiGateway.extraEnv.
+    openaiApiKey: ''
+    s3AccessKeyId: ''
+    s3SecretAccessKey: ''
+    kafkaAuthToken: ''
+    kafkaSaslUsername: ''
+    kafkaSaslPassword: ''
+    kafkaSchemaRegistryUsername: ''
+    kafkaSchemaRegistryPassword: ''
+    pulsarAuthToken: ''
+    pulsarOauth2ClientSecret: ''
+    pulsarOauth2PrivateKey: ''
+    openSandboxApiKey: ''
+    agentEnvApiKey: ''
+    e2bApiKey: ''
+
+external:
+  databases:
+    # Optional pre-provisioned Secret containing DATABASE_URL,
+    # TRANSCRIPT_STORE_DATABASE_URL, FILESTORE_DATABASE_URL, and
+    # MEMORYSTORE_DATABASE_URL. When set, every registry/harness/migration
+    # workload reads DSNs from this Secret and the chart-managed application
+    # Secret omits those keys.
+    existingSecret: ''
+    registryUrl: ''
+    transcriptStoreUrl: ''
+    filestoreUrl: ''
+    memorystoreUrl: ''
+    # TLS to a central / managed Postgres (CloudSQL / RDS). When caSecretName is
+    # set, the CA bundle is mounted into every component that opens a PG
+    # connection (registry, its migrate init-container/job, and harness).
+    # node-postgres reads `sslrootcert` straight from the connection string, so
+    # request verify-full by appending it to each DSN:
+    #   ?sslmode=verify-full&sslrootcert=<mountPath>/<caKey>
+    # PgBouncer transaction pooling is unsupported for DATABASE_URL,
+    # FILESTORE_DATABASE_URL, and MEMORYSTORE_DATABASE_URL: each migration path
+    # holds a session-level advisory lock across DDL. Point those DSNs directly
+    # at Postgres or at a session-pooling endpoint. RDS Proxy instead pins
+    # affected connections when advisory locks are used, reducing multiplexing.
+    # TRANSCRIPT_STORE_DATABASE_URL may use transaction pooling: its migrations
+    # use a transaction-scoped advisory lock and runtime delivery polls rows
+    # inside ordinary transactions (no LISTEN/NOTIFY session state).
+    tls:
+      caSecretName: ''
+      # Secret data key to mount; the same relative name is used under mountPath.
+      caKey: ca.crt
+      mountPath: /etc/orca/pg-ca
+
+# node-postgres per-pool connection ceilings. Each database gets an independent
+# pool, so a registry replica's worst case is registryMax + transcriptStoreMax +
+# fileStoreMax + memoryStoreMax, and a harness replica's is transcriptStoreMax +
+# fileStoreMax. Size these when many stacks share one central Postgres so the
+# aggregate stays under the instance's max_connections, and match a per-role
+# CONNECTION LIMIT on the PG side.
+databasePools:
+  registryMax: 10
+  transcriptStoreMax: 10
+  fileStoreMax: 10
+  memoryStoreMax: 10
+
+transcriptStore:
+  backend: kafka
+  kafka:
+    brokers: kafka:9092
+    # KAFKA_CONNECTION_MODE: plaintext, sasl-plain-token-tls, sasl-plain-tls or custom.
+    connectionMode: plaintext
+    topicPrefix: ''
+    topicRediscoverIntervalMs: '30000'
+    ssl: ''
+    sslRejectUnauthorized: ''
+    sslCaFile: ''
+    sslCertFile: ''
+    sslKeyFile: ''
+    saslMechanism: ''
+    # Selects .events (raw) or .events-avro for all session reads and writes.
+    # A Registry URL alone leaves raw topic selection unchanged.
+    # Quiesce turns and restart registry/harness/exporter together; no history/cursor migration.
+    # See docs/operation/kafka-transcript-avro.md for exporter-state cutover precautions.
+    encoding: raw
+    schemaRegistry:
+      url: ''
+      subject: orca.transcript.TranscriptEvent
+      autoRegister: true
+      authMode: none
+      # Paths in each service container; mount explicitly with extraVolumes /
+      # extraVolumeMounts. Broker TLS and credentials are independent.
+      caFile: ''
+      certFile: ''
+      keyFile: ''
+      requestTimeoutMs: 5000
+  postgres:
+    eventPollIntervalMs: '500'
+    eventLeaseMs: '30000'
+  pulsar:
+    serviceUrl: pulsar://pulsar:6650
+    tenant: public
+    namespace: default
+    topicPrefix: orca
+    receiveTimeoutMs: '500'
+    ackTimeoutMs: ''
+    authType: ''
+    oauth2IssuerUrl: ''
+    oauth2ClientId: ''
+    oauth2Audience: ''
+    oauth2Scope: ''
+    oauth2Type: client_credentials
+
+objectStorage:
+  endpoint: http://minio.minio.svc.cluster.local:9000
+  # Applied to both AWS SDK clients and sandbox s3fs mounts. MinIO commonly
+  # needs path-style bucket addressing; set false for AWS S3.
+  forcePathStyle: true
+  # Optional STS endpoint override. Leave empty for the AWS SDK regional
+  # endpoint; set it explicitly for MinIO or another custom STS deployment.
+  stsEndpoint: ''
+  bucket: orca-files
+  region: us-east-1
+  keyPrefix: managed-agents/
+  # Required by the Kubernetes deployment. Registry and Harness host-side S3
+  # clients use the AWS SDK default credential chain (for example IRSA) when
+  # static keys are absent. Sandbox FUSE credentials always come from an
+  # AssumeRole session scoped to one workspace/session resource.
+  stsRoleArn: ''
+  # Development-only escape hatch for an existing Secret that contains static
+  # S3 credentials. Chart-created Secrets opt into the same fallback by
+  # explicitly setting both secrets.values.s3AccessKeyId and
+  # secrets.values.s3SecretAccessKey. Production must leave this false and set
+  # stsRoleArn so sandbox credentials remain execution-scoped.
+  allowStaticCredentials: false
+
+sessionJwt:
+  issuer: orca-registry
+  audience: ai-gateway
+  ttlSecs: '300'
+  # Optional deployment-level LLM authorization policy. Model entries are an
+  # upper bound intersected with each session's concrete Agent models.
+  # Configure both lists together; leaving both empty omits the LLM claims.
+  llmRoutes: []
+  llmModels: []
+  # Externally managed Secret holding the public half of the session-JWT
+  # keypair, mounted read-only into the ai-gateway. Defaults to the chart
+  # Secret's SESSION_JWT_PUBLIC_KEY_PEM key. Point this at a per-deployment
+  # trust-anchor Secret when the keypair is provisioned out of band; the private
+  # half is wired through registry.secretKeyRefs.SESSION_JWT_PRIVATE_KEY_PEM.
+  # External Secret data changes are invisible to Helm: rotate the Registry and
+  # ai-gateway pods by bumping the same version annotation under both
+  # registry.podAnnotations and aiGateway.podAnnotations.
+  publicKeySecret:
+    name: ''
+    key: ''
+
+internalAuth:
+  # Kubernetes workloads authenticate to Registry's internal listener with
+  # short-lived projected ServiceAccount JWTs validated through TokenReview.
+  mode: kubernetes_service_account
+  audience: orca-registry-internal
+  tokenExpirationSeconds: 600
+  tokenMountPath: /var/run/secrets/orca/registry-internal
+
+# Optional Kafka-only exporter. Its dedicated identity remains registered even
+# when the workload is disabled; it never shares Harness or Gateway authority.
+observabilityExporter:
+  enabled: false
+  # Kafka-backed state needs no database; postgres selects the legacy runtime.
+  stateBackend: kafka
+  # Dedicated disk-backed emptyDir; leaves headroom above the 1Gi index budget.
+  # Override OBSERVABILITY_KAFKA_STATE_MAX_BYTES through extraEnv when needed.
+  kafkaStateSizeLimit: 2Gi
+  replicaCount: 1
+  serviceAccount:
+    create: true
+    annotations: {}
+    name: ''
+  podAnnotations: {}
+  podLabels: {}
+  registryInternalBaseUrl: ''
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  # Kafka rejects OBSERVABILITY_EXPORTER_DATABASE_URL entries with a nonempty value
+  # or any valueFrom (including optional references); an empty literal is allowed.
+  # Broker-native exporter topic listings default to canonical, independent of auth.
+  # For endpoints such as KoP that list prefixed topics under bare local names, add:
+  # - name: KAFKA_TOPIC_LISTING_MODE
+  #   value: bare-alias
+  extraEnv: []
+  # Secret/ConfigMap contents are opaque to Helm, so these sources remain allowed.
+  # In Kafka mode they must not inject a nonempty OBSERVABILITY_EXPORTER_DATABASE_URL;
+  # inspect their keys before cutover: explicit Kafka selection ignores any DSN,
+  # so neither render success nor pod startup proves SQL progress was retained.
+  extraEnvFrom: []
+  # Required only with stateBackend=postgres. Use an exporter-owned database, not registry DSNs.
+  # Kafka rejects this DB reference: keep stateBackend=postgres to preserve existing progress;
+  # remove the reference only after a controlled cutover to Kafka state.
+  # OBSERVABILITY_EXPORTER_DATABASE_URL: {name: exporter-db, key: url}
+  # Kafka credentials can also be mapped here; no chart Secret is inherited.
+  secretKeyRefs: {}
+  extraVolumes: []
+  extraVolumeMounts: []
+  startupProbe:
+    httpGet:
+      path: /healthz
+      port: http
+    periodSeconds: 5
+    failureThreshold: 30
+  readinessProbe:
+    httpGet:
+      path: /readyz
+      port: http
+    # Also accommodates legacy postgres readiness (up to 21 seconds); Kafka readiness does not query PostgreSQL.
+    timeoutSeconds: 25
+    periodSeconds: 30
+  livenessProbe:
+    httpGet:
+      path: /healthz
+      port: http
+    periodSeconds: 20
+
+secretStore:
+  # local is development-only and rejected by deployed registry instances.
+  # kubernetes persists vault credential material in one dedicated Secret.
+  mode: kubernetes
+  kubernetes:
+    confirmLocalCutover: false
+    secretName: ''
+
+registry:
+  # Optional MCP endpoint; defaults to harness.aiGatewayUrl or the in-chart Gateway.
+  aiGatewayMcpUrl: ''
+  # Optional native LLM proxy base URL; Codex appends /responses.
+  aiGatewayLlmUrl: ''
+  replicaCount: 2
+  # Base name for the Registry Deployment and Services. Defaults to
+  # '<fullname>-registry'; the internal and admin Services append
+  # '-internal'/'-admin'. Override it to pin in-cluster DNS names that callers
+  # outside this release already dial.
+  nameOverride: ''
+  serviceAccount:
+    create: true
+    annotations: {}
+    name: ''
+  # Registry needs an API-server identity for the Kubernetes SecretStore and
+  # TokenReview calls, so its token stays mounted.
+  automountServiceAccountToken: true
+  podAnnotations: {}
+  podLabels: {}
+  httpPort: 8080
+  internalHttpPort: 8081
+  adminHttpPort: 8082
+  grpcPort: 50054
+  # Exact reverse-proxy source IPs/CIDRs allowed to supply X-Forwarded-For.
+  # Required when registry.ingress.enabled=true or registry.istio.enabled=true;
+  # never use 0.0.0.0/0 or ::/0.
+  trustedProxyCidrs: []
+  oidcAllowedIssuers: ''
+  # The one static audience every workspace-plane token carries. Must be
+  # non-empty whenever oidcAllowedIssuers names an issuer and
+  # oidcResolveWorkspaceByAudience is false, and must be EMPTY when that flag is
+  # true; the chart fails to render and the registry refuses to start otherwise.
+  # An empty value is not "no audience check": jose then requires the `aud` claim
+  # to be present and compares nothing.
+  oidcAudience: orca-managed-agents
+  # The admin and platform planes have one audience mode and no second state:
+  # they never resolve workspaces, so each plane's audience must be non-empty
+  # whenever its own *OidcAllowedIssuers names an issuer. The chart fails to
+  # render and the registry refuses to start otherwise, for the same reason as
+  # above — an empty value is not "no audience check".
+  #
+  # Every one of these render-time checks reads the literal values only; Helm
+  # cannot look inside a Secret. A deployment that delivers issuers and
+  # audiences through registry.secretKeyRefs leaves the keys here empty and is
+  # caught at startup instead, where the values are readable.
+  adminOidcAllowedIssuers: ''
+  adminOidcAudience: orca-managed-agents-admin
+  platformOidcAllowedIssuers: ''
+  platformOidcAudience: orca-managed-agents-platform
+  # Consult the nested `metadata` object of a verified token for identity and
+  # scope claims. Enable ONLY for issuers whose `metadata` is issuer-controlled;
+  # where it is filled in by whoever requests the credential, enabling this makes
+  # credential creation equivalent to minting any identity on this plane.
+  # Only valid when the matching *OidcAllowedIssuers names a single issuer; the
+  # registry refuses to start otherwise.
+  oidcMetadataClaims: false
+  adminOidcMetadataClaims: false
+  platformOidcMetadataClaims: false
+  # Workspace plane only. Accept organization-scoped credentials whose `aud` is
+  # an organization's configured audience, resolve that organization's single
+  # active workspace server-side, and require every workspace-plane token to
+  # carry the audience of the organization that owns its workspace.
+  #
+  # `oidcAudience` must be empty exactly when this is true, and non-empty when
+  # this is false and oidcAllowedIssuers names an issuer — the two keys are one
+  # setting with two states, not a flag plus an override, and the chart refuses
+  # to render any other combination. Turning this on therefore means clearing
+  # oidcAudience in the same change, never before it.
+  #
+  # An organization created without an audience authenticates nothing on this
+  # plane, and an organization with more than one active workspace stops
+  # resolving by audience. See
+  # docs/managed-agents/workspace-administration.md#organization-audience-workspace-resolution
+  # for the rollout checklist both of those imply.
+  oidcResolveWorkspaceByAudience: false
+  sse:
+    bufferSize: '256'
+    dropAgeMs: '5000'
+    heartbeatMs: '15000'
+  triggerScheduler:
+    # Planner and dispatcher run in-process and coordinate replicas in Postgres.
+    # Disable only when this Deployment is intentionally API-only.
+    enabled: true
+    reconcileIntervalMs: '5000'
+    batchSize: '100'
+  service:
+    type: ClusterIP
+    port: 8080
+    internalPort: 8081
+    adminPort: 8082
+  ingress:
+    enabled: false
+    className: ''
+    annotations: {}
+    # The whole public listener, not a list of prefixes.
+    #
+    # This used to be `/v1`, which silently made every non-`/v1` public route
+    # unreachable through the Ingress: `/api`, `/apis`, and the `/api/v1` alias
+    # 404ed at the ingress controller and never reached the Fastify rewrite. A
+    # prefix list here is a second, hand-maintained copy of the route table, and
+    # it drifts — a new API group under `/apis/<group>/<version>` would need a
+    # chart edit that nothing would fail without.
+    #
+    # Consequence worth knowing: `/healthz` and `/readyz` are reachable through
+    # the Ingress too. They are already unauthenticated on this listener and
+    # carry no per-caller state; an operator who wants them private denies those
+    # two paths at the ingress controller rather than narrowing this list.
+    hosts:
+      - host: orca-managed-agents.local
+        paths:
+          - path: /
+            pathType: Prefix
+    tls: []
+  # Alternative exposure through an Istio ingress gateway: a dedicated Gateway
+  # and VirtualService route https://<host> to the registry service. Use either
+  # this or ingress, not both.
+  istio:
+    enabled: false
+    # External host of the registry, e.g. registry.example.com.
+    host: ''
+    # Namespace of the selected ingress gateway workload (and of the TLS
+    # Secret named by gateway.tls.credentialName). The Gateway and the
+    # AuthorizationPolicy are created here rather than in the release
+    # namespace: Istio resolves the TLS credential from the gateway workload's
+    # namespace, AuthorizationPolicy only matches workloads in its own
+    # namespace, and meshes running pilot with
+    # PILOT_SCOPE_GATEWAY_TO_NAMESPACE=true ignore Gateway resources outside
+    # the workload's namespace. Helm's install/upgrade identity must be able
+    # to manage Gateway and AuthorizationPolicy resources in this namespace.
+    gatewayNamespace: istio-system
+    gateway:
+      # Workload labels of the Istio ingress gateway deployment serving the
+      # host, e.g. {istio: ingressgateway}. Required when istio.enabled=true;
+      # deliberately empty by default because Helm deep-merges maps, so any
+      # chart default would combine with (not be replaced by) operator values.
+      # A dedicated gateway deployment is recommended where available; on a
+      # shared gateway the DENY policy below stays scoped by port and SNI so
+      # it cannot affect other tenants' listeners.
+      selector: {}
+      tls:
+        # Secret (in gatewayNamespace) holding the TLS certificate for the
+        # host; terminated at the gateway in SIMPLE mode.
+        credentialName: ''
+    # Deny-by-default path scoping enforced at the ingress gateway: requests to
+    # the exposed host outside allowedPaths are rejected before they reach the
+    # registry, keeping debug or admin surfaces off the public host.
+    authorizationPolicy:
+      # Disable this policy when a namespace-scoped release pipeline
+      # provisions the gateway policy separately.
+      enabled: true
+      # Gateway workload ports that terminate HTTPS for the host. Istio DENY
+      # rules that carry HTTP-only attributes (hosts, notPaths) match ALL
+      # plain-TCP traffic on the selected workload, so the rule must stay
+      # port-scoped or it would black-hole unrelated TCP/TLS-passthrough
+      # listeners on a shared gateway. The default covers the standard
+      # istio-ingressgateway (Service port 443 -> workload port 8443) and
+      # gateways listening on 443 directly.
+      gatewayHttpsPorts:
+        - '443'
+        - '8443'
+      # Path patterns (Istio operation.paths syntax) reachable through the
+      # external host. /api and /apis are discovery endpoints; /api/v1 is
+      # the core alias, and /apis/* covers discoverable extension groups.
+      allowedPaths:
+        - /v1/*
+        - /api
+        - /api/v1/*
+        - /apis
+        - /apis/*
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  extraEnv: []
+  # Extra envFrom sources, appended last so an operator-supplied ConfigMap or
+  # Secret wins over the chart's own ConfigMap for duplicate keys. Explicit
+  # secretKeyRefs and the selected database Secret remain higher precedence.
+  # Use bundles for transcript-backend selection, object-store settings, and
+  # credentials that do not need a per-key override.
+  extraEnvFrom: []
+  #   - secretRef:
+  #       name: orca-postgres
+  # Per-variable credential sources. Each entry overrides the chart Secret for
+  # exactly one env var and may remap the key name, so bootstrap pipelines can
+  # keep their own Secret layout. Without registry.extraEnvFrom, Registry needs
+  # SESSION_JWT_PRIVATE_KEY_PEM here. It also needs DATABASE_URL,
+  # FILESTORE_DATABASE_URL, and MEMORYSTORE_DATABASE_URL unless
+  # external.databases.existingSecret supplies those fixed keys.
+  secretKeyRefs: {}
+  #   DATABASE_URL:
+  #     name: orca-postgres
+  #     key: registry-url
+  #     optional: false
+  # Extra volumes/mounts, e.g. the CA bundle a managed Postgres needs for
+  # sslmode=verify-full (the DSN's sslrootcert must point inside the mount).
+  extraVolumes: []
+  extraVolumeMounts: []
+  # Drizzle migrations run before the listener binds, so the startup probe --
+  # not the liveness probe -- owns the boot window. Set startupProbe: null to
+  # drop it.
+  startupProbe:
+    httpGet:
+      path: /healthz
+      port: http
+    periodSeconds: 5
+    failureThreshold: 30
+  readinessProbe:
+    httpGet:
+      path: /readyz
+      port: http
+    initialDelaySeconds: 5
+    periodSeconds: 10
+  livenessProbe:
+    httpGet:
+      path: /healthz
+      port: http
+    initialDelaySeconds: 15
+    periodSeconds: 20
+
+harness:
+  replicaCount: 2
+  # Base name for the Harness Deployment and Service; defaults to
+  # '<fullname>-harness'.
+  nameOverride: ''
+  serviceAccount:
+    create: true
+    annotations: {}
+    name: ''
+  # Harness reaches Registry with a projected audience-bound token, never with
+  # the default ServiceAccount token, so nothing needs the automounted one.
+  automountServiceAccountToken: false
+  podAnnotations: {}
+  podLabels: {}
+  httpPort: 9094
+  consumerGroup: harness-server
+  registryInternalBaseUrl: ''
+  aiGatewayUrl: ''
+  # Default LLM egress for cloud separate-mode Sessions. A Session-level
+  # metadata.orca_llm_egress value overrides this setting.
+  llmEgressDefault: direct
+  anthropicBaseUrl: ''
+  anthropicModelDefault: claude-sonnet-4-5-20250929
+  # NODE_ENV override. Empty derives it from the object-store credential mode:
+  # 'development' when static S3 keys are permitted (the harness refuses
+  # ALLOW_INSECURE_STATIC_S3_CREDS outside development/test), 'production'
+  # otherwise. Set 'test' for disposable stacks that report as test.
+  nodeEnv: ''
+  sandboxRuntime: opensandbox
+  workDir: /var/tmp/orca-harness
+  sessionIdleTimeoutMs: '60000'
+  # Sandbox-reachable callback URL for the git credential helper. Defaults to
+  # the cluster-qualified Registry Service URL, which is required because
+  # sandboxes run outside the release namespace.
+  gitCredsPublicUrl: ''
+  openSandbox:
+    domain: ''
+    protocol: http
+    image: ''
+    entrypoint: ''
+    timeoutSeconds: '1800'
+    useServerProxy: 'true'
+    requestTimeoutSeconds: '30'
+    # Per-sandbox pod requests. Agents idle in LLM turns, so burstable QoS
+    # (low requests, high limits) buys density; leave empty for the
+    # OpenSandbox server defaults.
+    resourceCpu: ''
+    resourceMemory: ''
+  # AgentENV is deployed independently. The harness talks to its gateway for
+  # lifecycle and envd proxy traffic; it does not schedule onto AgentENV nodes.
+  agentEnv:
+    baseUrl: ''
+    image: ''
+    timeoutSeconds: '1800'
+    requestTimeoutSeconds: '180'
+    cpuCount: ''
+    memoryMB: ''
+    # Leave empty to retain the source image's virtual size. AgentENV rejects
+    # shrink requests when [ublk.overlaybd].allow_shrink=false.
+    diskSizeMB: ''
+  e2b:
+    templateId: ''
+  service:
+    type: ClusterIP
+    port: 9094
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  extraEnv: []
+  extraEnvFrom: []
+  secretKeyRefs: {}
+  extraVolumes: []
+  extraVolumeMounts: []
+  # File-store migrations run at boot; the startup probe owns that window.
+  startupProbe:
+    httpGet:
+      path: /healthz
+      port: http
+    periodSeconds: 5
+    failureThreshold: 30
+  readinessProbe:
+    httpGet:
+      path: /readyz
+      port: http
+    initialDelaySeconds: 5
+    periodSeconds: 10
+  livenessProbe:
+    httpGet:
+      path: /healthz
+      port: http
+    initialDelaySeconds: 15
+    periodSeconds: 20
+
+aiGateway:
+  # Isolated Pi native routes. Each binding uses one protocol and a static API key.
+  # Requires the native_api_key Gateway implementation; legacy SDK routes stay separate.
+  piProviders: []
+  # - provider: anthropic
+  #   api: anthropic-messages
+  #   baseUrl: https://api.anthropic.com
+  #   apiKeyEnv: ANTHROPIC_API_KEY
+  #   auth: { type: header, name: x-api-key }
+  #   allowedPaths: [/v1/messages]
+  #   headers: { anthropic-version: '2023-06-01' }
+  #   forwardHeaders: [anthropic-beta]
+  # Requires an AI Gateway image with native /v1/responses support. The provider
+  # key lives only in the Gateway; inject OPENAI_API_KEY via extraEnv Secret refs.
+  openai:
+    enabled: false
+    baseUrl: https://api.openai.com/v1
+    apiKeyEnv: OPENAI_API_KEY
+  # Anthropic Messages and DeepSeek Chat use the same scoped Gateway endpoint.
+  # Inject the selected provider key through aiGateway.extraEnv Secret refs.
+  anthropic:
+    enabled: false
+    baseUrl: https://api.anthropic.com
+    apiKeyEnv: ANTHROPIC_API_KEY
+  deepseek:
+    enabled: false
+    # The Chat adapter appends /v1/chat/completions.
+    baseUrl: https://api.deepseek.com
+    apiKeyEnv: DEEPSEEK_API_KEY
+  # Set false when the gateway is installed from its own chart (orca-ai-gateway)
+  # instead of this one: the workload, Service and ConfigMap are dropped while
+  # Registry keeps authorizing the gateway's ServiceAccount subject, so point
+  # aiGateway.serviceAccount at the externally created identity and set
+  # harness.aiGatewayUrl at its Service.
+  enabled: true
+  replicaCount: 2
+  # Base name for the ai-gateway Deployment and Service; defaults to
+  # '<fullname>-ai-gateway'.
+  nameOverride: ''
+  serviceAccount:
+    create: true
+    annotations: {}
+    name: ''
+  # Same as harness: the Registry bearer is a projected audience-bound token.
+  automountServiceAccountToken: false
+  podAnnotations: {}
+  podLabels: {}
+  dataPort: 8090
+  adminPort: 9099
+  # Scope dimensions carried by the session JWT. Every dimension referenced by
+  # an authorizer rule or a destination template must be listed here.
+  scopeDims:
+    - workspace_id
+    - session_id
+    - org_id
+    - agent_id
+    - llm_routes
+    - llm_models
+    - mcp_server_names
+    - vault_ids
+    - credential_ids
+  registryVaultResolverUrlTemplate: ''
+  # Switches authoritative LLM usage from Harness to AI Gateway for colocated
+  # sessions. Enable only when the Registry usage sink below (or an equivalent
+  # external Gateway sink) is deployed.
+  registryUsage:
+    enabled: false
+    baseUrl: ''
+    timeoutMs: 3000
+    buffer: 10000
+  # Resolve a session-specific guardrail bundle from the Registry. Opt in after
+  # deploying a Gateway image that includes RegistryGuardrailSource. Policy
+  # edits then refresh through the source cache without changing this ConfigMap.
+  registryGuardrails:
+    enabled: false
+    baseUrl: ''
+    timeoutMs: 3000
+    cacheTtlSecs: 300
+    onBackendError: deny
+    mode: enforce
+    phases: [llm_request, llm_response, tool_call, tool_result]
+    onMissing: deny
+    onExpired: deny
+    onUnsupportedGuardrail: deny
+    failureMode: {}
+    refreshIntervalSecs: 30
+    maxStalenessSecs: 900
+    # Optional Gateway guardrail_state plugin, e.g. {name: policy-state,
+    # kind: redis, url: redis://redis:6379}. Use a shared state backend for
+    # stateful budgets when running more than one Gateway replica.
+    state: {}
+  # Registry-backed wildcard is always emitted after these optional exact-name
+  # overrides. "*" is reserved and must not appear in this map.
+  destinations: {}
+  destinationResolver:
+    urlTemplate: ''
+    timeoutMs: 5000
+    egress:
+      # Private destinations are denied unless their hostname is explicitly
+      # trusted here. The same host opt-in is required for plaintext HTTP;
+      # public HTTPS destinations remain subject to gateway SSRF checks.
+      allowedPrivateHosts: []
+      dnsTimeoutMs: 2000
+      connectTimeoutMs: 5000
+      # Upper bound on one MCP round trip. Long-running tool calls need more
+      # than the gateway default; leave empty to keep it.
+      responseTimeoutMs: ''
+  audit:
+    kafka:
+      brokers: kafka:9092
+      topicTemplate: orca.{scope.workspace_id}.audit.ai-gateway
+      clientId: ai-gateway
+      messageTimeoutMs: 5000
+      ssl: false
+      sslCaLocation: ''
+      sslCertificateLocation: ''
+      sslKeyLocation: ''
+      sasl:
+        enabled: false
+        mechanism: PLAIN
+        username: ''
+        password: ''
+      required: true
+      failureMode: deny
+  service:
+    type: ClusterIP
+    dataPort: 8090
+    adminPort: 9099
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  extraEnv: []
+  extraEnvFrom: []
+  # Extra volumes/mounts, e.g. a second trust anchor during session-JWT key
+  # rotation or a Kafka TLS bundle for the audit sink.
+  extraVolumes: []
+  extraVolumeMounts: []
+  startupProbe: null
+  readinessProbe:
+    httpGet:
+      path: /readyz
+      port: admin
+    initialDelaySeconds: 5
+    periodSeconds: 10
+  livenessProbe:
+    httpGet:
+      path: /healthz
+      port: admin
+    initialDelaySeconds: 15
+    periodSeconds: 20
+
+# Long-running Orca CLI toolset, enabled by default. It starts credentialless:
+# only ORCA_REGISTRY_URL is required, and users may inject workspace credentials
+# after exec. Set enabled=false to omit it. When a credential is mounted below,
+# anyone allowed to exec into the pod can use it.
+# ORCA_REGISTRY_URL defaults to this release's in-cluster public
+# Registry Service (host root, with no /v1 suffix), so `orca ...` commands work
+# without repeating connection flags. Optionally configure at most one API-key
+# or Bearer credential below. Bearer auth against the in-chart Registry also
+# requires public OIDC config.
+toolset:
+  enabled: true
+  replicaCount: 1
+  # Overrides the base name only. The chart always appends '-toolset' so this
+  # Deployment cannot collide with an older Orca CLI workload whose immutable
+  # selector used the 'orca-cli' component label.
+  nameOverride: ''
+  serviceAccount:
+    create: true
+    annotations: {}
+    name: ''
+  registryUrl: ''
+  apiKey:
+    # orca-cli v0.2.0 sends this value as `x-api-key`. Use a workspace API key
+    # for direct access to this chart's Registry. Keep the credential in a
+    # Secret; do not place its literal value in Helm values.
+    secretKeyRef:
+      name: ''
+      key: api-key
+  accessToken:
+    # orca-cli v0.2.0 sends this value as `Authorization: Bearer`. Use this for
+    # an OIDC-protected Registry or another front door with the same Bearer
+    # contract. apiKey/accessToken are optional and mutually exclusive.
+    secretKeyRef:
+      name: ''
+      key: access-token
+  podAnnotations: {}
+  # Additional pod metadata only. The name, instance, and component labels are
+  # Deployment selector keys and therefore reserved by the chart.
+  podLabels: {}
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  # Provider credentials and other optional tooling configuration. Explicit
+  # ORCA_REGISTRY_URL and the selected auth variable take precedence over
+  # duplicate envFrom keys. When neither credential is configured, the chart
+  # renders no ORCA_API_KEY or ORCA_ACCESS_TOKEN entry.
+  extraEnv: []
+  extraEnvFrom: []
+  extraVolumes: []
+  extraVolumeMounts: []
+
+migrations:
+  registry:
+    initContainer:
+      enabled: true
+    job:
+      enabled: false
+    backoffLimit: 3
+    annotations: {}
+
+# Helm test hook. It verifies the two application services this chart owns;
+# ai-gateway may be installed by its standalone chart when aiGateway.enabled
+# is false, so it intentionally is not a dependency of this hook.
+tests:
+  enabled: true
+  image:
+    repository: busybox
+    tag: '1.36'
+    pullPolicy: IfNotPresent
+  # BusyBox has no writable application directory. The hook only writes
+  # responses to stdout, so it can run with a read-only root filesystem.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ['ALL']
+    readOnlyRootFilesystem: true

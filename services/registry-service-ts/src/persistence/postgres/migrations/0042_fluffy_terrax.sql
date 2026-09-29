@@ -1,0 +1,2 @@
+ALTER TABLE "vault_credentials" ADD COLUMN "oauth_refresh_lease_owner" text;--> statement-breakpoint
+ALTER TABLE "vault_credentials" ADD COLUMN "oauth_refresh_lease_expires_at" timestamp with time zone;

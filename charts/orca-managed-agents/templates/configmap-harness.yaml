@@ -1,0 +1,118 @@
+{{- $hasInlineStaticCredentials := and (not (empty .Values.secrets.values.s3AccessKeyId)) (not (empty .Values.secrets.values.s3SecretAccessKey)) -}}
+{{- $useStaticCredentials := and (empty .Values.objectStorage.stsRoleArn) (or .Values.objectStorage.allowStaticCredentials $hasInlineStaticCredentials) -}}
+{{- $nodeEnv := default (ternary "development" "production" $useStaticCredentials) .Values.harness.nodeEnv -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "orca-managed-agents.fullname" . }}-harness-config
+  labels:
+    {{- include "orca-managed-agents.labels" . | nindent 4 }}
+data:
+  NODE_ENV: {{ $nodeEnv | quote }}
+  ALLOW_INSECURE_STATIC_S3_CREDS: {{ $useStaticCredentials | quote }}
+  HTTP_PORT: {{ .Values.harness.httpPort | quote }}
+  TRANSCRIPT_STORE_BACKEND: {{ .Values.transcriptStore.backend | quote }}
+  KAFKA_BROKERS: {{ .Values.transcriptStore.kafka.brokers | quote }}
+  KAFKA_CONNECTION_MODE: {{ .Values.transcriptStore.kafka.connectionMode | quote }}
+  KAFKA_TOPIC_PREFIX: {{ .Values.transcriptStore.kafka.topicPrefix | quote }}
+  KAFKA_TOPIC_REDISCOVER_INTERVAL_MS: {{ .Values.transcriptStore.kafka.topicRediscoverIntervalMs | quote }}
+  KAFKA_SSL: {{ .Values.transcriptStore.kafka.ssl | quote }}
+  KAFKA_SSL_REJECT_UNAUTHORIZED: {{ .Values.transcriptStore.kafka.sslRejectUnauthorized | quote }}
+  KAFKA_SSL_CA_FILE: {{ .Values.transcriptStore.kafka.sslCaFile | quote }}
+  KAFKA_SSL_CERT_FILE: {{ .Values.transcriptStore.kafka.sslCertFile | quote }}
+  KAFKA_SSL_KEY_FILE: {{ .Values.transcriptStore.kafka.sslKeyFile | quote }}
+  KAFKA_SASL_MECHANISM: {{ .Values.transcriptStore.kafka.saslMechanism | quote }}
+  {{- include "orca-managed-agents.kafkaTranscriptEncoding" . | nindent 2 }}
+  HARNESS_CONSUMER_GROUP: {{ .Values.harness.consumerGroup | quote }}
+  TRANSCRIPT_STORE_POOL_MAX: {{ .Values.databasePools.transcriptStoreMax | quote }}
+  FILESTORE_POOL_MAX: {{ .Values.databasePools.fileStoreMax | quote }}
+  POSTGRES_EVENT_POLL_INTERVAL_MS: {{ .Values.transcriptStore.postgres.eventPollIntervalMs | quote }}
+  POSTGRES_EVENT_LEASE_MS: {{ .Values.transcriptStore.postgres.eventLeaseMs | quote }}
+  PULSAR_SERVICE_URL: {{ .Values.transcriptStore.pulsar.serviceUrl | quote }}
+  PULSAR_TENANT: {{ .Values.transcriptStore.pulsar.tenant | quote }}
+  PULSAR_NAMESPACE: {{ .Values.transcriptStore.pulsar.namespace | quote }}
+  PULSAR_TOPIC_PREFIX: {{ .Values.transcriptStore.pulsar.topicPrefix | quote }}
+  PULSAR_RECEIVE_TIMEOUT_MS: {{ .Values.transcriptStore.pulsar.receiveTimeoutMs | quote }}
+  PULSAR_ACK_TIMEOUT_MS: {{ .Values.transcriptStore.pulsar.ackTimeoutMs | quote }}
+  PULSAR_AUTH_TYPE: {{ .Values.transcriptStore.pulsar.authType | quote }}
+  PULSAR_OAUTH2_ISSUER_URL: {{ .Values.transcriptStore.pulsar.oauth2IssuerUrl | quote }}
+  PULSAR_OAUTH2_CLIENT_ID: {{ .Values.transcriptStore.pulsar.oauth2ClientId | quote }}
+  PULSAR_OAUTH2_AUDIENCE: {{ .Values.transcriptStore.pulsar.oauth2Audience | quote }}
+  PULSAR_OAUTH2_SCOPE: {{ .Values.transcriptStore.pulsar.oauth2Scope | quote }}
+  PULSAR_OAUTH2_TYPE: {{ .Values.transcriptStore.pulsar.oauth2Type | quote }}
+  REGISTRY_INTERNAL_BASE_URL: {{ default (include "orca-managed-agents.registryInternalUrl" .) .Values.harness.registryInternalBaseUrl | quote }}
+  INTERNAL_SERVICE_TOKEN_FILE: {{ printf "%s/token" .Values.internalAuth.tokenMountPath | quote }}
+  AI_GATEWAY_URL: {{ default (include "orca-managed-agents.aiGatewayMcpUrl" .) .Values.harness.aiGatewayUrl | quote }}
+  LLM_EGRESS_DEFAULT: {{ .Values.harness.llmEgressDefault | quote }}
+  {{- if or .Values.registry.aiGatewayLlmUrl .Values.aiGateway.openai.enabled .Values.aiGateway.anthropic.enabled .Values.aiGateway.deepseek.enabled (not (empty .Values.aiGateway.piProviders)) }}
+  LLM_GATEWAY_URL: {{ default (printf "%s/v1" (include "orca-managed-agents.aiGatewayMcpUrl" .)) .Values.registry.aiGatewayLlmUrl | quote }}
+  {{- end }}
+  {{- /* An empty value is NOT equivalent to an unset one here: the harness
+         forwards ANTHROPIC_BASE_URL to the Anthropic SDK whenever the variable
+         is defined, so emitting "" would blank out the provider endpoint. */}}
+  {{- with .Values.harness.anthropicBaseUrl }}
+  ANTHROPIC_BASE_URL: {{ . | quote }}
+  {{- end }}
+  ANTHROPIC_MODEL_DEFAULT: {{ .Values.harness.anthropicModelDefault | quote }}
+  SANDBOX_RUNTIME: {{ .Values.harness.sandboxRuntime | quote }}
+  {{- /* Overrides @orca/harness-catalog's build-time claude_code default so
+         an installed release consumes the sandbox-harness image THIS release
+         published, not a floating :latest baked into the harness image.
+         Published charts pin content by digest independently of OpenSandbox
+         repository authorization. Preserve the tag-free digest rendering for
+         compatibility with legacy exact ORCA_TRUSTED_SANDBOX_WORKLOADS entries;
+         repository policy accepts either reference form. */}}
+  {{- $sandboxHarness := .Values.images.sandboxHarness.claudeCode }}
+  {{- if $sandboxHarness.digest }}
+  SANDBOX_HARNESS_CLAUDE_CODE_IMAGE: {{ printf "%s@%s" $sandboxHarness.repository $sandboxHarness.digest | quote }}
+  {{- else }}
+  SANDBOX_HARNESS_CLAUDE_CODE_IMAGE: {{ printf "%s:%s" $sandboxHarness.repository ($sandboxHarness.tag | default .Chart.AppVersion) | quote }}
+  {{- end }}
+  S3_ENDPOINT: {{ .Values.objectStorage.endpoint | quote }}
+  S3_FORCE_PATH_STYLE: {{ .Values.objectStorage.forcePathStyle | quote }}
+  S3_STS_ENDPOINT: {{ .Values.objectStorage.stsEndpoint | quote }}
+  S3_BUCKET: {{ .Values.objectStorage.bucket | quote }}
+  S3_REGION: {{ .Values.objectStorage.region | quote }}
+  S3_KEY_PREFIX: {{ .Values.objectStorage.keyPrefix | quote }}
+  S3_STS_ROLE_ARN: {{ .Values.objectStorage.stsRoleArn | quote }}
+  OPEN_SANDBOX_DOMAIN: {{ .Values.harness.openSandbox.domain | quote }}
+  OPEN_SANDBOX_PROTOCOL: {{ .Values.harness.openSandbox.protocol | quote }}
+  {{- /* Sandbox image/entrypoint/resources are forwarded verbatim into the
+         OpenSandbox acquire request; an empty string there is a malformed
+         request, while an absent key keeps the server-side default. */}}
+  {{- with .Values.harness.openSandbox.image }}
+  OPEN_SANDBOX_IMAGE: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.harness.openSandbox.entrypoint }}
+  OPEN_SANDBOX_ENTRYPOINT: {{ . | quote }}
+  {{- end }}
+  OPEN_SANDBOX_TIMEOUT_SECONDS: {{ .Values.harness.openSandbox.timeoutSeconds | quote }}
+  OPEN_SANDBOX_USE_SERVER_PROXY: {{ .Values.harness.openSandbox.useServerProxy | quote }}
+  OPEN_SANDBOX_REQUEST_TIMEOUT_SECONDS: {{ .Values.harness.openSandbox.requestTimeoutSeconds | quote }}
+  {{- with .Values.harness.openSandbox.resourceCpu }}
+  OPEN_SANDBOX_RESOURCE_CPU: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.harness.openSandbox.resourceMemory }}
+  OPEN_SANDBOX_RESOURCE_MEMORY: {{ . | quote }}
+  {{- end }}
+  AGENTENV_BASE_URL: {{ .Values.harness.agentEnv.baseUrl | quote }}
+  {{- with .Values.harness.agentEnv.image }}
+  AGENTENV_IMAGE: {{ . | quote }}
+  {{- end }}
+  AGENTENV_TIMEOUT_SECONDS: {{ .Values.harness.agentEnv.timeoutSeconds | quote }}
+  AGENTENV_REQUEST_TIMEOUT_SECONDS: {{ .Values.harness.agentEnv.requestTimeoutSeconds | quote }}
+  {{- with .Values.harness.agentEnv.cpuCount }}
+  AGENTENV_CPU_COUNT: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.harness.agentEnv.memoryMB }}
+  AGENTENV_MEMORY_MB: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.harness.agentEnv.diskSizeMB }}
+  AGENTENV_DISK_SIZE_MB: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.harness.e2b.templateId }}
+  E2B_TEMPLATE_ID: {{ . | quote }}
+  {{- end }}
+  HARNESS_WORK_DIR: {{ .Values.harness.workDir | quote }}
+  GIT_CREDS_PUBLIC_URL: {{ include "orca-managed-agents.gitCredsPublicUrl" . | quote }}
+  SESSION_IDLE_TIMEOUT_MS: {{ .Values.harness.sessionIdleTimeoutMs | quote }}

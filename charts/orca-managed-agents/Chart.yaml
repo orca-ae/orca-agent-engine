@@ -1,0 +1,22 @@
+# Copyright The Orca Authors
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: v2
+name: orca-managed-agents
+description: >-
+  Orca Agent Engine for self-hosted managed agents: registry, harness, AI gateway
+  and optional observability exporter services against external storage and
+  broker dependencies
+home: https://runorca.ai
+sources:
+  - https://github.com/orca-ae/orca-agent-engine
+type: application
+# Development defaults. Tagged release packages override both values from the
+# normalized Git tag via `helm package --version --app-version`; appVersion is
+# kept in sync with version because the registry and harness image tags
+# default to appVersion.
+version: 0.3.0
+appVersion: '0.3.0'
+# The -0 pre-release bound accepts vendor-suffixed Kubernetes builds such as
+# EKS's v1.35.6-eks-8f14419; without it Helm rejects those clusters.
+kubeVersion: '>=1.19.0-0'

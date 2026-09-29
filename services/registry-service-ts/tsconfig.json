@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // The conformance tooling ships as plain `.mjs` (scripts/*.mjs) and its unit
+    // specs import it directly. Allow resolving those JS modules so a
+    // `tsc --noEmit` over the tests can type them; `checkJs: false` keeps the
+    // scripts themselves out of the type check (they are exercised at runtime).
+    "allowJs": true,
+    "checkJs": false
+  },
+  "include": ["src/**/*", "test/**/*"]
+}

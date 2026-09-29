@@ -1,0 +1,28 @@
+{
+  "name": "@orca/environment-worker",
+  "version": "0.0.0",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsup src/main.ts src/worktree-thread.ts --format esm --dts --target node22",
+    "start": "node dist/main.js",
+    "dev": "tsx src/main.ts",
+    "test": "vitest run --exclude 'test/integration/**'",
+    "lint": "eslint 'src/**/*.ts' 'test/**/*.ts'"
+  },
+  "dependencies": {
+    "@orca/harness-tunnel": "workspace:*",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.5.0",
+    "@vitest/coverage-v8": "^2.0.0",
+    "tsup": "^8.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
+  }
+}

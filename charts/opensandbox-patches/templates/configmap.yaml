@@ -1,0 +1,10 @@
+# Three gVisor + in-sandbox FUSE-only Python modules overlaid through subPath
+# mounts onto the official OpenSandbox server v0.2.2 image. No explicit
+# namespace: ConfigMap lands in release destination namespace
+# (normally opensandbox-system).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: opensandbox-server-gvisor-fuse-patch
+data:
+  {{- (.Files.Glob "files/*.py").AsConfig | nindent 2 }}

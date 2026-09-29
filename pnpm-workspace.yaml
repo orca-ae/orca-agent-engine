@@ -1,0 +1,34 @@
+# Copyright The Orca Authors
+# SPDX-License-Identifier: Apache-2.0
+
+packages:
+  - 'services/registry-service-ts'
+  - 'services/harness-server'
+  - 'services/environment-worker'
+  - 'services/observability-exporter'
+  - 'services/sandbox-harness'
+  - 'services/session-runner'
+  - 'packages/agent-event-contract'
+  - 'packages/cloud-sandbox'
+  - 'packages/codex-harness'
+  - 'packages/sdk-harness'
+  - 'packages/pi-harness'
+  - 'packages/e2e-tests'
+  - 'packages/file-store'
+  - 'packages/guardrails'
+  - 'packages/harness-catalog'
+  - 'packages/harness-tunnel'
+  - 'packages/memory-store'
+  - 'packages/oeadm'
+  - 'packages/sandbox-runtime'
+  - 'packages/skill-store'
+  - 'packages/transcript-store'
+  - 'packages/transcript-store-types'
+allowBuilds:
+  argon2: true
+  better-sqlite3: true
+  esbuild: true
+  protobufjs: true
+  pulsar-client: true
+minimumReleaseAgeExclude:
+  - '@anthropic-ai/sdk@0.113.0'

@@ -1,0 +1,463 @@
+{{- $images := default (dict) .Values.images -}}
+{{- $observabilityExporter := default (dict) .Values.observabilityExporter -}}
+{{- $observabilityExporterServiceAccount := default (dict) (dig "serviceAccount" (dict) $observabilityExporter) -}}
+{{- if (dig "enabled" false $observabilityExporter) -}}
+{{- $podLabels := default (dict) $observabilityExporter.podLabels -}}
+{{- if not (kindIs "map" $podLabels) -}}
+{{- fail "observabilityExporter.podLabels must be a map" -}}
+{{- end -}}
+{{- range $reservedLabel := list "app.kubernetes.io/name" "app.kubernetes.io/instance" "app.kubernetes.io/component" -}}
+{{- if hasKey $podLabels $reservedLabel -}}
+{{- fail (printf "observabilityExporter.podLabels must not set reserved selector label %q" $reservedLabel) -}}
+{{- end -}}
+{{- end -}}
+{{- if ne .Values.transcriptStore.backend "kafka" -}}
+{{- fail "observabilityExporter.enabled requires transcriptStore.backend=kafka" -}}
+{{- end -}}
+{{- $stateBackend := dig "stateBackend" "kafka" $observabilityExporter -}}
+{{- if not (has $stateBackend (list "kafka" "postgres")) -}}
+{{- fail "observabilityExporter.stateBackend must be kafka or postgres" -}}
+{{- end -}}
+{{- if and (eq $stateBackend "kafka") (hasKey (default (dict) $observabilityExporter.secretKeyRefs) "OBSERVABILITY_EXPORTER_DATABASE_URL") -}}
+{{- fail "observabilityExporter.stateBackend=kafka rejects secretKeyRefs.OBSERVABILITY_EXPORTER_DATABASE_URL; choose stateBackend=postgres to preserve existing progress, or remove the DB reference only after a controlled cutover to Kafka state" -}}
+{{- end -}}
+{{- if eq $stateBackend "kafka" -}}
+{{- $stateReservedLists := dict
+      "extraVolumes" (default (list) $observabilityExporter.extraVolumes)
+      "extraVolumeMounts" (default (list) $observabilityExporter.extraVolumeMounts) -}}
+{{- range $path, $items := $stateReservedLists -}}
+{{- range $item := $items -}}
+{{- if eq (dig "name" "" $item) "exporter-state" -}}
+{{- fail (printf "observabilityExporter.stateBackend=kafka reserves the exporter-state volume name; remove the %s entry" $path) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- range $mount := default (list) $observabilityExporter.extraVolumeMounts -}}
+{{- $path := clean (dig "mountPath" "" $mount) -}}
+{{- $statePath := "/var/run/orca/exporter-state" -}}
+{{- if or (eq $path $statePath) (eq $path "/") (hasPrefix (printf "%s/" $statePath) $path) (hasPrefix (printf "%s/" $path) $statePath) -}}
+{{- fail "observabilityExporter.stateBackend=kafka reserves /var/run/orca/exporter-state; remove the overlapping extraVolumeMounts entry" -}}
+{{- end -}}
+{{- end -}}
+{{- range $entry := default (list) $observabilityExporter.extraEnv -}}
+{{- if and (eq $entry.name "OBSERVABILITY_EXPORTER_DATABASE_URL") (or (not (empty $entry.value)) (hasKey $entry "valueFrom")) -}}
+{{- fail "observabilityExporter.stateBackend=kafka rejects extraEnv.OBSERVABILITY_EXPORTER_DATABASE_URL; choose stateBackend=postgres to preserve existing progress, or remove the DB reference only after a controlled cutover to Kafka state" -}}
+{{- end -}}
+{{- end -}}
+{{- /* extraEnvFrom keys/values are opaque at render time; do not reject unrelated
+       Kafka credential/config sources. Operators must inspect their resolved keys. */ -}}
+{{- end -}}
+{{- if eq $stateBackend "postgres" -}}
+{{- $db := dig "secretKeyRefs" "OBSERVABILITY_EXPORTER_DATABASE_URL" (dict) $observabilityExporter -}}
+{{- if or (empty (get $db "name")) (empty (get $db "key")) (get $db "optional") -}}
+{{- fail "observabilityExporter.secretKeyRefs.OBSERVABILITY_EXPORTER_DATABASE_URL requires name and key and must not be optional" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if or (hasKey .Values "orcaCli") (hasKey $images "orcaCli") -}}
+{{- fail "orcaCli values were renamed to toolset; upgrade with --reset-values -f <migrated-values.yaml> after renaming orcaCli to toolset and images.orcaCli to images.toolset; --reuse-values is unsupported for this migration" -}}
+{{- end -}}
+{{- if or (not (hasKey .Values "toolset")) (not (hasKey $images "toolset")) -}}
+{{- fail "toolset defaults are missing; upgrades from a pre-toolset values schema must use --reset-values -f <migrated-values.yaml>, not --reuse-values" -}}
+{{- end -}}
+{{- if and .Values.migrations.registry.initContainer.enabled .Values.migrations.registry.job.enabled -}}
+{{- fail "migrations.registry: only one of initContainer or job may be enabled at a time" -}}
+{{- end -}}
+{{- $hasInlineS3AccessKey := not (empty .Values.secrets.values.s3AccessKeyId) -}}
+{{- $hasInlineS3SecretKey := not (empty .Values.secrets.values.s3SecretAccessKey) -}}
+{{- if ne $hasInlineS3AccessKey $hasInlineS3SecretKey -}}
+{{- fail "secrets.values.s3AccessKeyId and secrets.values.s3SecretAccessKey must be configured together" -}}
+{{- end -}}
+{{- $hasInlineStaticCredentials := and $hasInlineS3AccessKey $hasInlineS3SecretKey -}}
+{{- $allowsStaticCredentials := or .Values.objectStorage.allowStaticCredentials $hasInlineStaticCredentials -}}
+{{- if and (not (empty .Values.objectStorage.bucket)) (empty .Values.objectStorage.stsRoleArn) (not $allowsStaticCredentials) -}}
+{{- fail "objectStorage.stsRoleArn is required when objectStorage.bucket is configured; development-only static credentials require both secrets.values S3 keys or objectStorage.allowStaticCredentials=true for an existing Secret" -}}
+{{- end -}}
+{{- if eq .Values.secretStore.mode "local" -}}
+{{- fail "secretStore.mode=local is development-only and cannot be used by the Kubernetes deployment" -}}
+{{- end -}}
+{{- if not (has .Values.secretStore.mode (list "none" "kubernetes")) -}}
+{{- fail "secretStore.mode must be one of: none, kubernetes" -}}
+{{- end -}}
+{{- if not (has .Values.harness.llmEgressDefault (list "direct" "gateway")) -}}
+{{- fail "harness.llmEgressDefault must be one of: direct, gateway" -}}
+{{- end -}}
+{{- if and (eq .Values.harness.llmEgressDefault "gateway") (not .Values.registry.aiGatewayLlmUrl) (not .Values.aiGateway.openai.enabled) (not .Values.aiGateway.anthropic.enabled) (not .Values.aiGateway.deepseek.enabled) (empty .Values.aiGateway.piProviders) -}}
+{{- fail "harness.llmEgressDefault=gateway requires registry.aiGatewayLlmUrl or an enabled aiGateway LLM provider" -}}
+{{- end -}}
+{{- if ne .Values.internalAuth.mode "kubernetes_service_account" -}}
+{{- fail "internalAuth.mode must be kubernetes_service_account for the Kubernetes chart" -}}
+{{- end -}}
+{{- /* A malformed digest would render a sandbox-harness reference the
+       OpenSandbox trust validation rejects; fail at render time instead. */ -}}
+{{- with .Values.images.sandboxHarness.claudeCode.digest -}}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" .) -}}
+{{- fail "images.sandboxHarness.claudeCode.digest must be a full sha256:<64-hex-digit> manifest digest" -}}
+{{- end -}}
+{{- end -}}
+{{- with .Values.images.toolset.digest -}}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" .) -}}
+{{- fail "images.toolset.digest must be a full sha256:<64-hex-digit> manifest digest" -}}
+{{- end -}}
+{{- end -}}
+{{- $trustedProxyCidrs := default (list) .Values.registry.trustedProxyCidrs -}}
+{{- if not (kindIs "slice" $trustedProxyCidrs) -}}
+{{- fail "registry.trustedProxyCidrs must be a list of explicit proxy IPs or CIDRs" -}}
+{{- end -}}
+{{- if and .Values.registry.ingress.enabled .Values.registry.istio.enabled -}}
+{{- fail "registry.ingress.enabled and registry.istio.enabled cannot both be true" -}}
+{{- end -}}
+{{- if and .Values.registry.ingress.enabled (eq (len $trustedProxyCidrs) 0) -}}
+{{- fail "registry.trustedProxyCidrs is required when registry.ingress.enabled=true" -}}
+{{- end -}}
+{{- if and .Values.registry.istio.enabled (eq (len $trustedProxyCidrs) 0) -}}
+{{- fail "registry.trustedProxyCidrs is required when registry.istio.enabled=true" -}}
+{{- end -}}
+{{- range $trustedProxyCidr := $trustedProxyCidrs -}}
+{{- if or (eq (toString $trustedProxyCidr) "0.0.0.0/0") (eq (toString $trustedProxyCidr) "::/0") -}}
+{{- fail "registry.trustedProxyCidrs must not trust all forwarded addresses" -}}
+{{- end -}}
+{{- end -}}
+{{- /* The render-time audience checks below can only judge what Helm can read,
+       so they compute the EFFECTIVE source of each audience variable first —
+       the last write before Kubernetes resolves it:
+
+         - a `registry.secretKeyRefs.<ENV>` entry renders an explicit env entry
+           for the key, and explicit env entries override every envFrom source;
+           its contents are invisible, so the check defers to the startup
+           assertion;
+         - a matching `registry.extraEnv` entry is rendered last in env, and the
+           last duplicate name wins. A `value` entry is fully visible to Helm:
+           an EMPTY one is a misconfiguration this render rejects, a non-empty
+           one satisfies the check outright. A `valueFrom` entry defers;
+         - `registry.extraEnvFrom` sources are appended after the chart
+           ConfigMap in envFrom, where later sources override earlier ones for
+           duplicate keys. Only an UNPREFIXED source can override the ConfigMap
+           keys; a prefixed one writes `<prefix><KEY>` instead. The prefix sits
+           BESIDE `secretRef`/`configMapRef` on the EnvFromSource per the
+           Kubernetes schema, so it is read off the source itself.
+
+       The result per variable: "known-empty" (reject here), "deferred"
+       (startup assertion), or literal (check the values as before). */ -}}
+{{- $registrySecretRefs := default (dict) .Values.registry.secretKeyRefs -}}
+{{- $registryExtraEnv := default (list) .Values.registry.extraEnv -}}
+{{- $registryExtraEnvFrom := default (list) .Values.registry.extraEnvFrom -}}
+{{- $oidcAudienceEnvSource := dict
+      "OIDC_AUDIENCE" "literal"
+      "ADMIN_OIDC_AUDIENCE" "literal"
+      "PLATFORM_OIDC_AUDIENCE" "literal" -}}
+{{- range $key, $_ := $registrySecretRefs -}}
+{{- if hasKey $oidcAudienceEnvSource $key -}}
+{{- $_ := set $oidcAudienceEnvSource $key "deferred" -}}
+{{- end -}}
+{{- end -}}
+{{- range $entry := $registryExtraEnv -}}
+{{- $name := dig "name" "" $entry -}}
+{{- if hasKey $oidcAudienceEnvSource $name -}}
+{{- if hasKey $entry "value" -}}
+{{- if empty (trim (toString (index $entry "value"))) -}}
+{{- $_ := set $oidcAudienceEnvSource $name "known-empty" -}}
+{{- else -}}
+{{- $_ := set $oidcAudienceEnvSource $name "overridden" -}}
+{{- end -}}
+{{- else -}}
+{{- $_ := set $oidcAudienceEnvSource $name "deferred" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- range $source := $registryExtraEnvFrom -}}
+{{- $prefix := dig "prefix" "" $source -}}
+{{- if empty $prefix -}}
+{{- range $key, $_ := $oidcAudienceEnvSource -}}
+{{- if eq (index $oidcAudienceEnvSource $key) "literal" -}}
+{{- $_ := set $oidcAudienceEnvSource $key "deferred" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- /* The workspace plane's audience and its audience MODE have to agree, and
+       the registry refuses to start when they do not. Both combinations are
+       render-time failures here so an upgrade is rejected before it replaces a
+       running pod with one that crash-loops.
+
+       An empty `oidcAudience` with the resolver off is the dangerous half: jose
+       treats an empty audience option as presence-only, so such a pod requires
+       an `aud` claim and compares nothing — every token an allowed issuer minted
+       for any relying party is accepted. A Secret key that exists but is blank
+       looks identical to a configured one, which is why this is checked on the
+       value rather than assumed from its presence — and why it only fires when
+       the value cannot be overridden through `secretKeyRefs`, `extraEnv` or
+       `extraEnvFrom` (see above). */ -}}
+{{- $hasWorkspaceOidcIssuer := false -}}
+{{- range $issuer := splitList "," (default "" .Values.registry.oidcAllowedIssuers) -}}
+{{- if not (empty (trim $issuer)) -}}
+{{- $hasWorkspaceOidcIssuer = true -}}
+{{- end -}}
+{{- end -}}
+{{- $workspaceOidcAudience := trim (default "" .Values.registry.oidcAudience) -}}
+{{- if and .Values.registry.oidcResolveWorkspaceByAudience (not (empty $workspaceOidcAudience)) -}}
+{{- fail "registry.oidcAudience must be empty when registry.oidcResolveWorkspaceByAudience=true: that mode stops verifying the static audience and binds each token to the audience of the organization owning its workspace, so a value left here is never checked" -}}
+{{- end -}}
+{{- if and (not .Values.registry.oidcResolveWorkspaceByAudience) $hasWorkspaceOidcIssuer (eq (index $oidcAudienceEnvSource "OIDC_AUDIENCE") "known-empty") -}}
+{{- fail "registry.extraEnv sets OIDC_AUDIENCE to an empty string with the chart values leaving it unset: an empty audience is not 'no audience check', it accepts any aud value an allowed issuer emitted for any relying party" -}}
+{{- end -}}
+{{- if and (not .Values.registry.oidcResolveWorkspaceByAudience) $hasWorkspaceOidcIssuer (empty $workspaceOidcAudience) (eq (index $oidcAudienceEnvSource "OIDC_AUDIENCE") "literal") -}}
+{{- fail "registry.oidcAudience is required when registry.oidcAllowedIssuers is set and registry.oidcResolveWorkspaceByAudience=false: an empty audience is not 'no audience check', it accepts any aud value an allowed issuer emitted for any relying party" -}}
+{{- end -}}
+{{- /* The admin and platform planes have one audience mode and no second state:
+       they never resolve workspaces, so every token they verify must carry the
+       plane's one static audience. The dangerous half of the rule above is
+       therefore theirs unchanged, and `assertAudienceMatchesMode` refuses all
+       three planes at startup — leaving it to that assertion alone would let an
+       upgrade replace a running pod with a crash-looping one.
+
+       Two gates keep the check honest. The issuer gate: a plane that spells
+       out no issuer in the values has no OIDC verification to
+       misconfigure. The effective-source gate (see the block above): an
+       audience whose env var resolves from a `secretKeyRefs` entry, an
+       `extraEnv` `valueFrom`, or an unprefixed `extraEnvFrom` source — mixing
+       a literal issuer with a Secret-backed audience is exactly that shape —
+       is judged at startup, where the Secret contents are readable, while an
+       `extraEnv` entry whose literal `value` is empty is rejected here because
+       Helm emits it and sees that it is empty. */ -}}
+{{- range $plane := list
+      (dict "issuersKey" "adminOidcAllowedIssuers" "audienceKey" "adminOidcAudience"
+            "envKey" "ADMIN_OIDC_AUDIENCE"
+            "issuers" .Values.registry.adminOidcAllowedIssuers
+            "audience" .Values.registry.adminOidcAudience)
+      (dict "issuersKey" "platformOidcAllowedIssuers" "audienceKey" "platformOidcAudience"
+            "envKey" "PLATFORM_OIDC_AUDIENCE"
+            "issuers" .Values.registry.platformOidcAllowedIssuers
+            "audience" .Values.registry.platformOidcAudience) -}}
+{{- $hasPlaneOidcIssuer := false -}}
+{{- range $issuer := splitList "," (default "" $plane.issuers) -}}
+{{- if not (empty (trim $issuer)) -}}
+{{- $hasPlaneOidcIssuer = true -}}
+{{- end -}}
+{{- end -}}
+{{- if and $hasPlaneOidcIssuer (eq (index $oidcAudienceEnvSource $plane.envKey) "known-empty") -}}
+{{- fail (printf "registry.extraEnv sets %s to an empty string with the chart values leaving it unset: an empty audience is not 'no audience check', it accepts any aud value an allowed issuer emitted for any relying party" $plane.envKey) -}}
+{{- end -}}
+{{- if and $hasPlaneOidcIssuer (empty (trim (default "" $plane.audience))) (eq (index $oidcAudienceEnvSource $plane.envKey) "literal") -}}
+{{- fail (printf "registry.%s is required when registry.%s is set: an empty audience is not 'no audience check', it accepts any aud value an allowed issuer emitted for any relying party" $plane.audienceKey $plane.issuersKey) -}}
+{{- end -}}
+{{- end -}}
+{{- if not (kindIs "map" .Values.podSecurityContext) -}}
+{{- fail "podSecurityContext.fsGroup is required so workloads can read the projected internal-auth token" -}}
+{{- end -}}
+{{- if not (hasKey .Values.podSecurityContext "fsGroup") -}}
+{{- fail "podSecurityContext.fsGroup is required so workloads can read the projected internal-auth token" -}}
+{{- end -}}
+{{- if eq (toString .Values.podSecurityContext.fsGroup) "<nil>" -}}
+{{- fail "podSecurityContext.fsGroup is required so workloads can read the projected internal-auth token" -}}
+{{- end -}}
+{{- if or (lt (int .Values.internalAuth.tokenExpirationSeconds) 600) (gt (int .Values.internalAuth.tokenExpirationSeconds) 3600) -}}
+{{- fail "internalAuth.tokenExpirationSeconds must be between 600 and 3600" -}}
+{{- end -}}
+{{- if and (not .Values.registry.serviceAccount.create) (empty .Values.registry.serviceAccount.name) -}}
+{{- fail "registry.serviceAccount.name is required when create=false" -}}
+{{- end -}}
+{{- if and (not .Values.harness.serviceAccount.create) (empty .Values.harness.serviceAccount.name) -}}
+{{- fail "harness.serviceAccount.name is required when create=false" -}}
+{{- end -}}
+{{- if and (not .Values.aiGateway.serviceAccount.create) (empty .Values.aiGateway.serviceAccount.name) -}}
+{{- fail "aiGateway.serviceAccount.name is required when create=false" -}}
+{{- end -}}
+{{- if and (not (dig "create" true $observabilityExporterServiceAccount)) (empty (dig "name" "" $observabilityExporterServiceAccount)) -}}
+{{- fail "observabilityExporter.serviceAccount.name is required when create=false" -}}
+{{- end -}}
+{{- if and .Values.toolset.enabled (not .Values.toolset.serviceAccount.create) (empty .Values.toolset.serviceAccount.name) -}}
+{{- fail "toolset.serviceAccount.name is required when create=false" -}}
+{{- end -}}
+{{- $registryServiceAccountName := include "orca-managed-agents.registryServiceAccountName" . -}}
+{{- $harnessServiceAccountName := include "orca-managed-agents.harnessServiceAccountName" . -}}
+{{- $aiGatewayServiceAccountName := include "orca-managed-agents.aiGatewayServiceAccountName" . -}}
+{{- $observabilityExporterServiceAccountName := include "orca-managed-agents.observabilityExporterServiceAccountName" . -}}
+{{- if ne (len (uniq (list $registryServiceAccountName $harnessServiceAccountName $aiGatewayServiceAccountName $observabilityExporterServiceAccountName))) 4 -}}
+{{- fail "registry, harness, aiGateway, and observabilityExporter service account names must be distinct" -}}
+{{- end -}}
+{{- if .Values.toolset.enabled -}}
+{{- $toolsetServiceAccountName := include "orca-managed-agents.toolsetServiceAccountName" . -}}
+{{- if has $toolsetServiceAccountName (list $registryServiceAccountName $harnessServiceAccountName $aiGatewayServiceAccountName $observabilityExporterServiceAccountName) -}}
+{{- fail "toolset service account name must be distinct from registry, harness, aiGateway, and observabilityExporter" -}}
+{{- end -}}
+{{- $apiKey := default (dict) .Values.toolset.apiKey -}}
+{{- $apiKeyRef := dig "secretKeyRef" (dict) $apiKey -}}
+{{- $hasApiKey := not (empty (dig "name" "" $apiKeyRef)) -}}
+{{- $accessToken := default (dict) .Values.toolset.accessToken -}}
+{{- $accessTokenRef := dig "secretKeyRef" (dict) $accessToken -}}
+{{- $hasAccessToken := not (empty (dig "name" "" $accessTokenRef)) -}}
+{{- if and $hasApiKey $hasAccessToken -}}
+{{- fail "toolset API-key and Bearer credentials are mutually exclusive; configure at most one of toolset.apiKey.secretKeyRef.name or toolset.accessToken.secretKeyRef.name" -}}
+{{- end -}}
+{{- if and $hasApiKey (empty (dig "key" "" $apiKeyRef)) -}}
+{{- fail "toolset.apiKey.secretKeyRef.key is required when API-key auth is selected" -}}
+{{- end -}}
+{{- if and $hasAccessToken (empty (dig "key" "" $accessTokenRef)) -}}
+{{- fail "toolset.accessToken.secretKeyRef.key is required when Bearer auth is selected" -}}
+{{- end -}}
+{{- $hasPublicOidcIssuer := false -}}
+{{- range $issuer := splitList "," (default "" .Values.registry.oidcAllowedIssuers) -}}
+{{- if not (empty (trim $issuer)) -}}
+{{- $hasPublicOidcIssuer = true -}}
+{{- end -}}
+{{- end -}}
+{{- if and $hasAccessToken (empty (trim (default "" .Values.toolset.registryUrl))) (not $hasPublicOidcIssuer) -}}
+{{- fail "registry.oidcAllowedIssuers must contain at least one issuer when the toolset uses Bearer auth against the in-chart Registry; configure public Registry OIDC, select toolset.apiKey, set an external toolset.registryUrl, or disable toolset" -}}
+{{- end -}}
+{{- if empty .Values.images.toolset.repository -}}
+{{- fail "images.toolset.repository is required when toolset.enabled=true" -}}
+{{- end -}}
+{{- if and (empty .Values.images.toolset.digest) (empty .Values.images.toolset.tag) -}}
+{{- fail "images.toolset.tag is required when images.toolset.digest is empty" -}}
+{{- end -}}
+{{- $toolsetPodLabels := default (dict) .Values.toolset.podLabels -}}
+{{- if not (kindIs "map" $toolsetPodLabels) -}}
+{{- fail "toolset.podLabels must be a map" -}}
+{{- end -}}
+{{- range $reservedLabel := list "app.kubernetes.io/name" "app.kubernetes.io/instance" "app.kubernetes.io/component" -}}
+{{- if hasKey $toolsetPodLabels $reservedLabel -}}
+{{- fail (printf "toolset.podLabels must not set reserved selector label %q" $reservedLabel) -}}
+{{- end -}}
+{{- end -}}
+{{- range $entry := default (list) .Values.toolset.extraEnv -}}
+{{- if not (kindIs "map" $entry) -}}
+{{- fail "toolset.extraEnv entries must be Kubernetes env maps" -}}
+{{- end -}}
+{{- if has (dig "name" "" $entry) (list "ORCA_REGISTRY_URL" "ORCA_API_KEY" "ORCA_ACCESS_TOKEN") -}}
+{{- fail "toolset.extraEnv must not override ORCA_REGISTRY_URL, ORCA_API_KEY, or ORCA_ACCESS_TOKEN; use toolset.registryUrl and the optional toolset credential secretKeyRefs" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if eq .Values.secretStore.mode "kubernetes" -}}
+{{- $registryConfigName := printf "%s-registry-config" (include "orca-managed-agents.fullname" .) -}}
+{{- $existingRegistryConfig := lookup "v1" "ConfigMap" .Release.Namespace $registryConfigName -}}
+{{- if and $existingRegistryConfig (eq (index $existingRegistryConfig.data "ORCA_SECRET_STORE_MODE") "local") (not .Values.secretStore.kubernetes.confirmLocalCutover) -}}
+{{- fail "existing release uses LocalSecretStore; verify credentials can be rebuilt, set secretStore.kubernetes.confirmLocalCutover=true for this upgrade, then recreate/rotate them after Kubernetes SecretStore is active" -}}
+{{- end -}}
+{{- end -}}
+{{- if and .Values.aiGateway.destinations (hasKey .Values.aiGateway.destinations "*") -}}
+{{- fail "aiGateway.destinations: '*' is reserved for the Registry-backed dynamic destination" -}}
+{{- end -}}
+{{- if .Values.aiGateway.enabled -}}
+{{- $scopeDims := default (list "workspace_id" "session_id" "org_id" "mcp_server_names" "vault_ids" "credential_ids") .Values.aiGateway.scopeDims -}}
+{{- if not (kindIs "slice" $scopeDims) -}}
+{{- fail "aiGateway.scopeDims must be a list" -}}
+{{- end -}}
+{{- range $requiredScopeDim := list "workspace_id" "session_id" "org_id" "mcp_server_names" "vault_ids" "credential_ids" -}}
+{{- if not (has $requiredScopeDim $scopeDims) -}}
+{{- fail (printf "aiGateway.scopeDims must include required dimension %q" $requiredScopeDim) -}}
+{{- end -}}
+{{- end -}}
+{{- $registryGuardrails := $.Values.aiGateway.registryGuardrails | default (dict) -}}
+{{- if and (dig "enabled" false $registryGuardrails) (not (has "agent_id" $scopeDims)) -}}
+{{- fail "aiGateway.scopeDims must include agent_id when registryGuardrails is enabled" -}}
+{{- end -}}
+{{- end -}}
+{{- /* An out-of-chart gateway means the in-chart Service name resolves to
+       nothing, so the harness MUST be pointed at the real one. */ -}}
+{{- if and (not .Values.aiGateway.enabled) (empty .Values.harness.aiGatewayUrl) -}}
+{{- fail "harness.aiGatewayUrl is required when aiGateway.enabled=false: this release renders no ai-gateway Service for the harness to dial" -}}
+{{- end -}}
+{{- /* Every rendered Service needs a unique name. Registry derives two more
+       Services from its base name, while ai-gateway is optional. */ -}}
+{{- $serviceNames := list
+      (include "orca-managed-agents.registryServiceName" .)
+      (include "orca-managed-agents.registryInternalServiceName" .)
+      (include "orca-managed-agents.registryAdminServiceName" .)
+      (include "orca-managed-agents.harnessServiceName" .) -}}
+{{- if .Values.aiGateway.enabled -}}
+{{- $serviceNames = append $serviceNames (include "orca-managed-agents.aiGatewayServiceName" .) -}}
+{{- end -}}
+{{- if ne (len $serviceNames) (len (uniq $serviceNames)) -}}
+{{- fail "registry, registry-internal, registry-admin, harness, and enabled aiGateway nameOverride values must resolve to distinct names" -}}
+{{- end -}}
+{{- if .Values.toolset.enabled -}}
+{{- $deploymentNames := list
+      (include "orca-managed-agents.registryServiceName" .)
+      (include "orca-managed-agents.harnessServiceName" .)
+      (include "orca-managed-agents.toolsetName" .) -}}
+{{- if .Values.aiGateway.enabled -}}
+{{- $deploymentNames = append $deploymentNames (include "orca-managed-agents.aiGatewayServiceName" .) -}}
+{{- end -}}
+{{- if ne (len $deploymentNames) (len (uniq $deploymentNames)) -}}
+{{- fail "registry, harness, enabled aiGateway, and enabled toolset workload names must be distinct" -}}
+{{- end -}}
+{{- end -}}
+{{- if .Values.external.databases.tls.caSecretName -}}
+{{- $pgCaReservedLists := dict
+      "registry.extraVolumes" (default (list) .Values.registry.extraVolumes)
+      "registry.extraVolumeMounts" (default (list) .Values.registry.extraVolumeMounts)
+      "harness.extraVolumes" (default (list) .Values.harness.extraVolumes)
+      "harness.extraVolumeMounts" (default (list) .Values.harness.extraVolumeMounts) -}}
+{{- range $path, $items := $pgCaReservedLists -}}
+{{- range $item := $items -}}
+{{- if eq (dig "name" "" $item) "pg-ca" -}}
+{{- fail (printf "external.databases.tls reserves the pg-ca volume name; remove the %s entry or disable the built-in CA mount" $path) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- /* Every credential needs a source. With no chart Secret the deployer must
+       wire one explicitly instead of getting a pod that boots against the
+       service's localhost DSN default. */ -}}
+{{- $chartSecret := include "orca-managed-agents.secretName" . -}}
+{{- $databaseSecret := .Values.external.databases.existingSecret -}}
+{{- $registryDatabaseKeys := list "DATABASE_URL" "FILESTORE_DATABASE_URL" "MEMORYSTORE_DATABASE_URL" -}}
+{{- if not $chartSecret -}}
+{{- $registrySecretRefs := default (dict) .Values.registry.secretKeyRefs -}}
+{{- if empty .Values.registry.extraEnvFrom -}}
+{{- range $key := list "DATABASE_URL" "FILESTORE_DATABASE_URL" "MEMORYSTORE_DATABASE_URL" "SESSION_JWT_PRIVATE_KEY_PEM" -}}
+{{- $fromDatabaseSecret := and (not (empty $databaseSecret)) (has $key $registryDatabaseKeys) -}}
+{{- if and (not $fromDatabaseSecret) (not (hasKey $registrySecretRefs $key)) -}}
+{{- if has $key $registryDatabaseKeys -}}
+{{- fail (printf "no credential source for the registry: %s must come from secrets.create=true, secrets.existingSecret, external.databases.existingSecret, registry.secretKeyRefs.%s, or registry.extraEnvFrom" $key $key) -}}
+{{- else -}}
+{{- fail (printf "no credential source for the registry: %s must come from secrets.create=true, secrets.existingSecret, registry.secretKeyRefs.%s, or registry.extraEnvFrom" $key $key) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- $harnessSecretRefs := default (dict) .Values.harness.secretKeyRefs -}}
+{{- if and (empty $databaseSecret) (empty .Values.harness.extraEnvFrom) (not (hasKey $harnessSecretRefs "FILESTORE_DATABASE_URL")) -}}
+{{- fail "no credential source for the harness: set secrets.create=true, secrets.existingSecret, external.databases.existingSecret, harness.secretKeyRefs.FILESTORE_DATABASE_URL, or harness.extraEnvFrom" -}}
+{{- end -}}
+{{- if and (eq .Values.transcriptStore.backend "postgres") (empty $databaseSecret) (empty .Values.harness.extraEnvFrom) (not (hasKey $harnessSecretRefs "TRANSCRIPT_STORE_DATABASE_URL")) -}}
+{{- fail "no Postgres transcript credential source for the harness: set secrets.create=true, secrets.existingSecret, external.databases.existingSecret, harness.secretKeyRefs.TRANSCRIPT_STORE_DATABASE_URL, or harness.extraEnvFrom" -}}
+{{- end -}}
+{{- end -}}
+{{- /* ALLOW_INSECURE_STATIC_S3_CREDS is rejected by the harness outside
+       development/test, so catch a contradicting nodeEnv at render time. */ -}}
+{{- if .Values.harness.nodeEnv -}}
+{{- $hasInlineStaticS3Credentials := and (not (empty .Values.secrets.values.s3AccessKeyId)) (not (empty .Values.secrets.values.s3SecretAccessKey)) -}}
+{{- if and (empty .Values.objectStorage.stsRoleArn) (or .Values.objectStorage.allowStaticCredentials $hasInlineStaticS3Credentials) -}}
+{{- if not (has .Values.harness.nodeEnv (list "development" "test")) -}}
+{{- fail "harness.nodeEnv must be development or test while static object-store credentials are permitted; the harness refuses ALLOW_INSECURE_STATIC_S3_CREDS in any other NODE_ENV" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if hasKey .Values.registry.istio.authorizationPolicy "gatewayNamespace" -}}
+{{- fail "registry.istio.authorizationPolicy.gatewayNamespace moved to registry.istio.gatewayNamespace, which now also places the Gateway resource" -}}
+{{- end -}}
+{{- if .Values.registry.istio.enabled -}}
+{{- if empty .Values.registry.istio.host -}}
+{{- fail "registry.istio.host is required when registry.istio.enabled=true" -}}
+{{- end -}}
+{{- if empty .Values.registry.istio.gatewayNamespace -}}
+{{- fail "registry.istio.gatewayNamespace is required when registry.istio.enabled=true; set it to the namespace of the selected ingress gateway workload" -}}
+{{- end -}}
+{{- if empty .Values.registry.istio.gateway.tls.credentialName -}}
+{{- fail "registry.istio.gateway.tls.credentialName is required when registry.istio.enabled=true" -}}
+{{- end -}}
+{{- if eq (len .Values.registry.istio.gateway.selector) 0 -}}
+{{- fail "registry.istio.gateway.selector is required when registry.istio.enabled=true; set it to the workload labels of the ingress gateway (for example istio: ingressgateway)" -}}
+{{- end -}}
+{{- end -}}
+{{- if and .Values.registry.istio.enabled .Values.registry.istio.authorizationPolicy.enabled -}}
+{{- if eq (len .Values.registry.istio.authorizationPolicy.allowedPaths) 0 -}}
+{{- fail "registry.istio.authorizationPolicy.allowedPaths must not be empty; an empty allowlist would deny every request on the exposed host" -}}
+{{- end -}}
+{{- if eq (len .Values.registry.istio.authorizationPolicy.gatewayHttpsPorts) 0 -}}
+{{- fail "registry.istio.authorizationPolicy.gatewayHttpsPorts must not be empty; a DENY rule with HTTP attributes and no port scope matches all TCP traffic on the selected gateway" -}}
+{{- end -}}
+{{- end -}}

@@ -1,0 +1,2 @@
+CREATE INDEX "skills_workspace_created_page_idx" ON "skills" USING btree ("workspace_id","created_at","id") WHERE "skills"."archived_at" is null;--> statement-breakpoint
+CREATE INDEX "skills_workspace_type_created_page_idx" ON "skills" USING btree ("workspace_id","type","created_at","id") WHERE "skills"."archived_at" is null;

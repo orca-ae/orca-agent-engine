@@ -1,0 +1,464 @@
+# Copyright The Orca Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# `__NAMESPACE__` is replaced by kind-helm-e2e.ts before this manifest is
+# applied. Postgres, Kafka, and RustFS deliberately use static hostPath-backed
+# PVCs: the Kind node is disposable, but app pod rollouts must not erase state.
+# The driver rejects multi-node clusters because these paths are node-local.
+# Retain is explicit because no provisioner deletes these static host paths.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: kind-helm-e2e-postgres
+spec:
+  capacity:
+    storage: 2Gi
+  accessModes: [ReadWriteOnce]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: kind-helm-e2e
+  hostPath:
+    path: /var/local-path-provisioner/kind-helm-e2e-postgres
+    type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: kind-helm-e2e-rustfs
+spec:
+  capacity:
+    storage: 2Gi
+  accessModes: [ReadWriteOnce]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: kind-helm-e2e
+  hostPath:
+    path: /var/local-path-provisioner/kind-helm-e2e-rustfs
+    type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: kind-helm-e2e-kafka
+spec:
+  capacity:
+    storage: 2Gi
+  accessModes: [ReadWriteOnce]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: kind-helm-e2e
+  hostPath:
+    path: /var/local-path-provisioner/kind-helm-e2e-kafka
+    type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-data
+  namespace: __NAMESPACE__
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: kind-helm-e2e
+  volumeName: kind-helm-e2e-postgres
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: rustfs-data
+  namespace: __NAMESPACE__
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: kind-helm-e2e
+  volumeName: kind-helm-e2e-rustfs
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: kafka-data
+  namespace: __NAMESPACE__
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: kind-helm-e2e
+  volumeName: kind-helm-e2e-kafka
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init
+  namespace: __NAMESPACE__
+data:
+  01-databases.sql: |
+    CREATE DATABASE transcriptstore;
+    CREATE DATABASE filestore;
+    CREATE DATABASE memorystore;
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: __NAMESPACE__
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: postgres
+              containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              value: orca
+            - name: POSTGRES_PASSWORD
+              value: orca
+            - name: POSTGRES_DB
+              value: registry
+          readinessProbe:
+            exec:
+              command: [sh, -ec, pg_isready -h 127.0.0.1 -U orca -d registry]
+            initialDelaySeconds: 3
+            periodSeconds: 2
+            timeoutSeconds: 3
+            failureThreshold: 30
+          livenessProbe:
+            exec:
+              command: [sh, -ec, pg_isready -h 127.0.0.1 -U orca -d registry]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: init
+              mountPath: /docker-entrypoint-initdb.d/01-databases.sql
+              subPath: 01-databases.sql
+              readOnly: true
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: postgres-data
+        - name: init
+          configMap:
+            name: postgres-init
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: __NAMESPACE__
+spec:
+  selector:
+    app: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kafka
+  namespace: __NAMESPACE__
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: kafka
+  template:
+    metadata:
+      labels:
+        app: kafka
+    spec:
+      securityContext:
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+      initContainers:
+        - name: prepare-data
+          image: busybox:1.36
+          imagePullPolicy: IfNotPresent
+          command: [sh, -ec, 'chown -R 1000:1000 /var/lib/kafka/data']
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/kafka/data
+      containers:
+        - name: kafka
+          image: apache/kafka:3.7.1
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+          ports:
+            - name: kafka
+              containerPort: 9092
+            - name: controller
+              containerPort: 9093
+          env:
+            - name: KAFKA_NODE_ID
+              value: '1'
+            - name: KAFKA_PROCESS_ROLES
+              value: broker,controller
+            - name: KAFKA_LISTENERS
+              value: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+            - name: KAFKA_ADVERTISED_LISTENERS
+              value: PLAINTEXT://kafka:9092
+            - name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP
+              value: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+            - name: KAFKA_INTER_BROKER_LISTENER_NAME
+              value: PLAINTEXT
+            - name: KAFKA_CONTROLLER_LISTENER_NAMES
+              value: CONTROLLER
+            - name: KAFKA_CONTROLLER_QUORUM_VOTERS
+              # A one-node controller must not depend on its own not-yet-Ready
+              # Service endpoint during KRaft bootstrap.
+              value: 1@localhost:9093
+            - name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR
+              value: '1'
+            - name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR
+              value: '1'
+            - name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR
+              value: '1'
+            - name: KAFKA_AUTO_CREATE_TOPICS_ENABLE
+              value: 'true'
+            - name: KAFKA_NUM_PARTITIONS
+              value: '1'
+            - name: KAFKA_DEFAULT_REPLICATION_FACTOR
+              value: '1'
+            - name: KAFKA_MIN_INSYNC_REPLICAS
+              value: '1'
+            - name: KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS
+              value: '0'
+            - name: KAFKA_LOG_DIRS
+              value: /var/lib/kafka/data
+            - name: KAFKA_HEAP_OPTS
+              value: -Xms256m -Xmx512m
+            - name: CLUSTER_ID
+              value: MkU3OEVBNTcwNTJENDM2Qk
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -ec
+                - /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 30
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              memory: 1200Mi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/kafka/data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: kafka-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka
+  namespace: __NAMESPACE__
+spec:
+  # Kafka advertises this Service to clients. Publish its lone endpoint while
+  # the readiness probe validates broker metadata through that advertised name.
+  publishNotReadyAddresses: true
+  selector:
+    app: kafka
+  ports:
+    - name: kafka
+      port: 9092
+      targetPort: kafka
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rustfs
+  namespace: __NAMESPACE__
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: rustfs
+  template:
+    metadata:
+      labels:
+        app: rustfs
+    spec:
+      securityContext:
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+      initContainers:
+        - name: prepare-data
+          image: busybox:1.36
+          imagePullPolicy: IfNotPresent
+          command: [sh, -ec, 'chown -R 10001:10001 /data']
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      containers:
+        # The image runs as the named user `rustfs`, uid 10001. runAsNonRoot can
+        # only verify a numeric uid, so set it explicitly; prepare-data gives
+        # /data to the same owner, as it does for Kafka.
+        - name: rustfs
+          image: rustfs/rustfs:1.0.0
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+          ports:
+            - name: api
+              containerPort: 9000
+          env:
+            - name: RUSTFS_ACCESS_KEY
+              value: minioadmin
+            - name: RUSTFS_SECRET_KEY
+              value: minioadmin
+            # RustFS logs only to files under /logs unless told to mirror them.
+            - name: RUSTFS_OBS_LOG_STDOUT_ENABLED
+              value: 'true'
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: api
+            periodSeconds: 3
+            timeoutSeconds: 3
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: api
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: rustfs-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rustfs
+  namespace: __NAMESPACE__
+spec:
+  selector:
+    app: rustfs
+  ports:
+    - name: api
+      port: 9000
+      targetPort: api
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: rustfs-bootstrap
+  namespace: __NAMESPACE__
+spec:
+  backoffLimit: 12
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        # RustFS's own client. It reads the `local` alias from RC_HOST_local,
+        # and retries until the rustfs Service answers.
+        - name: rc
+          image: rustfs/rc:v0.1.36
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: RC_HOST_local
+              value: http://minioadmin:minioadmin@rustfs:9000
+          command:
+            - sh
+            - -ec
+            - |
+              until rc mb --ignore-existing local/orca-files; do sleep 2; done
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fixture
+  namespace: __NAMESPACE__
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fixture
+  template:
+    metadata:
+      labels:
+        app: fixture
+    spec:
+      containers:
+        - name: fixture
+          image: orca-kind-fixture:e2e
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 2
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              memory: 96Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fixture
+  namespace: __NAMESPACE__
+spec:
+  selector:
+    app: fixture
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
