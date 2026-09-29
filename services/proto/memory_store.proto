@@ -1,0 +1,52 @@
+// Copyright The Orca Authors
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+
+package orca.memory_store.v1;
+
+import "common.proto";
+
+service MemoryStore {
+  // Stores
+  rpc CreateStore  (CreateStoreRequest)  returns (Store);
+  rpc GetStore     (GetStoreRequest)     returns (Store);
+  rpc ListStores   (ListStoresRequest)   returns (ListStoresResponse);
+  rpc UpdateStore  (UpdateStoreRequest)  returns (Store);
+  rpc ArchiveStore (ArchiveRequest)      returns (orca.common.v1.Empty);
+  rpc DeleteStore  (DeleteRequest)       returns (orca.common.v1.Empty);
+  // Memories
+  rpc CreateMemory (CreateMemoryRequest) returns (Memory);
+  rpc GetMemory    (GetMemoryRequest)    returns (Memory);
+  rpc ListMemories (ListMemoriesRequest) returns (ListMemoriesResponse);
+  rpc UpdateMemory (UpdateMemoryRequest) returns (Memory);
+  rpc DeleteMemory (DeleteMemoryRequest) returns (orca.common.v1.Empty);
+  // Versions
+  rpc ListVersions (ListVersionsRequest) returns (ListVersionsResponse);
+  rpc GetVersion   (GetVersionRequest)   returns (MemoryVersion);
+  rpc RedactVersion(RedactRequest)       returns (orca.common.v1.Empty);
+}
+
+message Store          { string id = 1; string workspace_id = 2; string name = 3; string description = 4; string created_at = 5; string archived_at = 6; }
+message Memory         { string store_id = 1; string path = 2; string content = 3; string content_sha256 = 4; string updated_at = 5; string updated_by_session_id = 6; string updated_by_event_id = 7; }
+message MemoryVersion  { string id = 1; string memory_path = 2; string content = 3; string written_by_session_id = 4; string written_by_event_id = 5; string written_at = 6; bool redacted = 7; }
+
+message CreateStoreRequest  { string workspace_id = 1; string name = 2; string description = 3; }
+message GetStoreRequest     { string workspace_id = 1; string id = 2; }
+message ListStoresRequest   { string workspace_id = 1; orca.common.v1.Pagination pagination = 2; }
+message ListStoresResponse  { repeated Store stores = 1; orca.common.v1.PageInfo page_info = 2; }
+message UpdateStoreRequest  { string workspace_id = 1; string id = 2; string name = 3; string description = 4; }
+message ArchiveRequest      { string workspace_id = 1; string id = 2; }
+message DeleteRequest       { string workspace_id = 1; string id = 2; }
+
+message CreateMemoryRequest { string workspace_id = 1; string store_id = 2; string path = 3; string content = 4; string written_by_session_id = 5; string written_by_event_id = 6; }
+message GetMemoryRequest    { string workspace_id = 1; string store_id = 2; string path = 3; }
+message ListMemoriesRequest { string workspace_id = 1; string store_id = 2; string path_prefix = 3; orca.common.v1.Pagination pagination = 4; }
+message ListMemoriesResponse{ repeated Memory memories = 1; orca.common.v1.PageInfo page_info = 2; }
+message UpdateMemoryRequest { string workspace_id = 1; string store_id = 2; string path = 3; string content = 4; string expected_content_sha256 = 5; string written_by_session_id = 6; string written_by_event_id = 7; }
+message DeleteMemoryRequest { string workspace_id = 1; string store_id = 2; string path = 3; }
+
+message ListVersionsRequest { string workspace_id = 1; string store_id = 2; string path = 3; orca.common.v1.Pagination pagination = 4; }
+message ListVersionsResponse{ repeated MemoryVersion versions = 1; orca.common.v1.PageInfo page_info = 2; }
+message GetVersionRequest   { string workspace_id = 1; string id = 2; }
+message RedactRequest       { string workspace_id = 1; string id = 2; string reason = 3; }

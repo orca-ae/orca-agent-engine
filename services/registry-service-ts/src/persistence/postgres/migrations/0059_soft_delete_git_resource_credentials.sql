@@ -1,0 +1,2 @@
+DROP INDEX "git_credentials_session_resource_idx";--> statement-breakpoint
+CREATE UNIQUE INDEX "git_credentials_session_resource_idx" ON "git_credentials" USING btree ("workspace_id","session_resource_id") WHERE "git_credentials"."session_resource_id" is not null and "git_credentials"."deleted_at" is null;

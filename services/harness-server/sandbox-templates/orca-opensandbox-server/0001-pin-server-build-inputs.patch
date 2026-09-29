@@ -1,0 +1,38 @@
+diff --git a/server/Dockerfile b/server/Dockerfile
+index 601a6c1..803b1d7 100644
+--- a/server/Dockerfile
++++ b/server/Dockerfile
+@@ -12,7 +12,9 @@
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+ 
+-FROM python:3.10-slim AS builder
++FROM ghcr.io/astral-sh/uv:0.12.0@sha256:606e70c71c852d03f611b1e56a195d08648507018a7057fab82c4974c4eae105 AS uv
++
++FROM python:3.10-slim@sha256:c1e4e6c01eb489c422288b2de34b0761ca316f7a2d98e2c33f47659a73ed108a AS builder
+ 
+ ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
+     PYTHONDONTWRITEBYTECODE=1 \
+@@ -22,12 +24,7 @@ ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
+ 
+ WORKDIR /app
+ 
+-RUN apt-get update \
+-    && apt-get install -y --no-install-recommends curl ca-certificates \
+-    && rm -rf /var/lib/apt/lists/*
+-
+-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+-ENV PATH="/root/.local/bin:/root/.cargo/bin:${PATH}"
++COPY --from=uv /uv /uvx /usr/local/bin/
+ 
+ COPY pyproject.toml uv.lock ./
+ RUN uv sync --frozen --no-dev --no-install-project
+@@ -38,7 +35,7 @@ COPY LICENSE README.md ./
+ # Install the project itself into the venv (deps already synced)
+ RUN uv pip install --no-deps --editable .
+ 
+-FROM python:3.10-slim AS runtime
++FROM python:3.10-slim@sha256:c1e4e6c01eb489c422288b2de34b0761ca316f7a2d98e2c33f47659a73ed108a AS runtime
+ 
+ ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
+     PYTHONDONTWRITEBYTECODE=1 \

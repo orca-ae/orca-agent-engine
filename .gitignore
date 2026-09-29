@@ -1,0 +1,52 @@
+# Editor / IDE
+.idea/
+*.iml
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Node / pnpm workspace artifacts
+node_modules
+dist/
+coverage/
+.turbo/
+.cache/
+*.tsbuildinfo
+
+# Local dev compose data + host-services state
+services/dev/data/
+services/dev/secrets/
+services/dev/logs/
+services/dev/run/
+services/dev/.env
+
+# Local agent state (per-repo, not shared). `.claude/*` rather than `.claude/`
+# so the shared settings file can be re-included; worktrees stay ignored.
+.claude/*
+!.claude/settings.json
+.pi/subagent-schedules/
+
+# Local env files (may contain secrets like E2B_API_KEY, S3_PUBLIC_*, etc.)
+.env
+.env.local
+.env.*.local
+
+# Local browser automation state
+.playwright-mcp/
+/PLAN.md
+/docs/visualization
+/.pi/plans
+/.pi/extensions
+/plans
+
+# Local product comparisons; working notes, never published
+docs/managed-agents/comparisons/

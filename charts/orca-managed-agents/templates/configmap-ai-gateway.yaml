@@ -1,0 +1,274 @@
+{{- if .Values.aiGateway.enabled -}}
+{{- $destinationResolver := .Values.aiGateway.destinationResolver | default (dict) -}}
+{{- $resolverEgress := dig "egress" (dict) $destinationResolver | default (dict) -}}
+{{- $registryUsage := .Values.aiGateway.registryUsage | default (dict) -}}
+{{- $registryGuardrails := .Values.aiGateway.registryGuardrails | default (dict) -}}
+{{- $scopeDims := default (list "workspace_id" "session_id" "org_id" "agent_id" "mcp_server_names" "vault_ids" "credential_ids") .Values.aiGateway.scopeDims -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "orca-managed-agents.fullname" . }}-ai-gateway-config
+  labels:
+    {{- include "orca-managed-agents.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    server:
+      listen: "0.0.0.0:{{ .Values.aiGateway.dataPort }}"
+      admin_listen: "0.0.0.0:{{ .Values.aiGateway.adminPort }}"
+
+    identity:
+      scope_dims: {{ $scopeDims | toJson }}
+      validators:
+        - name: orca-session-jwt
+          kind: jwt
+          static_public_key_pem: "/etc/orca-gateway/session-jwt-pub.pem"
+          issuers: [{{ .Values.sessionJwt.issuer | quote }}]
+          audiences: [{{ .Values.sessionJwt.audience | quote }}]
+          scope_from:
+            jwt_claims:
+{{- /* Registry mints one claim per scope dimension under the same name, so the
+       mapping stays in lockstep with scope_dims above. */}}
+{{- range $dimension := $scopeDims }}
+              {{ $dimension }}: {{ $dimension }}
+{{- end }}
+
+    {{- if dig "enabled" false $registryGuardrails }}
+    guardrail_source:
+      name: registry-policy
+      kind: registry
+      base_url: {{ default (include "orca-managed-agents.registryInternalUrl" .) (dig "baseUrl" "" $registryGuardrails) | quote }}
+      bearer_token_file: {{ printf "%s/token" .Values.internalAuth.tokenMountPath | quote }}
+      timeout_ms: {{ dig "timeoutMs" 3000 $registryGuardrails }}
+      cache_ttl_secs: {{ dig "cacheTtlSecs" 300 $registryGuardrails }}
+      on_backend_error: {{ dig "onBackendError" "deny" $registryGuardrails | quote }}
+
+    guardrails_policy:
+      mode: {{ dig "mode" "enforce" $registryGuardrails | quote }}
+      phases: {{ dig "phases" (list "llm_request" "llm_response" "tool_call" "tool_result") $registryGuardrails | toJson }}
+      on_missing: {{ dig "onMissing" "deny" $registryGuardrails | quote }}
+      on_expired: {{ dig "onExpired" "deny" $registryGuardrails | quote }}
+      on_unsupported_guardrail: {{ dig "onUnsupportedGuardrail" "deny" $registryGuardrails | quote }}
+      refresh_interval_secs: {{ dig "refreshIntervalSecs" 30 $registryGuardrails }}
+      max_staleness_secs: {{ dig "maxStalenessSecs" 900 $registryGuardrails }}
+      failure_mode: {{ dig "failureMode" (dict) $registryGuardrails | toJson }}
+    {{- with (dig "state" (dict) $registryGuardrails) }}
+    guardrail_state:
+{{ toYaml . | indent 6 }}
+    {{- end }}
+    {{- end }}
+
+    vaults:
+{{- range $binding := .Values.aiGateway.piProviders }}
+      - name: pi-{{ $binding.provider }}-{{ $binding.api }}
+        resolver: env
+        env_var: {{ required "Pi apiKeyEnv is required" $binding.apiKeyEnv | quote }}
+        scheme: {{ if eq $binding.auth.type "bearer" }}bearer{{ else }}api_key{{ end }}
+{{- end }}
+{{- if .Values.aiGateway.openai.enabled }}
+      - name: openai_api_key
+        resolver: env
+        env_var: {{ .Values.aiGateway.openai.apiKeyEnv | quote }}
+{{- end }}
+{{- range $provider := list "anthropic" "deepseek" }}
+{{- $config := index $.Values.aiGateway $provider }}
+{{- if $config.enabled }}
+      - name: {{ $provider }}_api_key
+        resolver: env
+        env_var: {{ $config.apiKeyEnv | quote }}
+{{- end }}
+{{- end }}
+      - name: registry-vaults
+        resolver: http
+        url_template: {{ default (printf "%s/internal/v1/workspaces/{scope.workspace_id}/sessions/{scope.session_id}/vault-credentials/{credential_id}/resolve" (include "orca-managed-agents.registryInternalUrl" .)) .Values.aiGateway.registryVaultResolverUrlTemplate | quote }}
+        bearer_token_file: {{ printf "%s/token" .Values.internalAuth.tokenMountPath | quote }}
+        timeout_ms: 5000
+        cache:
+          default_ttl_secs: 300
+          max_entries: 1024
+
+    destinations:
+{{- range $binding := .Values.aiGateway.piProviders }}
+{{- /* Pi's Anthropic SDK beta.messages API appends ?beta=true. */}}
+{{- $allowedQueryParams := default (list) $binding.allowedQueryParams }}
+{{- if eq $binding.api "anthropic-messages" }}
+{{- $allowedQueryParams = uniq (append $allowedQueryParams "beta") }}
+{{- end }}
+      pi-{{ $binding.provider }}-{{ $binding.api }}:
+        kind: native_api_key
+        emit_usage: false
+        provider: {{ $binding.provider | quote }}
+        api: {{ $binding.api | quote }}
+        base_url: {{ required "Pi baseUrl is required" $binding.baseUrl | quote }}
+        allowed_paths: {{ required "Pi allowedPaths is required" $binding.allowedPaths | toJson }}
+        allowed_query_params: {{ $allowedQueryParams | toJson }}
+        forward_headers: {{ default (list) $binding.forwardHeaders | toJson }}
+        headers: {{ default (dict) $binding.headers | toJson }}
+        auth: {{ $binding.auth | toJson }}
+        credentials:
+          vault: pi-{{ $binding.provider }}-{{ $binding.api }}
+{{- end }}
+{{- if .Values.aiGateway.openai.enabled }}
+      openai-responses:
+        kind: openai
+        base_url: {{ .Values.aiGateway.openai.baseUrl | quote }}
+        credentials:
+          vault: openai_api_key
+{{- end }}
+{{- if .Values.aiGateway.anthropic.enabled }}
+      anthropic-proxy:
+        kind: anthropic
+        base_url: {{ .Values.aiGateway.anthropic.baseUrl | quote }}
+        credentials:
+          vault: anthropic_api_key
+{{- end }}
+{{- if .Values.aiGateway.deepseek.enabled }}
+      deepseek-chat:
+        kind: openai_compatible
+        base_url: {{ .Values.aiGateway.deepseek.baseUrl | quote }}
+        credentials:
+          vault: deepseek_api_key
+{{- end }}
+{{ range $name, $destination := .Values.aiGateway.destinations }}
+      {{ $name }}:
+        kind: mcp
+        base_url: {{ $destination.baseUrl | quote }}
+        credentials:
+          vault: {{ default "registry-vaults" $destination.credentialsVault | quote }}
+{{- end }}
+      "*":
+        kind: mcp
+        destination_resolver:
+          kind: http
+          url_template: {{ default (printf "%s/internal/v1/workspaces/{scope.workspace_id}/sessions/{scope.session_id}/mcp-destination/resolve" (include "orca-managed-agents.registryInternalUrl" .)) (dig "urlTemplate" "" $destinationResolver) | quote }}
+          bearer_token_file: {{ printf "%s/token" .Values.internalAuth.tokenMountPath | quote }}
+          timeout_ms: {{ dig "timeoutMs" 5000 $destinationResolver }}
+          egress_policy:
+            allowed_private_hosts: {{ dig "allowedPrivateHosts" (list) $resolverEgress | toJson }}
+            dns_timeout_ms: {{ dig "dnsTimeoutMs" 2000 $resolverEgress }}
+            connect_timeout_ms: {{ dig "connectTimeoutMs" 5000 $resolverEgress }}
+            {{- /* Omitted rather than emitted empty so the gateway keeps its
+                   own default when the deployer has no opinion. */}}
+            {{- with dig "responseTimeoutMs" "" $resolverEgress }}
+            response_timeout_ms: {{ . }}
+            {{- end }}
+        credentials:
+          vault: registry-vaults
+
+    routes:
+{{- range $binding := .Values.aiGateway.piProviders }}
+      - name: llm-pi-{{ $binding.provider }}-{{ $binding.api }}
+        match:
+          path: "/v1/proxy/{{ $binding.provider }}/{{ $binding.api }}"
+        strategy:
+          mode: fallback
+          targets:
+            - destination: pi-{{ $binding.provider }}-{{ $binding.api }}
+{{- end }}
+{{- if .Values.aiGateway.openai.enabled }}
+      - name: llm-responses
+        match:
+          path: "/v1/responses"
+        strategy:
+          mode: fallback
+          targets:
+            - destination: openai-responses
+{{- end }}
+{{- if .Values.aiGateway.anthropic.enabled }}
+      - name: llm-messages
+        match:
+          path: "/v1/messages"
+        strategy:
+          mode: fallback
+          targets:
+            - destination: anthropic-proxy
+{{- end }}
+{{- if .Values.aiGateway.deepseek.enabled }}
+      - name: llm-chat
+        match:
+          path: "/v1/chat/completions"
+        strategy:
+          mode: fallback
+          targets:
+            - destination: deepseek-chat
+{{- end }}
+      - name: mcp-forward
+        match:
+          path: "/v1/mcp"
+        idempotency_safe: true
+        strategy:
+          mode: fallback
+          targets:
+{{ range $name, $_ := .Values.aiGateway.destinations }}
+            - destination: {{ $name }}
+{{- end }}
+            - destination: "*"
+
+    plugins:
+      authorizers:
+        - name: session-mcp-allowlist
+          kind: yaml_acl
+          required: true
+          failure_mode: deny
+          rules:
+            - effect: allow
+              action: invoke
+              resource:
+                kind: model
+              conditions:
+                - resource_name_in_scope_list:
+                    scope: llm_models
+            - effect: allow
+              action: invoke
+              resource:
+                kind: route
+              conditions:
+                - resource_name_in_scope_list:
+                    scope: llm_routes
+            - effect: allow
+              action: mcp
+              resource:
+                kind: mcp_server
+                header: X-Orca-Backend
+              conditions:
+                - header_in_scope_list:
+                    header: X-Orca-Backend
+                    scope: mcp_server_names
+                - header_in_scope_list:
+                    header: X-Orca-Credential-Id
+                    scope: credential_ids
+                    if_missing: allow
+      audit_sinks:
+        - name: ai-gateway-audit-kafka
+          kind: kafka
+          required: {{ .Values.aiGateway.audit.kafka.required }}
+          failure_mode: {{ .Values.aiGateway.audit.kafka.failureMode | quote }}
+          brokers: {{ .Values.aiGateway.audit.kafka.brokers | quote }}
+          topic_template: {{ .Values.aiGateway.audit.kafka.topicTemplate | quote }}
+          client_id: {{ .Values.aiGateway.audit.kafka.clientId | quote }}
+          message_timeout_ms: {{ .Values.aiGateway.audit.kafka.messageTimeoutMs }}
+          ssl: {{ .Values.aiGateway.audit.kafka.ssl }}
+          {{- with .Values.aiGateway.audit.kafka.sslCaLocation }}
+          ssl_ca_location: {{ . | quote }}
+          {{- end }}
+          {{- with .Values.aiGateway.audit.kafka.sslCertificateLocation }}
+          ssl_certificate_location: {{ . | quote }}
+          {{- end }}
+          {{- with .Values.aiGateway.audit.kafka.sslKeyLocation }}
+          ssl_key_location: {{ . | quote }}
+          {{- end }}
+          {{- if .Values.aiGateway.audit.kafka.sasl.enabled }}
+          sasl:
+            mechanism: {{ default "PLAIN" .Values.aiGateway.audit.kafka.sasl.mechanism | quote }}
+            username: {{ required "aiGateway.audit.kafka.sasl.username is required when SASL is enabled" .Values.aiGateway.audit.kafka.sasl.username | quote }}
+            password: {{ required "aiGateway.audit.kafka.sasl.password is required when SASL is enabled" .Values.aiGateway.audit.kafka.sasl.password | quote }}
+          {{- end }}
+      {{- if dig "enabled" false $registryUsage }}
+      usage_sinks:
+        - name: registry-session-usage
+          kind: registry
+          base_url: {{ default (include "orca-managed-agents.registryInternalUrl" .) (dig "baseUrl" "" $registryUsage) | quote }}
+          bearer_token_file: {{ printf "%s/token" .Values.internalAuth.tokenMountPath | quote }}
+          timeout_ms: {{ dig "timeoutMs" 3000 $registryUsage }}
+          buffer: {{ dig "buffer" 10000 $registryUsage }}
+      {{- end }}
+{{- end }}

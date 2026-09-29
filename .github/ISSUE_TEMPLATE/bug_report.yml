@@ -1,0 +1,86 @@
+name: Bug report
+description: Something in Orca Agent Engine, the AI gateway, the ork CLI or the TypeScript SDK doesn't work as documented.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. Please don't report security vulnerabilities here.
+        Follow [SECURITY.md](https://github.com/orca-ae/orca-agent-engine/blob/main/SECURITY.md) instead.
+
+        Bugs in the AI gateway, the `ork` CLI and the TypeScript SDK belong here too. Choose the
+        component under **Area**.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe the problem, and include any error message.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How can we reproduce it?
+      description: The smallest set of steps, configuration or API requests that shows the problem.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version, image tag or commit
+      description: >-
+        The Orca Agent Engine release, image tag or commit SHA. For the AI gateway, the ork CLI or the
+        TypeScript SDK, give that component's version as well.
+      placeholder: "v0.5.0, an image tag, or a commit SHA"
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Where do you think the problem is? Choose "Not sure" if you don't know.
+      options:
+        - Registry API
+        - harness-server
+        - session-runner or environment-worker
+        - Sandbox runtimes
+        - Transcript or file stores
+        - Observability
+        - Helm chart
+        - ork CLI
+        - AI gateway
+        - TypeScript SDK
+        - Documentation
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: >-
+        How you run it (the local stack, Kubernetes, or a self-hosted environment), the sandbox runtime
+        and transcript backend, your operating system, and anything else that might matter.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: >-
+        Paste log output here. It is formatted as code automatically. Remove API keys, tokens and other
+        secrets first.
+      render: shell
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before you submit
+      options:
+        - label: I searched the existing issues and didn't find this problem.
+          required: true
+        - label: This isn't a security vulnerability.
+          required: true

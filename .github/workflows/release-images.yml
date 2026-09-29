@@ -1,0 +1,947 @@
+# Copyright The Orca Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# Tagged releases build the managed-agents images and package both Helm charts
+# into the same GitHub Release. The normalized SemVer tag is both packaged
+# charts' version and the managed-agents appVersion (image tags default to it).
+# opensandbox-patches keeps its upstream OpenSandbox appVersion. Images are
+# pushed to IMAGE_REGISTRY and packaged image repositories point there;
+# checked-in charts keep development metadata. When the DOCKERHUB_NAMESPACE
+# repository variable is set, a final job mirrors each manifest to Docker Hub.
+#
+# Every job is guarded to the upstream repository: a fork's tag push must not
+# try to publish images or releases under the project's names.
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version, for example v1.2.3 or v1.2.3-rc.1'
+        required: true
+        type: string
+      publish:
+        description: 'Push images (and the optional Docker Hub mirror)'
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref }}
+  cancel-in-progress: false
+
+env:
+  # Release images are pushed as ${IMAGE_REGISTRY}/<image>. The pushing jobs
+  # log in with the workflow's GITHUB_TOKEN, which authenticates to GHCR only.
+  IMAGE_REGISTRY: ghcr.io/orca-ae
+
+jobs:
+  release-metadata:
+    name: Resolve release metadata
+    if: github.repository == 'orca-ae/orca-agent-engine'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      stable: ${{ steps.release.outputs.stable }}
+      publish: ${{ steps.release.outputs.publish }}
+    steps:
+      - name: Validate version and release mode
+        id: release
+        env:
+          RAW_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+          REQUESTED_PUBLISH: ${{ github.event_name == 'push' || inputs.publish }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version="${RAW_VERSION#v}"
+          semver='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+          if [[ ! "${version}" =~ ${semver} ]]; then
+            echo "::error::Release version must be SemVer without build metadata (for example v1.2.3 or v1.2.3-rc.1); got ${RAW_VERSION}"
+            exit 1
+          fi
+
+          stable=true
+          if [[ "${version}" == *-* ]]; then
+            stable=false
+          fi
+
+          publish=false
+          if [[ "${REQUESTED_PUBLISH}" == 'true' ]]; then
+            publish=true
+          fi
+
+          {
+            echo "version=${version}"
+            echo "stable=${stable}"
+            echo "publish=${publish}"
+          } >> "${GITHUB_OUTPUT}"
+
+          {
+            echo '### Release metadata'
+            echo
+            echo "- Version: \`${version}\`"
+            echo "- Stable: \`${stable}\`"
+            echo "- Publish requested: \`${publish}\`"
+            echo "- Registry: \`${IMAGE_REGISTRY}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  validate:
+    name: Validate source
+    if: github.repository == 'orca-ae/orca-agent-engine'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: bufbuild/buf-action@v1
+        with:
+          setup_only: true
+      - run: bash .github/scripts/pnpm-install-with-retry.sh
+      - run: node --test .github/scripts/release-images.test.mjs
+      - run: pnpm proto:gen
+      - name: Verify generated stubs are committed
+        run: git diff --exit-code services/*/src/generated || (echo "Generated stubs out of sync; run pnpm proto:gen and commit." && exit 1)
+      - run: pnpm -r build
+      # Kept in step with test-ts.yml. This job duplicates that workflow's
+      # `test` job, and letting only one of the two run the API-artifact drift
+      # gate is how the two gates quietly diverge.
+      - run: pnpm openapi:gen
+      - run: pnpm conformance:gen
+      - name: Verify generated API artifacts are committed
+        run: |
+          git diff --exit-code \
+            services/registry-service-ts/openapi \
+            docs/managed-agents/conformance-matrix.md \
+          || (echo "API artifacts out of sync; run pnpm openapi:gen && pnpm conformance:gen and commit." && exit 1)
+      - run: pnpm test
+      # `pnpm lint`, not `pnpm -r lint`: the recursive form iterates workspace
+      # packages and skips the root, so the root script's `eslint scripts/**/*.mjs`
+      # never ran here — leaving the env-gate's own source unlinted in CI.
+      - run: pnpm lint
+      - run: pnpm format:check
+
+  build-images:
+    name: Build ${{ matrix.image }} (${{ matrix.platform.name }})
+    needs: [release-metadata, validate]
+    if: github.repository == 'orca-ae/orca-agent-engine'
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write # push each platform image by digest
+    # Native runners avoid emulating pnpm, TypeScript and native addon builds.
+    # Each leg pushes only by digest; merge-images owns the multi-arch tags.
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - orca-observability-exporter
+          - orca-registry-service-ts
+          - orca-harness-server
+          - sandbox-harness-claude-code
+        platform:
+          - name: linux/amd64
+            pair: linux-amd64
+            runner: ubuntu-24.04
+          - name: linux/arm64
+            pair: linux-arm64
+            runner: ubuntu-24.04-arm
+        include:
+          - image: orca-observability-exporter
+            dockerfile: services/observability-exporter/Dockerfile
+            build_args: ''
+          - image: orca-registry-service-ts
+            dockerfile: services/registry-service-ts/Dockerfile
+            build_args: ''
+          - image: orca-harness-server
+            dockerfile: services/harness-server/Dockerfile
+            build_args: ''
+          # Codex stays excluded until its provider is implemented.
+          - image: sandbox-harness-claude-code
+            dockerfile: services/sandbox-harness/Dockerfile
+            build_args: DEFAULT_AGENT=claude-code
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: needs.release-metadata.outputs.publish == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_REGISTRY }}/${{ matrix.image }}
+          flavor: latest=false
+          tags: |
+            type=raw,value=${{ needs.release-metadata.outputs.version }}
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable=${{ needs.release-metadata.outputs.stable == 'true' }}
+
+      - name: Build and optionally push platform image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          build-args: ${{ matrix.build_args }}
+          platforms: ${{ matrix.platform.name }}
+          pull: true
+          tags: ${{ env.IMAGE_REGISTRY }}/${{ matrix.image }}
+          outputs: ${{ needs.release-metadata.outputs.publish == 'true' && 'type=image,push-by-digest=true,name-canonical=true,push=true' || '' }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=release-${{ matrix.image }}-${{ matrix.platform.pair }}
+          cache-to: type=gha,mode=max,scope=release-${{ matrix.image }}-${{ matrix.platform.pair }}
+          provenance: ${{ needs.release-metadata.outputs.publish == 'true' }}
+          sbom: ${{ needs.release-metadata.outputs.publish == 'true' }}
+
+      - name: Export pushed image digest
+        id: digest
+        if: needs.release-metadata.outputs.publish == 'true'
+        env:
+          IMAGE_KEY: ${{ matrix.image }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ ! "${DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Build for ${IMAGE_KEY} returned an invalid pushed digest: ${DIGEST:-<empty>}"
+            exit 1
+          fi
+          mkdir -p "${RUNNER_TEMP}/digests"
+          touch "${RUNNER_TEMP}/digests/${DIGEST#sha256:}"
+
+      - name: Upload image digest
+        if: needs.release-metadata.outputs.publish == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-digest-${{ matrix.image }}-${{ matrix.platform.pair }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Summarize image
+        if: always()
+        env:
+          IMAGE: ${{ env.IMAGE_REGISTRY }}/${{ matrix.image }}
+          VERSION: ${{ needs.release-metadata.outputs.version }}
+          PLATFORM: ${{ matrix.platform.name }}
+          PUBLISHED: ${{ needs.release-metadata.outputs.publish }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        shell: bash
+        run: |
+          {
+            echo "### ${IMAGE}"
+            echo
+            echo "- Version: \`${VERSION}\`"
+            echo "- Platform: \`${PLATFORM}\`"
+            echo "- Published by digest: \`${PUBLISHED:-false}\`"
+            if [[ -n "${DIGEST}" ]]; then
+              echo "- Digest: \`${DIGEST}\`"
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  build-opensandbox-platforms:
+    name: Build orca-opensandbox-code-interpreter (${{ matrix.platform }})
+    needs: [release-metadata, validate]
+    if: github.repository == 'orca-ae/orca-agent-engine'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write # push each platform image by digest
+    env:
+      DOCKER_BUILD_RECORD_UPLOAD: false
+      DOCKER_BUILD_SUMMARY: false
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            platform_pair: linux-amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            platform_pair: linux-arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      # The upstream image is ~2.6 GB compressed per architecture. Building
+      # both architectures on one standard runner exhausts its disk after the
+      # layers are unpacked, so each platform gets a clean runner. GHA cache is
+      # deliberately omitted below to avoid exporting the multi-GB base layers.
+      - name: Reclaim runner disk
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo 'Disk before cleanup:'
+          df -h /
+
+          sudo rm -rf \
+            /opt/ghc \
+            /opt/hostedtoolcache/CodeQL \
+            /usr/local/lib/android \
+            /usr/share/dotnet
+          sudo apt-get clean
+          docker system prune --all --force --volumes
+
+          echo 'Disk after cleanup:'
+          df -h /
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: needs.release-metadata.outputs.publish == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_REGISTRY }}/orca-opensandbox-code-interpreter
+          flavor: latest=false
+          tags: |
+            type=raw,value=${{ needs.release-metadata.outputs.version }}
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable=${{ needs.release-metadata.outputs.stable == 'true' }}
+
+      - name: Build and optionally push platform image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: services/harness-server/sandbox-templates/orca-opensandbox/Dockerfile
+          platforms: ${{ matrix.platform }}
+          pull: true
+          tags: ${{ env.IMAGE_REGISTRY }}/orca-opensandbox-code-interpreter
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: ${{ needs.release-metadata.outputs.publish == 'true' && 'type=image,push-by-digest=true,name-canonical=true,push=true' || '' }}
+          provenance: ${{ needs.release-metadata.outputs.publish == 'true' }}
+          sbom: ${{ needs.release-metadata.outputs.publish == 'true' }}
+
+      - name: Reclaim BuildKit disk
+        if: always()
+        shell: bash
+        run: |
+          docker buildx prune --all --force || true
+          df -h /
+
+      - name: Export image digest
+        if: needs.release-metadata.outputs.publish == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          digest='${{ steps.build.outputs.digest }}'
+          if [[ ! "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Build returned an invalid digest: ${digest}"
+            exit 1
+          fi
+
+          mkdir -p "${RUNNER_TEMP}/digests"
+          touch "${RUNNER_TEMP}/digests/${digest#sha256:}"
+
+      - name: Upload image digest
+        if: needs.release-metadata.outputs.publish == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-digest-orca-opensandbox-code-interpreter-${{ matrix.platform_pair }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Summarize platform image
+        if: always()
+        env:
+          IMAGE: ${{ env.IMAGE_REGISTRY }}/orca-opensandbox-code-interpreter
+          VERSION: ${{ needs.release-metadata.outputs.version }}
+          PLATFORM: ${{ matrix.platform }}
+          PUBLISHED: ${{ needs.release-metadata.outputs.publish }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        shell: bash
+        run: |
+          {
+            echo "### ${IMAGE} (${PLATFORM})"
+            echo
+            echo "- Version: \`${VERSION}\`"
+            echo "- Platform: \`${PLATFORM}\`"
+            echo "- Published by digest: \`${PUBLISHED:-false}\`"
+            if [[ -n "${DIGEST}" ]]; then
+              echo "- Digest: \`${DIGEST}\`"
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  merge-images:
+    name: Publish ${{ matrix.image }} manifest
+    # Deliberate release-wide build barrier: no tags advance if either build
+    # matrix fails. This trades early per-image tag availability for waiting
+    # until all platform builds succeed; the chart already needs OpenSandbox.
+    # The subsequent manifest pushes are not an atomic multi-image publish.
+    needs: [release-metadata, build-images, build-opensandbox-platforms]
+    if: >-
+      github.repository == 'orca-ae/orca-agent-engine' &&
+      needs.release-metadata.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write # push the multi-platform manifest and its tags
+    # Only the sandbox leg populates this uniquely named matrix output. Other
+    # legs produce an empty value, which does not overwrite a populated one.
+    # Chart pinning must use the merged index, never a platform image digest.
+    outputs:
+      sandbox_harness_digest: ${{ steps.inspect.outputs['digest_sandbox-harness-claude-code'] }}
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - orca-observability-exporter
+          - orca-registry-service-ts
+          - orca-harness-server
+          - sandbox-harness-claude-code
+          - orca-opensandbox-code-interpreter
+    steps:
+      - name: Download platform digests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: release-digest-${{ matrix.image }}-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_REGISTRY }}/${{ matrix.image }}
+          flavor: latest=false
+          tags: |
+            type=raw,value=${{ needs.release-metadata.outputs.version }}
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable=${{ needs.release-metadata.outputs.stable == 'true' }}
+
+      - name: Create manifest list and push
+        id: create
+        working-directory: ${{ runner.temp }}/digests
+        env:
+          IMAGE: ${{ env.IMAGE_REGISTRY }}/${{ matrix.image }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          digest_files=(*)
+          if [[ "${#digest_files[@]}" -ne 2 ]]; then
+            echo "::error::Expected 2 platform digests, found ${#digest_files[@]}."
+            exit 1
+          fi
+
+          tag_args=()
+          while IFS= read -r tag; do
+            if [[ -n "${tag}" ]]; then
+              tag_args+=(--tag "${tag}")
+            fi
+          done <<< "${TAGS}"
+
+          source_args=()
+          for digest in "${digest_files[@]}"; do
+            if [[ ! "${digest}" =~ ^[0-9a-f]{64}$ ]]; then
+              echo "::error::Invalid digest artifact name: ${digest}"
+              exit 1
+            fi
+            source_args+=("${IMAGE}@sha256:${digest}")
+          done
+
+          metadata_file="${RUNNER_TEMP}/release-manifest-metadata.json"
+          docker buildx imagetools create \
+            --metadata-file "${metadata_file}" \
+            "${tag_args[@]}" \
+            "${source_args[@]}"
+
+          if [[ ! -s "${metadata_file}" ]]; then
+            echo '::error::Manifest creation did not produce metadata.'
+            exit 1
+          fi
+          digest="$(jq -r '."containerimage.descriptor".digest // empty' "${metadata_file}")"
+          if [[ ! "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Could not resolve created manifest digest: ${digest}"
+            cat "${metadata_file}"
+            exit 1
+          fi
+          echo "digest=${digest}" >> "${GITHUB_OUTPUT}"
+
+      - name: Verify published manifest
+        id: inspect
+        env:
+          IMAGE: ${{ env.IMAGE_REGISTRY }}/${{ matrix.image }}
+          IMAGE_KEY: ${{ matrix.image }}
+          VERSION: ${{ needs.release-metadata.outputs.version }}
+          EXPECTED_DIGEST: ${{ steps.create.outputs.digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ref="${IMAGE}:${VERSION}"
+          attempts=7
+          delay_seconds=2
+          inspect_error="${RUNNER_TEMP}/release-manifest-inspect.err"
+          manifest_json=''
+          digest=''
+          platforms=''
+
+          if [[ ! "${EXPECTED_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Created manifest returned an invalid digest: ${EXPECTED_DIGEST}"
+            exit 1
+          fi
+
+          # The registry may not expose a newly pushed tag immediately. Retry
+          # until both digest and platform list match the manifest we created.
+          for attempt in $(seq 1 "${attempts}"); do
+            if manifest_json="$(docker buildx imagetools inspect "${ref}" --format '{{json .Manifest}}' 2> "${inspect_error}")"; then
+              if jq -e 'type == "object" and (.digest | type == "string") and (.manifests | type == "array")' \
+                > /dev/null <<< "${manifest_json}"; then
+                digest="$(jq -r '.digest // empty' <<< "${manifest_json}")"
+                platforms="$(jq -r '[.manifests[].platform | select(.os == "linux" and (.architecture == "amd64" or .architecture == "arm64")) | "\(.os)/\(.architecture)"] | unique | sort | join(",")' <<< "${manifest_json}")"
+                if [[ "${digest}" == "${EXPECTED_DIGEST}" && "${platforms}" == 'linux/amd64,linux/arm64' ]]; then
+                  break
+                fi
+                {
+                  echo 'Published manifest has not converged to the created manifest:'
+                  echo "- Expected digest: ${EXPECTED_DIGEST}"
+                  echo "- Observed digest: ${digest:-<empty>}"
+                  echo "- Observed platforms: ${platforms:-<empty>}"
+                } > "${inspect_error}"
+              else
+                printf 'imagetools inspect returned invalid manifest JSON:\n%s\n' "${manifest_json}" > "${inspect_error}"
+              fi
+            fi
+
+            if [[ ! -s "${inspect_error}" ]]; then
+              echo 'imagetools inspect exited without diagnostics.' > "${inspect_error}"
+            fi
+
+            if [[ "${attempt}" == "${attempts}" ]]; then
+              echo "::error::Could not inspect published manifest after ${attempts} attempts: ${ref}"
+              cat "${inspect_error}" >&2
+              exit 1
+            fi
+
+            echo "::warning::Published manifest is not readable yet (attempt ${attempt}/${attempts}); retrying in ${delay_seconds}s."
+            cat "${inspect_error}" >&2
+            sleep "${delay_seconds}"
+            delay_seconds=$((delay_seconds * 2))
+            if ((delay_seconds > 30)); then
+              delay_seconds=30
+            fi
+          done
+
+          {
+            echo "digest=${digest}"
+            echo "platforms=${platforms}"
+            echo "digest_${IMAGE_KEY}=${digest}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Summarize image
+        env:
+          IMAGE: ${{ env.IMAGE_REGISTRY }}/${{ matrix.image }}
+          VERSION: ${{ needs.release-metadata.outputs.version }}
+          DIGEST: ${{ steps.inspect.outputs.digest }}
+          PLATFORMS: ${{ steps.inspect.outputs.platforms }}
+        shell: bash
+        run: |
+          {
+            echo "### ${IMAGE}"
+            echo
+            echo "- Version: \`${VERSION}\`"
+            echo "- Platforms: \`${PLATFORMS}\`"
+            echo "- Published: \`true\`"
+            echo "- Digest: \`${DIGEST}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  release-chart:
+    name: Package Helm chart
+    needs:
+      - release-metadata
+      - validate
+      - build-images
+      - build-opensandbox-platforms
+      - merge-images
+    if: >-
+      always() &&
+      github.repository == 'orca-ae/orca-agent-engine' &&
+      needs.release-metadata.result == 'success' &&
+      needs.validate.result == 'success' &&
+      needs.build-images.result == 'success' &&
+      needs.build-opensandbox-platforms.result == 'success' &&
+      (needs.merge-images.result == 'success' ||
+       (needs.release-metadata.outputs.publish != 'true' &&
+        needs.merge-images.result == 'skipped'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # upload Helm chart to the GitHub Release
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.17.3
+
+      - name: helm lint
+        run: |
+          helm lint charts/orca-managed-agents \
+            --set-string secrets.values.sessionJwtPrivateKeyPem=test-private-key \
+            --set-string secrets.values.sessionJwtPublicKeyPem=test-public-key \
+            --set-string objectStorage.stsRoleArn=arn:aws:iam::000000000000:role/smoke-orca-session \
+            --set-string secrets.values.databaseUrl=postgres://smoke:smoke@localhost:5432/registry \
+            --set-string secrets.values.transcriptStoreDatabaseUrl=postgres://smoke:smoke@localhost:5432/transcript \
+            --set-string secrets.values.filestoreDatabaseUrl=postgres://smoke:smoke@localhost:5432/filestore \
+            --set-string secrets.values.memorystoreDatabaseUrl=postgres://smoke:smoke@localhost:5432/memorystore
+
+      # The vendor-suffixed --kube-version guards the kubeVersion constraint
+      # against EKS pre-release build strings.
+      - name: helm template smoke
+        run: |
+          helm template orca-managed-agents charts/orca-managed-agents \
+            --namespace orca-system \
+            --kube-version 1.35.6-eks-8f14419 \
+            --set-string secrets.values.sessionJwtPrivateKeyPem=test-private-key \
+            --set-string secrets.values.sessionJwtPublicKeyPem=test-public-key \
+            --set-string objectStorage.stsRoleArn=arn:aws:iam::000000000000:role/smoke-orca-session \
+            --set-string secrets.values.databaseUrl=postgres://smoke:smoke@localhost:5432/registry \
+            --set-string secrets.values.transcriptStoreDatabaseUrl=postgres://smoke:smoke@localhost:5432/transcript \
+            --set-string secrets.values.filestoreDatabaseUrl=postgres://smoke:smoke@localhost:5432/filestore \
+            --set-string secrets.values.memorystoreDatabaseUrl=postgres://smoke:smoke@localhost:5432/memorystore \
+            >/dev/null
+
+      - name: helm lint (opensandbox-patches)
+        run: helm lint charts/opensandbox-patches
+
+      - name: helm template smoke (opensandbox-patches)
+        run: |
+          set -euo pipefail
+          rendered="$(
+            helm template opensandbox-patches charts/opensandbox-patches \
+              --namespace opensandbox-system
+          )"
+          grep -q '^kind: Namespace$' <<< "${rendered}"
+          grep -q '^  name: opensandbox$' <<< "${rendered}"
+          grep -q '^kind: ConfigMap$' <<< "${rendered}"
+          grep -q '^  name: opensandbox-server-gvisor-fuse-patch$' <<< "${rendered}"
+          grep -q '^kind: ValidatingAdmissionPolicy$' <<< "${rendered}"
+          grep -q '^kind: ValidatingAdmissionPolicyBinding$' <<< "${rendered}"
+          grep -q '^  name: opensandbox-gvisor-fuse$' <<< "${rendered}"
+          grep -q '^  batchsandbox_provider.py:' <<< "${rendered}"
+          grep -q '^  provider_common.py:' <<< "${rendered}"
+          grep -q '^  security_context.py:' <<< "${rendered}"
+          grep -q 'ORCA_TRUSTED_SANDBOX_WORKLOADS' <<< "${rendered}"
+          grep -q 'ORCA_TRUSTED_SANDBOX_REPOSITORIES' <<< "${rendered}"
+          grep -q 'ORCA_TRUSTED_SANDBOX_REPOSITORY_PREFIXES' <<< "${rendered}"
+          grep -q 'runtimeClassName.*gvisor' <<< "${rendered}"
+          grep -q 'orca.fuse.device' <<< "${rendered}"
+          grep -q 'SYS_ADMIN' <<< "${rendered}"
+          grep -q 'SETFCAP' <<< "${rendered}"
+          if grep -q 'fuse_device_enabled' <<< "${rendered}"; then exit 1; fi
+          if grep -q 'opensandbox-server-runc-bubblewrap-patch' <<< "${rendered}"; then exit 1; fi
+          existing_namespace_rendered="$(
+            helm template opensandbox-patches charts/opensandbox-patches \
+              --namespace opensandbox-system \
+              --set dataplaneNamespace.create=false
+          )"
+          if grep -q '^kind: Namespace$' <<< "${existing_namespace_rendered}"; then exit 1; fi
+          grep -q '^kind: ConfigMap$' <<< "${existing_namespace_rendered}"
+          grep -q '^kind: ValidatingAdmissionPolicy$' <<< "${existing_namespace_rendered}"
+
+      # The packaged chart must reference the artifacts this release built:
+      # image tags derive from --app-version, and the repositories are
+      # rewritten to IMAGE_REGISTRY, where the build jobs push. A dry run
+      # (publish=false) packages the same references without pushing images,
+      # and never attaches the chart to a GitHub Release.
+      - name: Resolve packaged image repositories
+        id: chart-images
+        env:
+          PUBLISH: ${{ needs.release-metadata.outputs.publish }}
+          SANDBOX_HARNESS_DIGEST: ${{ needs.merge-images.outputs.sandbox_harness_digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          registry_repository="${IMAGE_REGISTRY}/orca-registry-service-ts"
+          harness_repository="${IMAGE_REGISTRY}/orca-harness-server"
+          exporter_repository="${IMAGE_REGISTRY}/orca-observability-exporter"
+          sandbox_harness_repository="${IMAGE_REGISTRY}/sandbox-harness-claude-code"
+
+          # A published release must pin the sandbox-harness default by the
+          # digest the build job actually pushed for reproducible deployment.
+          # Repository-based OpenSandbox trust also accepts tags, but that
+          # authorization policy does not replace release artifact pinning.
+          # Without publication there is no pullable digest, so dry runs keep
+          # the digest empty and the chart falls back to the tag form.
+          sandbox_harness_digest=''
+          if [[ "${PUBLISH}" == 'true' ]]; then
+            if [[ ! "${SANDBOX_HARNESS_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "::error::sandbox-harness-claude-code build did not report a valid pushed digest: ${SANDBOX_HARNESS_DIGEST:-<empty>}"
+              exit 1
+            fi
+            sandbox_harness_digest="${SANDBOX_HARNESS_DIGEST}"
+          fi
+
+          {
+            echo "registry_repository=${registry_repository}"
+            echo "harness_repository=${harness_repository}"
+            echo "exporter_repository=${exporter_repository}"
+            echo "sandbox_harness_repository=${sandbox_harness_repository}"
+            echo "sandbox_harness_digest=${sandbox_harness_digest}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Point chart image defaults at this release
+        env:
+          REGISTRY_REPOSITORY: ${{ steps.chart-images.outputs.registry_repository }}
+          HARNESS_REPOSITORY: ${{ steps.chart-images.outputs.harness_repository }}
+          EXPORTER_REPOSITORY: ${{ steps.chart-images.outputs.exporter_repository }}
+          SANDBOX_HARNESS_REPOSITORY: ${{ steps.chart-images.outputs.sandbox_harness_repository }}
+          SANDBOX_HARNESS_DIGEST: ${{ steps.chart-images.outputs.sandbox_harness_digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # An empty digest (dry run: nothing was pushed) matches the
+          # checked-in default and keeps the tag-form fallback; published runs
+          # always carry a validated digest here.
+          yq -i '
+            .images.registry.repository = strenv(REGISTRY_REPOSITORY) |
+            .images.harness.repository = strenv(HARNESS_REPOSITORY) |
+            .images.observabilityExporter.repository = strenv(EXPORTER_REPOSITORY) |
+            .images.sandboxHarness.claudeCode.repository = strenv(SANDBOX_HARNESS_REPOSITORY) |
+            .images.sandboxHarness.claudeCode.digest = strenv(SANDBOX_HARNESS_DIGEST)
+          ' charts/orca-managed-agents/values.yaml
+
+      - name: Package chart with release version
+        env:
+          VERSION: ${{ needs.release-metadata.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          helm package charts/orca-managed-agents -d dist \
+            --version "${VERSION}" \
+            --app-version "${VERSION}"
+
+      - name: Verify packaged chart metadata
+        env:
+          VERSION: ${{ needs.release-metadata.outputs.version }}
+        run: |
+          set -euo pipefail
+          chart="dist/orca-managed-agents-${VERSION}.tgz"
+          test -f "${chart}"
+
+          metadata="$(tar -xOzf "${chart}" orca-managed-agents/Chart.yaml)"
+          chart_version="$(awk -F ': *' '$1 == "version" { print $2; exit }' <<< "${metadata}" | tr -d "\"'")"
+          app_version="$(awk -F ': *' '$1 == "appVersion" { print $2; exit }' <<< "${metadata}" | tr -d "\"'")"
+          test "${chart_version}" = "${VERSION}"
+          test "${app_version}" = "${VERSION}"
+
+      - name: Verify packaged chart renders this release's images
+        env:
+          VERSION: ${{ needs.release-metadata.outputs.version }}
+          PUBLISH: ${{ needs.release-metadata.outputs.publish }}
+          REGISTRY_REPOSITORY: ${{ steps.chart-images.outputs.registry_repository }}
+          HARNESS_REPOSITORY: ${{ steps.chart-images.outputs.harness_repository }}
+          EXPORTER_REPOSITORY: ${{ steps.chart-images.outputs.exporter_repository }}
+          SANDBOX_HARNESS_REPOSITORY: ${{ steps.chart-images.outputs.sandbox_harness_repository }}
+          SANDBOX_HARNESS_DIGEST: ${{ steps.chart-images.outputs.sandbox_harness_digest }}
+        run: |
+          set -euo pipefail
+          rendered="$(
+            helm template orca-managed-agents "dist/orca-managed-agents-${VERSION}.tgz" \
+              --namespace orca-system \
+              --kube-version 1.35.6-eks-8f14419 \
+              --set transcriptStore.backend=kafka \
+              --set observabilityExporter.enabled=true \
+              --set-string secrets.values.sessionJwtPrivateKeyPem=test-private-key \
+              --set-string secrets.values.sessionJwtPublicKeyPem=test-public-key \
+              --set-string objectStorage.stsRoleArn=arn:aws:iam::000000000000:role/smoke-orca-session \
+              --set-string secrets.values.databaseUrl=postgres://smoke:smoke@localhost:5432/registry \
+              --set-string secrets.values.transcriptStoreDatabaseUrl=postgres://smoke:smoke@localhost:5432/transcript \
+              --set-string secrets.values.filestoreDatabaseUrl=postgres://smoke:smoke@localhost:5432/filestore \
+              --set-string secrets.values.memorystoreDatabaseUrl=postgres://smoke:smoke@localhost:5432/memorystore
+          )"
+
+          grep -Fq "image: \"${REGISTRY_REPOSITORY}:${VERSION}\"" <<< "${rendered}"
+          grep -Fq "image: \"${HARNESS_REPOSITORY}:${VERSION}\"" <<< "${rendered}"
+          grep -Fq "image: \"${EXPORTER_REPOSITORY}:${VERSION}\"" <<< "${rendered}"
+          # The sandbox-harness image is never a Deployment `image:` field — it
+          # is only consumed at runtime (harness-server requests it per-session
+          # from OpenSandbox), wired through this ConfigMap env var. A
+          # publishable chart must render the digest-pinned release artifact;
+          # only digest-less dry runs may fall back to the local/dev tag form.
+          if [[ "${PUBLISH}" == 'true' && -z "${SANDBOX_HARNESS_DIGEST}" ]]; then
+            echo '::error::Publishing requires a pushed sandbox-harness digest to pin the chart default.'
+            exit 1
+          fi
+          if [[ -n "${SANDBOX_HARNESS_DIGEST}" ]]; then
+            grep -Fq "SANDBOX_HARNESS_CLAUDE_CODE_IMAGE: \"${SANDBOX_HARNESS_REPOSITORY}@${SANDBOX_HARNESS_DIGEST}\"" <<< "${rendered}"
+          else
+            grep -Fq "SANDBOX_HARNESS_CLAUDE_CODE_IMAGE: \"${SANDBOX_HARNESS_REPOSITORY}:${VERSION}\"" <<< "${rendered}"
+          fi
+          if grep -E 'image: .*:latest"' <<< "${rendered}"; then
+            echo '::error::Packaged chart renders a floating :latest image reference.'
+            exit 1
+          fi
+          if grep -E 'SANDBOX_HARNESS_CLAUDE_CODE_IMAGE: .*:latest"' <<< "${rendered}"; then
+            echo '::error::Packaged chart renders a floating :latest sandbox-harness image reference.'
+            exit 1
+          fi
+
+      # Both charts follow the release tag, but patches appVersion identifies
+      # the upstream OpenSandbox version and must not be replaced by Orca's.
+      - name: Package opensandbox-patches chart
+        env:
+          VERSION: ${{ needs.release-metadata.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          helm package charts/opensandbox-patches -d dist --version "${VERSION}"
+
+      - name: Verify packaged opensandbox-patches chart metadata
+        env:
+          VERSION: ${{ needs.release-metadata.outputs.version }}
+        run: |
+          set -euo pipefail
+          chart="dist/opensandbox-patches-${VERSION}.tgz"
+          test -f "${chart}"
+
+          metadata="$(tar -xOzf "${chart}" opensandbox-patches/Chart.yaml)"
+          chart_version="$(yq -r '.version' <<< "${metadata}")"
+          app_version="$(yq -r '.appVersion' <<< "${metadata}")"
+          upstream_version="$(yq -r '.appVersion' charts/opensandbox-patches/Chart.yaml)"
+          test "${chart_version}" = "${VERSION}"
+          test "${app_version}" = "${upstream_version}"
+
+      # action-gh-release defaults prerelease to false, so pre-release tags
+      # (v1.2.3-rc.1) must set it explicitly or they would publish as ordinary
+      # releases and could become "latest" even though the image jobs withhold
+      # the :latest tag for them.
+      #
+      # Gated on `publish` as well as the tag push event: a chart whose images
+      # were never pushed would look identical to a real release while being
+      # broken for anyone who installs it. Lint/template-smoke/package/verify
+      # above still run unconditionally, so workflow_dispatch dry runs keep
+      # exercising the full chart-correctness path.
+      - name: Upload chart to GitHub Release
+        if: github.event_name == 'push' && needs.release-metadata.outputs.publish == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.tgz
+          prerelease: ${{ needs.release-metadata.outputs.stable != 'true' }}
+          make_latest: ${{ needs.release-metadata.outputs.stable == 'true' }}
+
+      - name: Upload chart from manual run
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: orca-managed-agents-chart-${{ needs.release-metadata.outputs.version }}
+          path: dist/*.tgz
+          if-no-files-found: error
+
+  # Optional Docker Hub mirror, for users who pull from Docker Hub. GHCR stays
+  # the source of truth and the chart keeps pointing at it. `imagetools create`
+  # copies each released manifest list, with every platform and attestation,
+  # without rebuilding, so the mirrored index keeps its digest. It runs only
+  # when the DOCKERHUB_NAMESPACE repository variable names a namespace, and
+  # last, so a release that failed is never mirrored. Pushing needs the
+  # DOCKERHUB_USERNAME and DOCKERHUB_TOKEN secrets.
+  mirror-docker-hub:
+    name: Mirror ${{ matrix.image }} to Docker Hub
+    needs: [release-metadata, merge-images, release-chart]
+    if: >-
+      github.repository == 'orca-ae/orca-agent-engine' &&
+      needs.release-metadata.outputs.publish == 'true' &&
+      vars.DOCKERHUB_NAMESPACE != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: read # read the GHCR manifests being copied
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - orca-observability-exporter
+          - orca-registry-service-ts
+          - orca-harness-server
+          - sandbox-harness-claude-code
+          - orca-opensandbox-code-interpreter
+    steps:
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Copy the release manifest to Docker Hub
+        env:
+          SOURCE: ${{ env.IMAGE_REGISTRY }}/${{ matrix.image }}
+          TARGET: docker.io/${{ vars.DOCKERHUB_NAMESPACE }}/${{ matrix.image }}
+          VERSION: ${{ needs.release-metadata.outputs.version }}
+          STABLE: ${{ needs.release-metadata.outputs.stable }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Resolve the tag once, so every mirrored tag names the same index.
+          digest="$(docker buildx imagetools inspect "${SOURCE}:${VERSION}" --format '{{json .Manifest}}' | jq -r '.digest // empty')"
+          if [[ ! "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Could not resolve ${SOURCE}:${VERSION} to a manifest digest: ${digest:-<empty>}"
+            exit 1
+          fi
+
+          tags=(--tag "${TARGET}:${VERSION}")
+          if [[ "${STABLE}" == 'true' ]]; then
+            tags+=(--tag "${TARGET}:latest")
+          fi
+          docker buildx imagetools create "${tags[@]}" "${SOURCE}@${digest}"
+          echo "- \`${TARGET}:${VERSION}\` mirrors \`${SOURCE}@${digest}\`" >> "${GITHUB_STEP_SUMMARY}"

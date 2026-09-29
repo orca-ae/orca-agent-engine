@@ -1,0 +1,23 @@
+// Copyright The Orca Authors
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+
+package orca.common.v1;
+
+message Empty {}
+
+// All timestamp string fields across these protos are ISO 8601 UTC,
+// e.g. "2026-05-01T09:00:00Z". Callers that compare or sort timestamps
+// rely on lexicographic ordering being equivalent to chronological order
+// (the ISO 8601 fixed-precision representation guarantees this).
+
+message Pagination {
+  int32 limit = 1;
+  string cursor = 2;
+}
+
+message PageInfo {
+  string next_cursor = 1;
+  bool has_more = 2;
+}

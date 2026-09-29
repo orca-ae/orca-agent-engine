@@ -1,0 +1,135 @@
+{{- if .Values.aiGateway.enabled -}}
+{{- $jwtPublicKeySettings := .Values.sessionJwt.publicKeySecret | default (dict) -}}
+{{- $jwtPublicKeySecret := include "orca-managed-agents.sessionJwtPublicKeySecret" . -}}
+{{- $jwtPublicKey := required "sessionJwt.publicKeySecret.name is required: the ai-gateway needs the session-JWT trust anchor and the chart manages no Secret to take it from (secrets.create=false with an empty secrets.existingSecret)" $jwtPublicKeySecret | fromJson -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "orca-managed-agents.aiGatewayServiceName" . }}
+  labels:
+    {{- include "orca-managed-agents.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ai-gateway
+spec:
+  replicas: {{ .Values.aiGateway.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "orca-managed-agents.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: ai-gateway
+  template:
+    metadata:
+      annotations:
+        {{- /* The gateway parses its config once at boot, so a config change
+               must roll the pods. */}}
+        checksum/config: {{ include (print $.Template.BasePath "/configmap-ai-gateway.yaml") . | sha256sum }}
+        {{- /* A subPath Secret mount never receives in-place updates. Hash the
+               inline public key when this chart owns it; externally managed
+               Secrets use aiGateway.podAnnotations as the rollout trigger. */}}
+        {{- if and .Values.secrets.create (not .Values.secrets.existingSecret) (empty (dig "name" "" $jwtPublicKeySettings)) }}
+        checksum/session-jwt-public-key: {{ .Values.secrets.values.sessionJwtPublicKeyPem | sha256sum }}
+        {{- end }}
+        {{- with .Values.aiGateway.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "orca-managed-agents.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: ai-gateway
+        {{- with .Values.aiGateway.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "orca-managed-agents.aiGatewayServiceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.aiGateway.automountServiceAccountToken }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: ai-gateway
+          image: "{{ .Values.images.aiGateway.repository }}:{{ .Values.images.aiGateway.tag }}"
+          imagePullPolicy: {{ .Values.images.aiGateway.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.aiGateway.dataPort }}
+              protocol: TCP
+            - name: admin
+              containerPort: {{ .Values.aiGateway.adminPort }}
+              protocol: TCP
+          {{- with .Values.aiGateway.extraEnv }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.aiGateway.extraEnvFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            {{- /* Both files are subPath mounts so /etc/orca-gateway stays a
+                   plain directory that extraVolumeMounts can add to. */}}
+            - name: config
+              mountPath: /etc/orca-gateway/config.yaml
+              subPath: config.yaml
+              readOnly: true
+            - name: session-jwt-public-key
+              mountPath: /etc/orca-gateway/session-jwt-pub.pem
+              subPath: session-jwt-public-key-pem
+              readOnly: true
+            - name: registry-internal-token
+              mountPath: {{ .Values.internalAuth.tokenMountPath | quote }}
+              readOnly: true
+            {{- with .Values.aiGateway.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.aiGateway.startupProbe }}
+          startupProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.aiGateway.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.aiGateway.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.aiGateway.resources | nindent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "orca-managed-agents.fullname" . }}-ai-gateway-config
+        - name: session-jwt-public-key
+          secret:
+            secretName: {{ $jwtPublicKey.name }}
+            items:
+              - key: {{ $jwtPublicKey.key }}
+                path: session-jwt-public-key-pem
+        - name: registry-internal-token
+          projected:
+            # Projected files are owned by root. The pod fsGroup needs group
+            # read permission so the non-root gateway process can consume it.
+            defaultMode: 0440
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  audience: {{ .Values.internalAuth.audience | quote }}
+                  expirationSeconds: {{ .Values.internalAuth.tokenExpirationSeconds }}
+        {{- with .Values.aiGateway.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.aiGateway.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.aiGateway.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.aiGateway.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

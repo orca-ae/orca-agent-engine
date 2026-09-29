@@ -1,0 +1,41 @@
+{{- if and .Values.registry.istio.enabled .Values.registry.istio.authorizationPolicy.enabled -}}
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: {{ include "orca-managed-agents.registryServiceName" . }}-external
+  namespace: {{ .Values.registry.istio.gatewayNamespace }}
+  labels:
+    {{- include "orca-managed-agents.labels" . | nindent 4 }}
+    app.kubernetes.io/component: registry
+spec:
+  selector:
+    matchLabels:
+      {{- toYaml .Values.registry.istio.gateway.selector | nindent 6 }}
+  action: DENY
+  # Istio evaluates the HTTP-only attributes below (hosts, notPaths) as
+  # always-matching for plain-TCP traffic in DENY policies, so the rule keeps
+  # two TCP-evaluable constraints that stop it from matching unrelated
+  # listeners on a shared gateway: the port scope excludes every non-HTTPS
+  # listener, and the SNI condition excludes TLS-passthrough traffic for
+  # other hosts on the same port. The chart's Gateway terminates TLS for the
+  # host at the gateway (SIMPLE), so legitimate registry requests always
+  # carry the host as SNI.
+  rules:
+    - to:
+        - operation:
+            hosts:
+              - {{ .Values.registry.istio.host | quote }}
+              - {{ printf "%s:*" .Values.registry.istio.host | quote }}
+            ports:
+              {{- range .Values.registry.istio.authorizationPolicy.gatewayHttpsPorts }}
+              - {{ . | quote }}
+              {{- end }}
+            notPaths:
+              {{- range .Values.registry.istio.authorizationPolicy.allowedPaths }}
+              - {{ . | quote }}
+              {{- end }}
+      when:
+        - key: connection.sni
+          values:
+            - {{ .Values.registry.istio.host | quote }}
+{{- end }}

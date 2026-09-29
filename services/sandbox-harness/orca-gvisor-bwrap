@@ -1,0 +1,67 @@
+#!/bin/bash
+# Copyright The Orca Authors
+# SPDX-License-Identifier: Apache-2.0
+
+set -euo pipefail
+
+readonly REAL_BWRAP=/usr/lib/orca/bwrap.real
+readonly UNSHARE=/usr/bin/unshare
+
+if ! /usr/bin/grep -qi gvisor /proc/sys/kernel/osrelease 2>/dev/null; then
+  exec "${REAL_BWRAP}" "$@"
+fi
+
+# gVisor does not implement openat2. Bubblewrap 0.12 uses it for secure path
+# resolution, so force its security-equivalent openat(2) fallback in this
+# runtime rather than depending on syscall failure detection.
+options=(--debug-opt=force-openat-fallback)
+command=()
+parsing_options=1
+needs_network_namespace=0
+
+for arg in "$@"; do
+  if [[ ${parsing_options} -eq 1 && ${arg} == -- ]]; then
+    parsing_options=0
+    command+=("${arg}")
+    continue
+  fi
+  if [[ ${parsing_options} -eq 0 ]]; then
+    command+=("${arg}")
+    continue
+  fi
+  case ${arg} in
+    --unshare-net)
+      needs_network_namespace=1
+      ;;
+    # gVisor does not implement cgroup namespaces. They are not part of Orca's
+    # boundary: the outer Pod owns resource accounting and this wrapper keeps
+    # Bubblewrap's user, PID, mount, filesystem, and network isolation.
+    --unshare-cgroup | --unshare-cgroup-try) ;;
+    *) options+=("${arg}") ;;
+  esac
+done
+
+if [[ ${needs_network_namespace} -eq 1 ]]; then
+  filtered_options=()
+  for arg in "${options[@]}"; do
+    case ${arg} in
+      # Create user + network namespaces together with util-linux. gVisor starts
+      # their loopback interface correctly; Bubblewrap's netlink setup returns
+      # RTM_NEWADDR even though the interface is already usable.
+      --unshare-user | --unshare-user-try) ;;
+      *) filtered_options+=("${arg}") ;;
+    esac
+  done
+  uid="$(/usr/bin/id -u)"
+  gid="$(/usr/bin/id -g)"
+  readonly uid gid
+  exec "${UNSHARE}" \
+    --user \
+    "--map-user=${uid}" \
+    "--map-group=${gid}" \
+    --net \
+    -- \
+    "${REAL_BWRAP}" "${filtered_options[@]}" "${command[@]}"
+fi
+
+exec "${REAL_BWRAP}" "${options[@]}" "${command[@]}"

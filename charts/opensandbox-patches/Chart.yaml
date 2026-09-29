@@ -1,0 +1,13 @@
+# Copyright The Orca Authors
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: v2
+name: opensandbox-patches
+description: >-
+  Orca patches and defaults for OpenSandbox server v0.2.2. Carries the
+  opensandbox-server-gvisor-fuse-patch ConfigMap, requires gVisor RuntimeClass
+  workloads with operator-approved in-sandbox FUSE, creates the opensandbox
+  dataplane Namespace, and enables fail-closed Pod admission by default.
+type: application
+version: 0.4.0
+appVersion: '0.2.2'

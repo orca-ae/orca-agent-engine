@@ -1,0 +1,188 @@
+# Copyright The Orca Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# Local-stack Orca AI Gateway config for the published ghcr.io/orca-ae/orca-ai-gateway image.
+#
+# AI_GATEWAY_IMAGE stays env-configurable; services/dev/.env.example configures
+# the default published image.
+
+server:
+  listen: '0.0.0.0:8090'
+  admin_listen: '0.0.0.0:9099'
+
+identity:
+  scope_dims:
+    [
+      workspace_id,
+      session_id,
+      org_id,
+      llm_routes,
+      llm_models,
+      mcp_server_names,
+      vault_ids,
+      credential_ids,
+    ]
+  validators:
+    - name: orca-session-jwt
+      kind: jwt
+      static_public_key_pem: '/etc/orca-gateway/session-jwt-pub.pem'
+      issuers: ['orca-registry']
+      audiences: ['ai-gateway']
+      scope_from:
+        jwt_claims:
+          workspace_id: workspace_id
+          session_id: session_id
+          org_id: org_id
+          llm_routes: llm_routes
+          llm_models: llm_models
+          mcp_server_names: mcp_server_names
+          vault_ids: vault_ids
+          credential_ids: credential_ids
+
+vaults:
+  - name: openai_api_key
+    resolver: env
+    env_var: OPENAI_API_KEY
+  - name: deepseek_api_key
+    resolver: env
+    env_var: DEEPSEEK_API_KEY
+  - name: anthropic_api_key
+    resolver: env
+  - name: registry-vaults
+    resolver: http
+    url_template: 'http://registry:8081/internal/v1/workspaces/{scope.workspace_id}/sessions/{scope.session_id}/vault-credentials/{credential_id}/resolve'
+    bearer_token_file: '/var/run/secrets/orca/registry-internal/token'
+    timeout_ms: 5000
+    cache:
+      default_ttl_secs: 300
+      max_entries: 1024
+
+destinations:
+  openai-responses:
+    kind: openai
+    base_url: 'https://api.openai.com/v1'
+    credentials:
+      vault: openai_api_key
+  deepseek-chat:
+    kind: openai_compatible
+    base_url: 'https://api.deepseek.com'
+    credentials:
+      vault: deepseek_api_key
+  anthropic-proxy:
+    kind: anthropic
+    base_url: 'https://api.anthropic.com'
+    credentials:
+      vault: anthropic_api_key
+  '*':
+    kind: mcp
+    destination_resolver:
+      kind: http
+      url_template: 'http://registry:8081/internal/v1/workspaces/{scope.workspace_id}/sessions/{scope.session_id}/mcp-destination/resolve'
+      bearer_token_file: '/var/run/secrets/orca/registry-internal/token'
+      timeout_ms: 5000
+      egress_policy:
+        # Local E2E upstream only. Production Helm defaults to no private hosts.
+        allowed_private_hosts: ['host.docker.internal']
+        dns_timeout_ms: 2000
+        connect_timeout_ms: 5000
+    credentials:
+      vault: registry-vaults
+
+routes:
+  - name: llm-responses
+    match:
+      path: '/v1/responses'
+    strategy:
+      mode: fallback
+      targets:
+        - destination: openai-responses
+  - name: llm-chat
+    match:
+      path: '/v1/chat/completions'
+    strategy:
+      mode: fallback
+      targets:
+        - destination: deepseek-chat
+  - name: llm-messages
+    match:
+      path: '/v1/messages'
+    idempotency_safe: true
+    strategy:
+      mode: fallback
+      targets:
+        - destination: anthropic-proxy
+  - name: mcp-forward
+    match:
+      path: '/v1/mcp'
+    idempotency_safe: true
+    strategy:
+      mode: fallback
+      targets:
+        - destination: '*'
+
+plugins:
+  authorizers:
+    - name: session-mcp-allowlist
+      kind: yaml_acl
+      required: true
+      failure_mode: deny
+      rules:
+        - effect: allow
+          action: invoke
+          scope:
+            workspace_id: ws_e2e_tests
+          resource:
+            kind: model
+            provider: openai
+          conditions:
+            - resource_name_in_scope_list:
+                scope: llm_models
+        - effect: allow
+          action: invoke
+          resource:
+            kind: model
+            provider: anthropic
+          conditions:
+            - resource_name_in_scope_list:
+                scope: llm_models
+        - effect: allow
+          action: invoke
+          resource:
+            kind: model
+            provider: openai_compatible
+          conditions:
+            - resource_name_in_scope_list:
+                scope: llm_models
+        - effect: allow
+          action: invoke
+          resource:
+            kind: route
+          conditions:
+            - resource_name_in_scope_list:
+                scope: llm_routes
+        # Fail closed unless both per-session MCP allowlists carried by the JWT
+        # authorize the request selected by harness-server rewrite headers.
+        - effect: allow
+          action: mcp
+          resource:
+            kind: mcp_server
+            header: X-Orca-Backend
+          conditions:
+            - header_in_scope_list:
+                header: X-Orca-Backend
+                scope: mcp_server_names
+            - header_in_scope_list:
+                header: X-Orca-Credential-Id
+                scope: credential_ids
+                if_missing: allow
+  audit_sinks:
+    - name: ai-gateway-audit-kafka
+      kind: kafka
+      required: true
+      failure_mode: deny
+      brokers: 'kafka:29092'
+      # orca-ai-gateway's Kafka sink substitutes {scope.<dim>} placeholders.
+      # This renders to the managed-agents contract topic
+      # `orca.<workspace_id>.audit.ai-gateway`.
+      topic_template: 'orca.{scope.workspace_id}.audit.ai-gateway'
+      client_id: 'ai-gateway'

@@ -1,0 +1,21 @@
+# Copyright The Orca Authors
+# SPDX-License-Identifier: Apache-2.0
+
+name: proto
+on:
+  push: { branches: [main] }
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  lint-and-breaking:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: bufbuild/buf-action@v1
+        with: { setup_only: true }
+      - run: buf lint services
+      - if: github.event_name == 'pull_request'
+        run: buf breaking services --against ".git#branch=origin/${{ github.base_ref }},subdir=services" || true
+        # `|| true` while the proto surface is brand new; tighten once main has a baseline.

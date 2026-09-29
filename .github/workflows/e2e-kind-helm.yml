@@ -1,0 +1,527 @@
+# Copyright The Orca Authors
+# SPDX-License-Identifier: Apache-2.0
+
+name: e2e-kind-helm
+
+# Same schedule-and-label shape as e2e-stack.yml: current Registry/Harness
+# builds plus a released Gateway feed a full Kind cluster and exercise
+# multi-step Helm upgrades, so the suite remains opt-in on pull requests.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    # `labeled` so applying `run-e2e` triggers a run on an already-open PR.
+    types: [opened, synchronize, reopened, labeled]
+  schedule:
+    # 04:00 UTC, an hour after e2e-stack's tick so the two heavyweights are not
+    # competing for runners, and still clear of nightly-anthropic-spec (06:00).
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Current Registry/Harness builds and one released Gateway image feed a Kind
+# cluster. Superseding an in-flight PR run costs nothing; letting it finish for
+# an abandoned commit costs all of that twice.
+# `main` runs are never cancelled — same rule as ts and e2e-stack.
+concurrency:
+  group: e2e-kind-helm-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # The Gateway ships from its own repository as public artifacts. Pin the
+  # released image and chart so a run is reproducible while Registry and Harness
+  # exercise this checkout. Keep AI_GATEWAY_IMAGE equal to images.aiGateway in
+  # charts/orca-managed-agents/values.yaml.
+  AI_GATEWAY_IMAGE: ghcr.io/orca-ae/orca-ai-gateway:v0.4.3-rc.3
+  AI_GATEWAY_CHART: oci://ghcr.io/orca-ae/charts/orca-ai-gateway
+  AI_GATEWAY_CHART_VERSION: 0.4.3-rc.3
+
+jobs:
+  # See `.github/scripts/changed-areas.sh` for the path -> suite mapping. No job
+  # here is a required check, so a `paths:` filter on `on:` would have been safe
+  # — this uses the same job-level shape as the other two workflows anyway, so
+  # the three read alike and adding a required check later cannot break it.
+  #
+  # As in e2e-stack.yml, two conditions gate the suites and both must allow a
+  # run: the filter, and the event. On a `pull_request` that means the PR must
+  # carry the `run-e2e` label — the same label drives both workflows, so one
+  # label on a risky PR gets the full pre-merge picture.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      kind: ${{ steps.areas.outputs.kind }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - id: areas
+        run: bash .github/scripts/changed-areas.sh
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+
+  static-validation:
+    name: Kind Helm static validation
+    needs: changes
+    if: >-
+      ${{ !cancelled()
+      && needs.changes.outputs.kind != 'false'
+      && (github.event_name != 'pull_request'
+          || contains(github.event.pull_request.labels.*.name, 'run-e2e')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+
+      - name: Install Helm 3
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+
+      - name: pnpm install
+        run: bash .github/scripts/pnpm-install-with-retry.sh
+
+      - name: Build E2E workspace dependencies
+        # The trailing '...' also builds workspace dependencies (e.g.
+        # @orca/transcript-store-types) so the dts build can resolve them.
+        run: pnpm -F '@orca/transcript-store...' build
+
+      - name: Render managed-agents chart
+        run: pnpm test:chart:render
+
+      - name: Validate OpenSandbox patch chart
+        run: |
+          set -euo pipefail
+          helm lint charts/opensandbox-patches
+          rendered="$(
+            helm template opensandbox-patches charts/opensandbox-patches \
+              --namespace opensandbox-system
+          )"
+          grep -q '^kind: Namespace$' <<< "${rendered}"
+          grep -q '^  name: opensandbox$' <<< "${rendered}"
+          grep -q '^kind: ConfigMap$' <<< "${rendered}"
+          grep -q '^  name: opensandbox-server-gvisor-fuse-patch$' <<< "${rendered}"
+          grep -q '^kind: ValidatingAdmissionPolicy$' <<< "${rendered}"
+          grep -q '^kind: ValidatingAdmissionPolicyBinding$' <<< "${rendered}"
+          grep -q '^  name: opensandbox-gvisor-fuse$' <<< "${rendered}"
+          grep -q '^  batchsandbox_provider.py:' <<< "${rendered}"
+          grep -q '^  provider_common.py:' <<< "${rendered}"
+          grep -q '^  security_context.py:' <<< "${rendered}"
+          grep -q 'ORCA_TRUSTED_SANDBOX_WORKLOADS' <<< "${rendered}"
+          grep -q 'runtimeClassName.*gvisor' <<< "${rendered}"
+          grep -q 'orca.fuse.device' <<< "${rendered}"
+          grep -q 'SYS_ADMIN' <<< "${rendered}"
+          grep -q 'SETFCAP' <<< "${rendered}"
+          if grep -q 'fuse_device_enabled' <<< "${rendered}"; then exit 1; fi
+          if grep -q 'opensandbox-server-runc-bubblewrap-patch' <<< "${rendered}"; then exit 1; fi
+          existing_namespace_rendered="$(
+            helm template opensandbox-patches charts/opensandbox-patches \
+              --namespace opensandbox-system \
+              --set dataplaneNamespace.create=false
+          )"
+          if grep -q '^kind: Namespace$' <<< "${existing_namespace_rendered}"; then exit 1; fi
+          grep -q '^kind: ConfigMap$' <<< "${existing_namespace_rendered}"
+          grep -q '^kind: ValidatingAdmissionPolicy$' <<< "${existing_namespace_rendered}"
+
+      - name: Typecheck Kind E2E package
+        run: pnpm -F @orca/e2e-tests typecheck
+
+      - name: Lint Kind E2E package
+        run: pnpm -F @orca/e2e-tests lint
+
+  managed-chart-upgrade:
+    name: Kind managed chart upgrade regression
+    needs: static-validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+
+      - name: Install Helm 3
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: v1.31.2
+
+      - name: Install Kind v0.24.0
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 5 --retry-all-errors --connect-timeout 30 --max-time 120 -o /tmp/kind https://kind.sigs.k8s.io/dl/v0.24.0/kind-linux-amd64
+          sudo install -m 0755 /tmp/kind /usr/local/bin/kind
+          kind version
+
+      - name: Test managed chart upgrades
+        run: pnpm test:chart:secret-store-upgrade
+
+  build-image:
+    name: Prepare ${{ matrix.component }} Kind image
+    needs: changes
+    if: >-
+      ${{ !cancelled()
+      && needs.changes.outputs.kind != 'false'
+      && (github.event_name != 'pull_request'
+          || contains(github.event.pull_request.labels.*.name, 'run-e2e')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - component: registry
+            image: orca-registry-service-ts-kind:e2e
+          - component: harness
+            image: orca-harness-server-kind:e2e
+          - component: gateway
+            image: orca-ai-gateway-kind:e2e
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # The released Gateway image is public, so the pull below needs no login.
+      - name: Build current service or pull released Gateway image
+        env:
+          COMPONENT: ${{ matrix.component }}
+          IMAGE: ${{ matrix.image }}
+          ARCHIVE: ${{ runner.temp }}/${{ matrix.component }}-image.tar.gz
+        run: |
+          set -euo pipefail
+
+          case "${COMPONENT}" in
+            registry)
+              docker buildx build \
+                --platform linux/amd64 \
+                --load \
+                --tag "${IMAGE}" \
+                --file services/registry-service-ts/Dockerfile \
+                .
+              ;;
+            harness)
+              docker buildx build \
+                --platform linux/amd64 \
+                --load \
+                --tag "${IMAGE}" \
+                --file services/harness-server/Dockerfile \
+                .
+              ;;
+            gateway)
+              docker pull --platform linux/amd64 "${AI_GATEWAY_IMAGE}"
+              docker tag "${AI_GATEWAY_IMAGE}" "${IMAGE}"
+              ;;
+            *)
+              echo "unknown image component: ${COMPONENT}" >&2
+              exit 1
+              ;;
+          esac
+
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "${IMAGE}")" = 'linux/amd64'
+          docker save "${IMAGE}" | gzip -1 > "${ARCHIVE}"
+          test -s "${ARCHIVE}"
+
+      - name: Upload image archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: kind-image-${{ matrix.component }}
+          path: ${{ runner.temp }}/${{ matrix.component }}-image.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  kind-helm:
+    name: Kind split-chart Helm E2E
+    needs:
+      - static-validation
+      - build-image
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      KIND_CLUSTER_NAME: orca-kind-helm-e2e
+      KIND_HELM_NAMESPACE: orca-kind-e2e
+    steps:
+      - uses: actions/checkout@v4
+
+      # Docker and Kind/containerd both retain these images during import. Reclaim
+      # unused runner SDKs before downloading the archives, then discard each
+      # archive as soon as Docker has successfully loaded it.
+      - name: Free disk space for Kind images
+        run: |
+          df -h /
+          sudo swapoff -a || true
+          sudo rm -f /mnt/swapfile
+          sudo rm -rf /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/.ghcup /usr/local/lib/android /usr/share/dotnet
+          sudo apt-get clean
+          docker system prune --all --force
+          df -h /
+
+      - name: Download local image archives
+        uses: actions/download-artifact@v4
+        with:
+          pattern: kind-image-*
+          path: ${{ runner.temp }}/kind-images
+          merge-multiple: true
+
+      - name: Load local image archives into Docker
+        run: |
+          set -euo pipefail
+          for archive in \
+            "${RUNNER_TEMP}/kind-images/registry-image.tar.gz" \
+            "${RUNNER_TEMP}/kind-images/harness-image.tar.gz" \
+            "${RUNNER_TEMP}/kind-images/gateway-image.tar.gz"; do
+            test -s "${archive}"
+            gzip --decompress --stdout "${archive}" | docker load
+            rm -- "${archive}"
+          done
+
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+
+      - name: Install Helm 3
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+
+      # The chart is a public OCI artifact, so this pull needs no login.
+      - name: Pull released ai-gateway chart
+        run: |
+          set -euo pipefail
+          helm pull "${AI_GATEWAY_CHART}" \
+            --version "${AI_GATEWAY_CHART_VERSION}" \
+            --untar \
+            --untardir "${RUNNER_TEMP}/ai-gateway-chart"
+          test -f "${RUNNER_TEMP}/ai-gateway-chart/${AI_GATEWAY_CHART##*/}/Chart.yaml"
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: v1.31.2
+
+      - name: Install Kind v0.24.0
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 5 --retry-all-errors --connect-timeout 30 --max-time 120 -o /tmp/kind https://kind.sigs.k8s.io/dl/v0.24.0/kind-linux-amd64
+          sudo install -m 0755 /tmp/kind /usr/local/bin/kind
+          kind version
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: pnpm install
+        run: bash .github/scripts/pnpm-install-with-retry.sh
+
+      - name: Build E2E workspace dependencies
+        # The trailing '...' also builds workspace dependencies (e.g.
+        # @orca/transcript-store-types) so the dts build can resolve them.
+        run: pnpm -F '@orca/transcript-store...' build
+
+      - name: Build Kind fake LLM and MCP fixture
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --platform linux/amd64 \
+            --load \
+            --tag orca-kind-fixture:e2e \
+            --file charts/orca-managed-agents/test/kind/Dockerfile.fixture \
+            .
+
+      - name: Pull Kind infrastructure images
+        run: |
+          set -euo pipefail
+          for image in \
+            postgres:16-alpine \
+            apache/kafka:3.7.1 \
+            rustfs/rustfs:1.0.0 \
+            rustfs/rc:v0.1.36 \
+            busybox:1.36; do
+            docker pull --platform linux/amd64 "${image}"
+          done
+
+      - name: Verify required local images
+        run: |
+          set -euo pipefail
+          for image in \
+            postgres:16-alpine \
+            apache/kafka:3.7.1 \
+            rustfs/rustfs:1.0.0 \
+            rustfs/rc:v0.1.36 \
+            busybox:1.36 \
+            orca-registry-service-ts-kind:e2e \
+            orca-harness-server-kind:e2e \
+            orca-ai-gateway-kind:e2e \
+            orca-kind-fixture:e2e; do
+            platform="$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "${image}")"
+            test "${platform}" = 'linux/amd64'
+            echo "${image}: ${platform}"
+          done
+
+      - name: Create Kind cluster
+        run: |
+          set -euo pipefail
+          kind create cluster --name "${KIND_CLUSTER_NAME}" --wait 120s
+
+      - name: Verify patch chart with pre-existing OpenSandbox namespace
+        run: |
+          set -euo pipefail
+          kubectl create namespace opensandbox
+          helm upgrade --install opensandbox-patches charts/opensandbox-patches \
+            --namespace opensandbox-system \
+            --create-namespace \
+            --set dataplaneNamespace.create=false \
+            --wait
+          kubectl get namespace opensandbox >/dev/null
+          kubectl -n opensandbox-system get configmap \
+            opensandbox-server-gvisor-fuse-patch >/dev/null
+          kubectl get validatingadmissionpolicy opensandbox-gvisor-fuse >/dev/null
+          kubectl get validatingadmissionpolicybinding opensandbox-gvisor-fuse >/dev/null
+          helm uninstall opensandbox-patches --namespace opensandbox-system
+          kubectl delete namespace opensandbox-system opensandbox --wait=true
+
+      - name: Load required images into Kind
+        run: |
+          set -euo pipefail
+          for image in \
+            postgres:16-alpine \
+            apache/kafka:3.7.1 \
+            rustfs/rustfs:1.0.0 \
+            rustfs/rc:v0.1.36 \
+            busybox:1.36 \
+            orca-registry-service-ts-kind:e2e \
+            orca-harness-server-kind:e2e \
+            orca-ai-gateway-kind:e2e \
+            orca-kind-fixture:e2e; do
+            kind load docker-image --name "${KIND_CLUSTER_NAME}" "${image}"
+          done
+
+      - name: Run split-chart Kind Helm E2E
+        run: |
+          set -euo pipefail
+          # `helm pull --untar` unpacks into a directory named after the chart.
+          gateway_chart_dir="${RUNNER_TEMP}/ai-gateway-chart/${AI_GATEWAY_CHART##*/}"
+          test -f "${gateway_chart_dir}/Chart.yaml"
+          ORCA_GATEWAY_CHART_DIR="${gateway_chart_dir}" \
+            KIND_HELM_NAMESPACE=orca-kind-e2e \
+            pnpm e2e:kind-helm
+
+      - name: Dump Kind diagnostics
+        if: failure() || cancelled()
+        run: |
+          set +e
+
+          redact() {
+            python3 -c '
+          import re
+          import sys
+
+          text = sys.stdin.read()
+          text = re.sub(
+              r"-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----",
+              "[REDACTED_PRIVATE_KEY]",
+              text,
+              flags=re.DOTALL,
+          )
+          text = re.sub(
+              r"(?i)([\"\x27]?authorization[\"\x27]?\s*[:=]\s*[\"\x27]?bearer\s+)[^\s\"\x27`,;]+",
+              r"\1[REDACTED]",
+              text,
+          )
+          text = re.sub(
+              r"(?i)([\"\x27]?(?:x-api-key|api[_-]?key|token|secret|password|credential)[\"\x27]?\s*[:=]\s*[\"\x27]?)[^\s\"\x27`,;]+",
+              r"\1[REDACTED]",
+              text,
+          )
+          text = re.sub(
+              r"(?i)([?&](?:api[_-]?key|token|secret|password)=)[^&\s]+",
+              r"\1[REDACTED]",
+              text,
+          )
+          text = re.sub(
+              r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+",
+              "[REDACTED_JWT]",
+              text,
+          )
+          sys.stdout.write(text)
+          '
+          }
+
+          if ! kind get clusters | grep -Fxq "${KIND_CLUSTER_NAME}"; then
+            echo "Kind cluster ${KIND_CLUSTER_NAME} does not exist; no diagnostics to collect."
+            exit 0
+          fi
+
+          echo '::group::Helm releases'
+          helm list --namespace "${KIND_HELM_NAMESPACE}" --all 2>&1 | redact || true
+          for release in managed gateway; do
+            helm status "${release}" --namespace "${KIND_HELM_NAMESPACE}" 2>&1 | redact || true
+          done
+          echo '::endgroup::'
+
+          echo '::group::OpenSandbox patch migration smoke'
+          helm list --namespace opensandbox-system --all 2>&1 | redact || true
+          helm status opensandbox-patches --namespace opensandbox-system 2>&1 | redact || true
+          kubectl get namespace opensandbox opensandbox-system -o wide 2>&1 | redact || true
+          kubectl -n opensandbox-system get configmap \
+            opensandbox-server-gvisor-fuse-patch 2>&1 | redact || true
+          echo '::endgroup::'
+
+          echo '::group::Kind namespace resources'
+          kubectl -n "${KIND_HELM_NAMESPACE}" get deployments,pods,services,jobs,pvc -o wide 2>&1 | redact || true
+          kubectl get persistentvolumes -o wide 2>&1 | redact || true
+          echo '::endgroup::'
+
+          echo '::group::Pod descriptions'
+          kubectl -n "${KIND_HELM_NAMESPACE}" describe pods 2>&1 | redact || true
+          echo '::endgroup::'
+
+          echo '::group::All container logs (redacted)'
+          kubectl -n "${KIND_HELM_NAMESPACE}" get pods -o name 2>/dev/null | while IFS= read -r pod; do
+            echo "--- ${pod} current containers ---"
+            kubectl -n "${KIND_HELM_NAMESPACE}" logs "${pod}" --all-containers=true --prefix=true --tail=-1 2>&1 | redact || true
+            echo "--- ${pod} previous containers ---"
+            kubectl -n "${KIND_HELM_NAMESPACE}" logs "${pod}" --all-containers=true --previous=true --prefix=true --tail=-1 2>&1 | redact || true
+          done
+          echo '::endgroup::'
+
+          echo '::group::Namespace events'
+          kubectl -n "${KIND_HELM_NAMESPACE}" get events --sort-by=.lastTimestamp 2>&1 | redact || true
+          echo '::endgroup::'
+
+      - name: Delete Kind cluster
+        if: always()
+        run: kind delete cluster --name "${KIND_CLUSTER_NAME}" || true
+
+  # This workflow has no aggregator job, so the notifier gates on "did any need
+  # fail" rather than on a single verdict. `contains(needs.*.result, 'failure')`
+  # covers every job listed below; `always()` is required, or a failed need
+  # would skip this job instead of running it.
+  #
+  # Not on `pull_request` — same reasoning as e2e-stack.yml.
+  notify-failure:
+    needs:
+      - changes
+      - static-validation
+      - managed-chart-upgrade
+      - build-image
+      - kind-helm
+    if: ${{ always() && contains(needs.*.result, 'failure') && github.event_name != 'pull_request' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/notify-slack-failure
+        with:
+          webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}

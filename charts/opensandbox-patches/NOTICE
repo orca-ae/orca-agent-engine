@@ -1,0 +1,35 @@
+NOTICE
+
+The files/ directory contains modified source files from OpenSandbox
+(https://github.com/alibaba/OpenSandbox), licensed under Apache License 2.0.
+
+Copyright 2026 Alibaba Group Holding Ltd.
+(files/batchsandbox_provider.py retains its original 2025 per-file header;
+files/provider_common.py and files/security_context.py retain 2026 headers.)
+
+Original paths at commit 207d94c7dc7735c143856fe5c6538b743e478786:
+
+  server/opensandbox_server/services/k8s/batchsandbox_provider.py
+  server/opensandbox_server/services/k8s/provider_common.py
+  server/opensandbox_server/services/k8s/security_context.py
+
+Modifications implement Orca's gVisor + in-sandbox FUSE-only contract:
+
+- BatchSandboxProvider initialization requires secure_runtime.type=gvisor and
+  secure_runtime.k8s_runtime_class=gvisor.
+- Isolation requests require both bootstrap.execd.isolation=enable and
+  orca.fuse.device=enable, plus exact operator-owned image + entrypoint trust.
+- Generated Pods use runtimeClassName=gvisor, add only SETFCAP and SYS_ADMIN for isolation,
+  and reject privileged containers, hostPath volumes, host namespaces,
+  hostUsers, procMount, pool mode, and Windows workloads.
+- FUSE uses gVisor's virtual /dev/fuse; no host /dev/fuse mount exists.
+- Pause and resume reject before any BatchSandbox CR patch.
+- Security-context conversion preserves seccomp and AppArmor profiles without
+  adding procMount handling.
+
+Dockerfile build-input hardening remains separate at
+services/harness-server/sandbox-templates/orca-opensandbox-server/.
+
+Apache License 2.0:
+
+  http://www.apache.org/licenses/LICENSE-2.0

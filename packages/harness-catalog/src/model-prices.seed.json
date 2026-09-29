@@ -1,0 +1,76 @@
+{
+  "generated_at": "2026-09-28",
+  "provenance": {
+    "upstream": "Anthropic Claude API published list prices — https://platform.claude.com/docs/en/about-claude/pricing",
+    "license": "© Anthropic PBC. Published list prices, reproduced as factual rate data; the source documentation carries no open-data license.",
+    "notes": [
+      "Rates are USD per million tokens and mirror the Claude API first-party list price. Partner-operated platforms (Amazon Bedrock, Google Cloud) publish their own rates and are not represented here.",
+      "cache_read_per_million_tokens is the cache-hit rate; cache_write_per_million_tokens is the short-lived (5m) cache-creation rate. Both are published per model. No catalog publishes a 1h cache-creation rate, so consumers derive it from the input rate.",
+      "Claude Sonnet 5 is priced at 2.00 input / 10.00 output. Anthropic made the launch price permanent and cancelled the previously announced increase to 3.00 / 15.00.",
+      "Claude Opus 5.5 cache reads cost 0.05x its input rate, unlike the usual 0.10x rate.",
+      "Models are omitted rather than guessed. An unpriced model is a supported state; a wrong price is not."
+    ]
+  },
+  "models": {
+    "claude-opus-5-5": {
+      "input_per_million_tokens": 4.0,
+      "output_per_million_tokens": 20.0,
+      "cache_read_per_million_tokens": 0.2,
+      "cache_write_per_million_tokens": 5.0
+    },
+    "claude-fable-5": {
+      "input_per_million_tokens": 10.0,
+      "output_per_million_tokens": 50.0,
+      "cache_read_per_million_tokens": 1.0,
+      "cache_write_per_million_tokens": 12.5
+    },
+    "claude-opus-5": {
+      "input_per_million_tokens": 5.0,
+      "output_per_million_tokens": 25.0,
+      "cache_read_per_million_tokens": 0.5,
+      "cache_write_per_million_tokens": 6.25
+    },
+    "claude-opus-4-8": {
+      "input_per_million_tokens": 5.0,
+      "output_per_million_tokens": 25.0,
+      "cache_read_per_million_tokens": 0.5,
+      "cache_write_per_million_tokens": 6.25
+    },
+    "claude-opus-4-7": {
+      "input_per_million_tokens": 5.0,
+      "output_per_million_tokens": 25.0,
+      "cache_read_per_million_tokens": 0.5,
+      "cache_write_per_million_tokens": 6.25
+    },
+    "claude-opus-4-6": {
+      "input_per_million_tokens": 5.0,
+      "output_per_million_tokens": 25.0,
+      "cache_read_per_million_tokens": 0.5,
+      "cache_write_per_million_tokens": 6.25
+    },
+    "claude-opus-4-5": {
+      "input_per_million_tokens": 5.0,
+      "output_per_million_tokens": 25.0,
+      "cache_read_per_million_tokens": 0.5,
+      "cache_write_per_million_tokens": 6.25
+    },
+    "claude-sonnet-5": {
+      "input_per_million_tokens": 2.0,
+      "output_per_million_tokens": 10.0,
+      "cache_read_per_million_tokens": 0.2,
+      "cache_write_per_million_tokens": 2.5
+    },
+    "claude-sonnet-4-6": {
+      "input_per_million_tokens": 3.0,
+      "output_per_million_tokens": 15.0,
+      "cache_read_per_million_tokens": 0.3,
+      "cache_write_per_million_tokens": 3.75
+    },
+    "claude-haiku-4-5": {
+      "input_per_million_tokens": 1.0,
+      "output_per_million_tokens": 5.0,
+      "cache_read_per_million_tokens": 0.1,
+      "cache_write_per_million_tokens": 1.25
+    }
+  }
+}

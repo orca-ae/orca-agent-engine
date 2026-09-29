@@ -1,0 +1,133 @@
+# Copyright The Orca Authors
+# SPDX-License-Identifier: Apache-2.0
+
+name: nightly-anthropic-spec
+on:
+  # 6 AM UTC, an hour before nightly-e2b so the two never contend. Anthropic
+  # revises the published spec without announcement; without this job the first
+  # anyone hears of a change is an unrelated PR whose conformance matrix moved
+  # for reasons its author did not cause. Re-syncing on a schedule turns an
+  # upstream change into a small reviewable diff of its own.
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Only this job writes: it pushes the sync branch and opens the PR.
+    permissions:
+      contents: write
+      pull-requests: write
+    concurrency:
+      group: nightly-anthropic-spec
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+      - run: bash .github/scripts/pnpm-install-with-retry.sh
+
+      # `anthropic:sync` writes no timestamp, so an unchanged upstream spec
+      # leaves the tree byte-identical and everything below no-ops.
+      - run: pnpm anthropic:sync
+
+      # Both generators, in the order `conformance.md` mandates: the matrix must
+      # be diffed against the spec this run just produced.
+      #
+      # This job used to skip `openapi:gen`, on the reasoning that our spec was a
+      # pure function of `src/contracts/*` and so could not move here. That
+      # stopped being true when the `orca-extension` tag became computed from the
+      # vendored spec — `managed-agents.yaml` is now downstream of the very file
+      # this job re-vendors, so skipping it produced a sync PR whose OpenAPI
+      # artifact was stale the moment an overlapping operation was reclassified,
+      # and the ordinary drift gate rejected it on arrival.
+      #
+      # Both run with `continue-on-error` and report together, so one nightly run
+      # names every problem it found rather than stopping at the first.
+      - name: Regenerate the published spec against the synced upstream
+        # `openapi:gen` fails when the extension-tagging tripwire trips, and an
+        # upstream change alone can trip it: Anthropic publishing an operation in
+        # `MUST_BE_EXTENSIONS`, or withdrawing the one in `MUST_BE_CORE`.
+        id: openapi
+        continue-on-error: true
+        run: pnpm openapi:gen
+
+      - name: Regenerate the conformance matrix against the synced spec
+        # `conformance:gen` fails when a difference has no decision. If an
+        # upstream change introduces one, that failure is the point: it blocks
+        # the automatic PR until a human decides. `continue-on-error` lets the
+        # workflow report which differences are undecided instead of dying with
+        # no context.
+        id: conformance
+        continue-on-error: true
+        run: pnpm conformance:gen
+
+      - name: Report what the sync could not resolve
+        if: steps.openapi.outcome == 'failure' || steps.conformance.outcome == 'failure'
+        run: |
+          if [ "${OPENAPI_OUTCOME}" = "failure" ]; then
+            echo "::error::The extension-tagging tripwire tripped against the synced spec."
+            echo "::error::Anthropic now publishes an operation pinned in MUST_BE_EXTENSIONS, or"
+            echo "::error::has withdrawn the one in MUST_BE_CORE. Fixing it takes two edits, not"
+            echo "::error::one: remove the entry in scripts/orca-extension-tagging.mjs *and* its"
+            echo "::error::\`extension\` decision in conformance-decisions.yaml, which would"
+            echo "::error::otherwise match nothing and fail the register's own gate."
+          fi
+          if [ "${CONFORMANCE_OUTCOME}" = "failure" ]; then
+            echo "::error::The synced Anthropic spec introduced differences with no decision in"
+            echo "::error::services/registry-service-ts/conformance-decisions.yaml. Register a"
+            echo "::error::decision for each."
+          fi
+          echo "::error::Run \`pnpm anthropic:sync && pnpm openapi:gen && pnpm conformance:gen\`"
+          echo "::error::locally and open the sync PR by hand. No PR was opened."
+          exit 1
+        env:
+          OPENAPI_OUTCOME: ${{ steps.openapi.outcome }}
+          CONFORMANCE_OUTCOME: ${{ steps.conformance.outcome }}
+
+      - name: Open a PR when the spec moved
+        uses: peter-evans/create-pull-request@v6
+        with:
+          # Both generated artifacts, matching the two paths `test-ts.yml` and
+          # `release-images.yml` drift-gate. Committing the matrix without the
+          # spec it was diffed against is what made the sync PR arrive red.
+          add-paths: |
+            services/registry-service-ts/vendor/anthropic/openapi.json
+            services/registry-service-ts/vendor/anthropic/PINNED.json
+            services/registry-service-ts/openapi/managed-agents.yaml
+            docs/managed-agents/conformance-matrix.md
+          branch: chore/sync-anthropic-spec
+          delete-branch: true
+          commit-message: 'chore: sync anthropic spec'
+          title: 'chore: sync anthropic spec'
+          body: |
+            Anthropic's published OpenAPI spec moved. This PR re-vendors it and
+            regenerates the conformance matrix against it.
+
+            The matrix diff is the interesting part: it shows which operations
+            appeared, disappeared, or changed shape upstream. Every difference
+            still carries a decision — `pnpm conformance:gen` would have failed
+            otherwise — so read the diff for *reclassified* rows.
+
+            Generated by `.github/workflows/nightly-anthropic-spec.yml`.
+
+  # The `sync` job deliberately fails when an upstream change has no decision
+  # registered, and that failure is the whole signal — it means a human must
+  # classify something before the next release can regenerate cleanly. Until
+  # this job existed, that signal was an `::error::` annotation nobody read.
+  notify-failure:
+    needs: sync
+    if: ${{ always() && needs.sync.result == 'failure' && github.event_name != 'pull_request' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/notify-slack-failure
+        with:
+          webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}

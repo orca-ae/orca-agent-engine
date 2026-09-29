@@ -1,0 +1,47 @@
+// Copyright The Orca Authors
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+
+package orca.file_store.v1;
+
+import "common.proto";
+
+service FileStore {
+  rpc CreateFile  (stream CreateFileChunk) returns (File);
+  rpc GetFile     (GetFileRequest)         returns (File);
+  rpc ListFiles   (ListFilesRequest)       returns (ListFilesResponse);
+  rpc OpenContent (OpenRequest)            returns (stream Chunk);
+  rpc ArchiveFile (ArchiveRequest)         returns (orca.common.v1.Empty);
+  rpc DeleteFile  (DeleteRequest)          returns (orca.common.v1.Empty);
+}
+
+message File {
+  string id = 1;
+  string workspace_id = 2;
+  string filename = 3;
+  string mime_type = 4;
+  int64  size_bytes = 5;
+  string sha256 = 6;
+  string created_at = 7;
+  string archived_at = 8;
+  map<string, string> metadata = 9;
+}
+
+message CreateFileChunk {
+  // Ordering: the first message in the stream MUST carry `metadata`;
+  // subsequent messages carry `content` bytes. Servers reject violations.
+  oneof data {
+    CreateFileMetadata metadata = 1;
+    bytes content = 2;
+  }
+}
+message CreateFileMetadata { string workspace_id = 1; string filename = 2; string mime_type = 3; map<string, string> metadata = 4; }
+
+message GetFileRequest    { string workspace_id = 1; string id = 2; }
+message ListFilesRequest  { string workspace_id = 1; orca.common.v1.Pagination pagination = 2; }
+message ListFilesResponse { repeated File files = 1; orca.common.v1.PageInfo page_info = 2; }
+message OpenRequest       { string workspace_id = 1; string id = 2; }
+message Chunk             { bytes content = 1; }
+message ArchiveRequest    { string workspace_id = 1; string id = 2; }
+message DeleteRequest     { string workspace_id = 1; string id = 2; }

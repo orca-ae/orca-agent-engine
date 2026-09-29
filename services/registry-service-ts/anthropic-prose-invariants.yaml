@@ -1,0 +1,120 @@
+# Copyright The Orca Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# Requirements Anthropic documents in prose but does not encode in their spec.
+#
+# THIS FILE IS HAND-MAINTAINED. Everything else feeding the conformance matrix is
+# derived by diffing two machine-readable specs, precisely so that classification
+# is not a human judgement call. This file is the exception, and it is deliberately
+# kept separate and separately labelled so the distinction stays visible: rows it
+# produces are rendered in their own section of the matrix, marked as transcribed
+# rather than derived.
+#
+# It exists because the alternative is worse. Anthropic's published OpenAPI
+# declares `anthropic-beta` as an optional, free-form string on every operation —
+# byte-for-byte what we declare. A pure spec diff therefore reports full
+# conformance on a header whose documented behaviour we do not implement. Silence
+# there is not neutrality; it is the matrix asserting something untrue.
+#
+# The cost is that these entries can rot without any signal, which is exactly the
+# failure the rest of the pipeline was built to avoid. Three rules follow:
+#
+#   1. Every entry cites the page it was transcribed from. No citation, no entry.
+#   2. Every entry names the `family` of requirement it belongs to, and lists the
+#      exact path globs it applies to. Two families of the same `kind` (default:
+#      beta-header) may not overlap: an earlier revision of this file claimed the
+#      managed-agents beta value for all of `/v1/*` while the rows below it said
+#      memory endpoints require a different one, and nothing caught the
+#      contradiction until review. Validation does now. Families of different
+#      kinds (e.g. a response-ordering rule vs a beta-header rule) describe
+#      different dimensions of an operation and may share paths.
+#   3. Re-read the cited page when `pnpm anthropic:sync` moves the vendored spec.
+#      If a requirement here ever becomes expressible in their spec, delete it
+#      from this file and let the differ find it instead.
+#
+# Entries produce `prose-invariant` rows that the decision register must decide,
+# under the same both-directions gate as every other difference.
+
+version: 1
+
+invariants:
+  - id: beta-header-managed-agents-version
+    family: beta-header-managed-agents
+    paths:
+      - '/v1/agents*'
+      - '/v1/sessions*'
+      - '/v1/environments*'
+    anthropicRequires: 'anthropic-beta: managed-agents-2026-04-01'
+    orcaBehaviour: >-
+      Accepted and ignored. The header is declared on every public operation as a
+      free-form string; no value of it changes request handling, and a request
+      that omits it entirely is served normally.
+    source: https://platform.claude.com/docs/en/api/beta-headers#endpoint-specific-headers
+
+  - id: beta-header-files-version
+    family: beta-header-files
+    paths:
+      - '/v1/files*'
+    anthropicRequires: 'anthropic-beta: files-api-2025-04-14'
+    orcaBehaviour: >-
+      Accepted and ignored. Files routes do not require or distinguish this
+      value, and requests that omit it are served normally.
+    source: https://github.com/anthropics/anthropic-sdk-typescript/blob/3b45cd3b69c956ac63384fdb09ce1d8109f3fa80/src/resources/beta/files.ts#L35
+
+  - id: beta-header-skills-version
+    family: beta-header-skills
+    paths:
+      - '/v1/skills*'
+    anthropicRequires: 'anthropic-beta: skills-2025-10-02'
+    orcaBehaviour: >-
+      Accepted and ignored. Skills routes do not require or distinguish this
+      value, and requests that omit it are served normally.
+    source: https://github.com/anthropics/anthropic-sdk-typescript/blob/3b45cd3b69c956ac63384fdb09ce1d8109f3fa80/src/resources/beta/skills/skills.ts#L49
+
+  - id: beta-header-vaults-version
+    family: beta-header-vaults
+    paths:
+      - '/v1/vaults*'
+    anthropicRequires: 'anthropic-beta: managed-agents-2026-04-01'
+    orcaBehaviour: >-
+      Accepted and ignored. Vault routes do not require or distinguish this
+      value, and requests that omit it are served normally.
+    source: https://github.com/anthropics/anthropic-sdk-typescript/blob/3b45cd3b69c956ac63384fdb09ce1d8109f3fa80/src/resources/beta/vaults/vaults.ts#L78
+
+  - id: beta-header-memory-version
+    family: beta-header-memory
+    paths:
+      - '/v1/memory_stores*'
+    anthropicRequires: 'anthropic-beta: agent-memory-2026-07-22 (in place of the managed-agents value)'
+    orcaBehaviour: >-
+      Accepted and ignored, identically to every other operation. Memory routes
+      do not distinguish this value, and do not require it.
+    source: https://platform.claude.com/docs/en/api/beta-headers#endpoint-specific-headers
+
+  - id: beta-header-memory-exclusivity
+    family: beta-header-memory
+    paths:
+      - '/v1/memory_stores*'
+    anthropicRequires: >-
+      Sending both the managed-agents and agent-memory beta values to a memory
+      endpoint is rejected.
+    orcaBehaviour: >-
+      Accepted. Nothing in this service parses the header, so no combination of
+      values is rejected.
+    source: https://platform.claude.com/docs/en/api/beta-headers#endpoint-specific-headers
+
+  - id: threads-list-ordering
+    family: threads-list-ordering
+    kind: response-ordering
+    paths:
+      - '/v1/sessions/*/threads'
+    anthropicRequires: >-
+      GET /v1/sessions/{session_id}/threads returns "Threads in the session,
+      primary first then children in spawn order" (the list operation's
+      documented response ordering; prose in the spec's description field, not
+      encoded in the schema, so the differ cannot see it).
+    orcaBehaviour: >-
+      Served newest-first (ORDER BY created_at DESC, id DESC), so the primary
+      thread — created with the session — sorts last. Pagination (limit/page)
+      matches the spec; only the ordering deviates.
+    source: https://storage.googleapis.com/stainless-sdk-openapi-specs/anthropic/anthropic-f89e311096c42998ada5ab5580a2a3b0519265f1c005af625be7a0d11ad49d3c.yml

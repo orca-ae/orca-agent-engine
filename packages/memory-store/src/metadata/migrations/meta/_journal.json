@@ -1,0 +1,48 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1777942568292,
+      "tag": "0000_memory_stores",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1782736404693,
+      "tag": "0001_memory_store_metadata",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1784304000000,
+      "tag": "0002_workspace_children",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1784774991374,
+      "tag": "0003_crazy_the_liberteens",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1784776930836,
+      "tag": "0004_amusing_falcon",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1789522661763,
+      "tag": "0005_soft_delete_stores",
+      "breakpoints": true
+    }
+  ]
+}

@@ -1,0 +1,1 @@
+ALTER TABLE "session_resources" ADD COLUMN "mount_strategy" text;

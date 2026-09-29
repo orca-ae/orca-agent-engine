@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "orca-managed-agents.registryInternalServiceName" . }}
+  labels:
+    {{- include "orca-managed-agents.labels" . | nindent 4 }}
+    app.kubernetes.io/component: registry-internal
+spec:
+  type: ClusterIP
+  ports:
+    - name: internal-http
+      port: {{ .Values.registry.service.internalPort }}
+      targetPort: internal-http
+      protocol: TCP
+  selector:
+    {{- include "orca-managed-agents.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: registry

@@ -1,0 +1,33 @@
+{
+  "name": "@orca/sandbox-harness",
+  "version": "0.0.0",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsup src/index.ts src/subprocess-entry.ts --format esm --dts --target node22",
+    "test": "vitest run",
+    "lint": "eslint 'src/**/*.ts' 'test/**/*.ts'"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.283",
+    "@orca/harness-catalog": "workspace:*",
+    "zod": "^4.0.0",
+    "@orca/codex-harness": "workspace:*",
+    "@orca/sdk-harness": "workspace:*",
+    "@orca/pi-harness": "workspace:*"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@types/node": "^22.0.0",
+    "@vitest/coverage-v8": "^2.0.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
+  }
+}

@@ -1,0 +1,23 @@
+{{- if .Values.aiGateway.enabled -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "orca-managed-agents.aiGatewayServiceName" . }}
+  labels:
+    {{- include "orca-managed-agents.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ai-gateway
+spec:
+  type: {{ .Values.aiGateway.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.aiGateway.service.dataPort }}
+      targetPort: http
+      protocol: TCP
+    - name: admin
+      port: {{ .Values.aiGateway.service.adminPort }}
+      targetPort: admin
+      protocol: TCP
+  selector:
+    {{- include "orca-managed-agents.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: ai-gateway
+{{- end }}

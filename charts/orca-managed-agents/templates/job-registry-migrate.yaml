@@ -1,0 +1,92 @@
+{{- if .Values.migrations.registry.job.enabled -}}
+{{- $secretName := include "orca-managed-agents.secretName" . -}}
+{{- $databaseSecretName := include "orca-managed-agents.databaseSecretName" . -}}
+{{- $registrySecretRefs := default (dict) .Values.registry.secretKeyRefs -}}
+{{- $registryExtraEnvFrom := default (list) .Values.registry.extraEnvFrom -}}
+{{- $registryExtraVolumeMounts := default (list) .Values.registry.extraVolumeMounts -}}
+{{- $registryExtraVolumes := default (list) .Values.registry.extraVolumes -}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "orca-managed-agents.fullname" . }}-registry-migrate
+  labels:
+    {{- include "orca-managed-agents.labels" . | nindent 4 }}
+    app.kubernetes.io/component: registry-migrate
+  {{- with .Values.migrations.registry.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  ttlSecondsAfterFinished: 600
+  backoffLimit: {{ .Values.migrations.registry.backoffLimit }}
+  template:
+    metadata:
+      labels:
+        {{- include "orca-managed-agents.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: registry-migrate
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: {{ include "orca-managed-agents.registryServiceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.registry.automountServiceAccountToken }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: migrate
+          image: "{{ .Values.images.registry.repository }}:{{ .Values.images.registry.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.images.registry.pullPolicy }}
+          command: ["node", "dist/migrate.js"]
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          {{- if or $secretName $registryExtraEnvFrom }}
+          {{- /* The DSN may live in an operator-supplied bundle rather than the
+                 chart Secret, so migrations get the same sources as the app. */}}
+          envFrom:
+            {{- if $secretName }}
+            - secretRef:
+                name: {{ $secretName }}
+            {{- end }}
+            {{- with $registryExtraEnvFrom }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- end }}
+          env:
+            {{- include "orca-managed-agents.secretEnv" (dict "ctx" $ "key" "DATABASE_URL" "refs" $registrySecretRefs "optional" false "fallbackSecretName" $databaseSecretName) | nindent 12 }}
+            - name: NODE_ENV
+              value: production
+            - name: npm_config_update_notifier
+              value: "false"
+            - name: NO_UPDATE_NOTIFIER
+              value: "1"
+            - name: CI
+              value: "true"
+          {{- if or .Values.external.databases.tls.caSecretName (gt (len $registryExtraVolumeMounts) 0) }}
+          volumeMounts:
+            {{- if .Values.external.databases.tls.caSecretName }}
+            {{- include "orca-managed-agents.pgCaVolumeMount" . | nindent 12 }}
+            {{- end }}
+            {{- with $registryExtraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- end }}
+      {{- if or .Values.external.databases.tls.caSecretName (gt (len $registryExtraVolumes) 0) }}
+      volumes:
+        {{- if .Values.external.databases.tls.caSecretName }}
+        {{- include "orca-managed-agents.pgCaVolume" . | nindent 8 }}
+        {{- end }}
+        {{- with $registryExtraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- end }}
+      {{- with .Values.registry.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.registry.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

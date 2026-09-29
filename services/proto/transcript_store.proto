@@ -1,0 +1,51 @@
+// Copyright The Orca Authors
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+
+package orca.transcript_store.v1;
+
+import "common.proto";
+
+service TranscriptStore {
+  rpc Append (AppendRequest) returns (AppendResponse);
+  rpc Read   (ReadRequest)   returns (stream Event);
+  rpc Tail   (TailRequest)   returns (stream Event);
+  rpc Archive (ArchiveRequest) returns (orca.common.v1.Empty);
+}
+
+message Event {
+  string id = 1;
+  string workspace_id = 2;
+  string session_id = 3;
+  string subpath = 4;
+  int64  seq = 5;
+  string produced_at = 6;
+  string produced_by = 7;
+  string kind = 8;
+  bytes  payload = 9;
+  string idempotency_key = 10;
+  optional string user_id = 11;
+}
+
+message AppendRequest  { string workspace_id = 1; string session_id = 2; repeated Event events = 3; }
+message AppendResponse { repeated string event_ids = 1; }
+
+message ReadRequest {
+  string workspace_id = 1;
+  string session_id = 2;
+  string from_cursor = 3;        // empty = beginning
+  int32  max_events = 4;         // 0 = service default
+  string subpath = 5;            // empty = parent only; "*" = include subagents
+}
+
+message TailRequest {
+  string workspace_id = 1;
+  string session_id = 2;
+  string from_cursor = 3;
+  string subpath = 4;
+}
+
+// Transcripts are archived at session granularity, hence `session_id`
+// rather than the generic `id` used by other services' Archive requests.
+message ArchiveRequest { string workspace_id = 1; string session_id = 2; }

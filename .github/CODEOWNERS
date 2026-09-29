@@ -1,0 +1,19 @@
+# Code owners review pull requests that touch their paths.
+# The last matching pattern wins, so more specific paths come later in this file.
+
+# Every pull request needs a review from one of these.
+*                                   @sijie @freeznet @jiangpengcheng @tuteng
+
+# Licensing, governance, contributor and agent policy, and CI stay with every maintainer, however code ownership is split.
+/LICENSE                            @sijie @freeznet @jiangpengcheng @tuteng
+/NOTICE                             @sijie @freeznet @jiangpengcheng @tuteng
+/CONTRIBUTING.md                    @sijie @freeznet @jiangpengcheng @tuteng
+/CODE_OF_CONDUCT.md                 @sijie @freeznet @jiangpengcheng @tuteng
+/SECURITY.md                        @sijie @freeznet @jiangpengcheng @tuteng
+/AI_POLICY.md                       @sijie @freeznet @jiangpengcheng @tuteng
+/GOVERNANCE.md                      @sijie @freeznet @jiangpengcheng @tuteng
+/MAINTAINERS.md                     @sijie @freeznet @jiangpengcheng @tuteng
+/AGENTS.md                          @sijie @freeznet @jiangpengcheng @tuteng
+/CLAUDE.md                          @sijie @freeznet @jiangpengcheng @tuteng
+/.claude/                           @sijie @freeznet @jiangpengcheng @tuteng
+/.github/                           @sijie @freeznet @jiangpengcheng @tuteng

@@ -1,0 +1,469 @@
+# Copyright The Orca Authors
+# SPDX-License-Identifier: Apache-2.0
+
+name: ts
+on:
+  push: { branches: [main] }
+  pull_request:
+
+# The coverage job posts a sticky comment, so overlapping runs for the same PR
+# race: without this, an older run finishing last would overwrite a newer run's
+# numbers with results for an obsolete commit. Superseding in-flight PR runs
+# removes the race at the source (and saves runner time).
+#
+# `main` runs are never cancelled — every commit on the default branch should
+# get its own coverage record, and there is no comment to race over there.
+concurrency:
+  group: ts-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  # Which suites can this change actually affect? `changed-areas.sh` owns the
+  # path -> suite mapping for every workflow, and its header explains why the
+  # gating has to live in job-level `if:` conditions rather than in a `paths:`
+  # filter on `on:` above — `test` and `integration` are required checks, and a
+  # workflow skipped by a trigger filter leaves them Pending forever.
+  #
+  # `fetch-depth: 0` because the script diffs against the merge base, which a
+  # shallow clone does not contain. (It fails open when the range is
+  # unresolvable, so a shallow checkout is safe — just pointless.)
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      ts: ${{ steps.areas.outputs.ts }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - id: areas
+        run: bash .github/scripts/changed-areas.sh
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+
+  test:
+    needs: changes
+    # `!= 'false'`, not `== 'true'`, and `!cancelled()` so this still evaluates
+    # when `changes` errored. `test` is a required check, and a job that skips
+    # reports Success — so gating on `== 'true'` would mean a broken filter job
+    # silently waves the two most important checks through on an untested PR.
+    # Unset output (filter broke) therefore runs the suite, same fail-open rule
+    # the script itself follows.
+    if: ${{ !cancelled() && needs.changes.outputs.ts != 'false' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+      - uses: bufbuild/buf-action@v1
+        with: { setup_only: true }
+      - run: bash .github/scripts/pnpm-install-with-retry.sh
+      - run: pnpm proto:gen
+      - name: Verify generated stubs are committed
+        run: git diff --exit-code services/*/src/generated || (echo "Generated stubs out of sync; run pnpm proto:gen and commit." && exit 1)
+      - run: pnpm -r build
+      # Same drift idiom as proto:gen above, applied to the API artifacts.
+      # Order matters: the conformance matrix must be generated from the spec
+      # this run just produced, or it describes a surface that no longer exists.
+      # `conformance:gen` also fails on its own when a difference carries no
+      # decision, or a decision matches no difference.
+      - run: pnpm openapi:gen
+      - run: pnpm conformance:gen
+      - name: Verify generated API artifacts are committed
+        run: |
+          git diff --exit-code \
+            services/registry-service-ts/openapi \
+            docs/managed-agents/conformance-matrix.md \
+          || (echo "API artifacts out of sync; run pnpm openapi:gen && pnpm conformance:gen and commit." && exit 1)
+      # Same idiom again, for the one part of the docs that can be checked
+      # exactly: environment variables. Prose about the code drifts silently —
+      # the memory watcher's poll interval was documented in six places, with a
+      # default, as a tunable that nothing read. This fails on that and on the
+      # inverse (a var `config.ts` reads that no doc mentions).
+      - run: pnpm docs:env-check
+      # Every source file carries the license header; `pnpm license:check --fix`
+      # adds it. The skip list and its reasons live in the script.
+      - run: pnpm license:check
+      # The chart is the other place the public surface is described, and it was
+      # describing a smaller one: `registry.ingress` forwarded `/v1` only, so
+      # `/api`, `/apis` and the `/api/v1` alias were unreachable on any
+      # Ingress-enabled deployment. The render suite existed but nothing ran it,
+      # which is why that went unnoticed — an assertion no job executes is a
+      # comment. `helm template` needs the binary; the suite needs no cluster.
+      - uses: azure/setup-helm@v4
+      - run: pnpm test:chart:render
+      - run: node --test .github/scripts/*.test.mjs scripts/render-pi-gateway-config.test.mjs scripts/check-license-headers.test.mjs
+      - run: node packages/pi-harness/scripts/generate-catalog.mjs --check
+      # Use the root `test` script (which filters out @orca/e2e-tests). The
+      # e2e package needs a running stack; it has its own dedicated workflow
+      # at `.github/workflows/e2e-stack.yml`.
+      #
+      # COVERAGE=1 switches on the v8 provider (see `vitest.shared.mjs`).
+      # These reports cover only the unit suites; the `coverage` job merges
+      # them with the integration job's before checking the ratchet.
+      - run: pnpm test
+        env:
+          COVERAGE: '1'
+      # `if: always()` so a failing suite still contributes its partial report.
+      # The `coverage` job downgrades to report-only when that happens, so a
+      # red test run never produces a second, confusing threshold failure.
+      - name: Stage unit coverage reports
+        if: always()
+        run: bash .github/scripts/stage-coverage.sh unit
+      - name: Upload unit coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-unit
+          path: coverage-artifacts/
+          # `warn`, not `error`: this runs with `if: always()`, so a job that
+          # fails before any test (e.g. a build break) stages zero files and
+          # would otherwise add a spurious second failure. A genuinely broken
+          # coverage setup is still caught — `merge-coverage.mjs` hard-fails
+          # when it finds no reports.
+          if-no-files-found: warn
+          retention-days: 1
+      # `pnpm lint`, not `pnpm -r lint`: the recursive form iterates workspace
+      # packages and skips the root, so the root script's `eslint scripts/**/*.mjs`
+      # never ran here — leaving the env-gate's own source unlinted in CI.
+      - run: pnpm lint
+      - run: pnpm format:check
+
+  integration:
+    runs-on: ubuntu-latest
+    needs: [changes, test]
+    # Fail-open like `test` above, but `needs.test.result` has to be asserted
+    # explicitly: `!cancelled()` overrides the implicit "skip me if a need
+    # failed", and integration must still not run against a red build.
+    if: ${{ !cancelled() && needs.test.result == 'success' && needs.changes.outputs.ts != 'false' }}
+    # Job-level so every `test:integration` step below emits coverage. The
+    # per-step `env:` blocks add to this rather than replacing it.
+    env:
+      COVERAGE: '1'
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: orca
+          POSTGRES_PASSWORD: orca
+          POSTGRES_DB: registry
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U orca"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+      kafka:
+        image: apache/kafka:3.7.1
+        ports:
+          - 9092:9092
+        env:
+          KAFKA_NODE_ID: 1
+          KAFKA_PROCESS_ROLES: broker,controller
+          KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+          KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+          KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+          KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+          KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+          KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+          KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+          KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+          KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+          KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+          KAFKA_NUM_PARTITIONS: 1
+          KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+          KAFKA_MIN_INSYNC_REPLICAS: 1
+          CLUSTER_ID: 'MkU3OEVBNTcwNTJENDM2Qk'
+        options: >-
+          --health-cmd "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 || exit 1"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 50
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+      - uses: bufbuild/buf-action@v1
+        with: { setup_only: true }
+      - run: bash .github/scripts/pnpm-install-with-retry.sh
+      - run: pnpm proto:gen
+      - run: pnpm -r build
+      - name: Wait for Kafka readiness
+        run: |
+          for i in {1..30}; do
+            if nc -z localhost 9092; then
+              echo "Kafka port 9092 is open."
+              break
+            fi
+            echo "Waiting for Kafka... attempt $i"
+            sleep 2
+          done
+      - name: Create per-service databases
+        run: |
+          PGPASSWORD=orca psql -h localhost -U orca -d registry -c 'CREATE DATABASE transcriptstore' || true
+          PGPASSWORD=orca psql -h localhost -U orca -d registry -c 'CREATE DATABASE filestore' || true
+          PGPASSWORD=orca psql -h localhost -U orca -d registry -c 'CREATE DATABASE memorystore' || true
+      - name: Start RustFS + create bucket
+        # RustFS serves the S3 API the integration suites use, and its `rc`
+        # client creates the bucket, reading its `local` alias from
+        # RC_HOST_local — the same flow as services/dev/docker-compose.yml.
+        # Both images are pinned; ci-rustfs-images.spec.ts checks every copy.
+        # RustFS logs only to files unless told to mirror them to stdout.
+        run: |
+          docker run -d --name rustfs --network host \
+            -e RUSTFS_ACCESS_KEY=minioadmin \
+            -e RUSTFS_SECRET_KEY=minioadmin \
+            -e RUSTFS_OBS_LOG_STDOUT_ENABLED=true \
+            rustfs/rustfs:1.0.0
+          for i in {1..30}; do
+            if curl -fsS http://localhost:9000/health/ready; then
+              echo "RustFS is ready."
+              break
+            fi
+            echo "Waiting for RustFS... attempt $i"
+            sleep 2
+          done
+          docker run --rm --network host \
+            -e RC_HOST_local=http://minioadmin:minioadmin@localhost:9000 \
+            rustfs/rc:v0.1.36 mb --ignore-existing local/orca-files
+      - name: Apply file-store migrations
+        env:
+          FILESTORE_DATABASE_URL: postgres://orca:orca@localhost:5432/filestore
+        run: pnpm -F @orca/file-store db:migrate
+      - name: Apply memory-store migrations
+        env:
+          MEMORYSTORE_DATABASE_URL: postgres://orca:orca@localhost:5432/memorystore
+        run: pnpm -F @orca/memory-store db:migrate
+      - env:
+          KAFKA_BROKERS: localhost:9092
+          TRANSCRIPT_STORE_DATABASE_URL: postgres://orca:orca@localhost:5432/transcriptstore
+          GRPC_PORT: 50051
+          GRPC_TARGET: localhost:50051
+          HTTP_PORT: 9090
+        run: pnpm -F @orca/transcript-store test:integration
+      - name: Test Kafka observability exporter vertical slice
+        env:
+          KAFKA_BROKERS: localhost:9092
+          OBSERVABILITY_EXPORTER_TEST_ADMIN_DATABASE_URL: postgres://orca:orca@localhost:5432/postgres
+        run: pnpm -F @orca/observability-exporter test:integration
+      - env:
+          KAFKA_BROKERS: localhost:9092
+          FILESTORE_DATABASE_URL: postgres://orca:orca@localhost:5432/filestore
+          S3_ENDPOINT: http://localhost:9000
+          S3_BUCKET: orca-files
+          S3_ACCESS_KEY: minioadmin
+          S3_SECRET_KEY: minioadmin
+          S3_KEY_PREFIX: managed-agents/
+        run: pnpm -F @orca/file-store test:integration
+      - env:
+          MEMORYSTORE_DATABASE_URL: postgres://orca:orca@localhost:5432/memorystore
+          S3_ENDPOINT: http://localhost:9000
+          S3_BUCKET: orca-files
+          S3_ACCESS_KEY: minioadmin
+          S3_SECRET_KEY: minioadmin
+          S3_KEY_PREFIX: managed-agents/
+        run: pnpm -F @orca/memory-store test:integration
+      - env:
+          S3_ENDPOINT: http://localhost:9000
+          S3_BUCKET: orca-files
+          S3_ACCESS_KEY: minioadmin
+          S3_SECRET_KEY: minioadmin
+        run: pnpm -F @orca/skill-store test:integration
+      - env:
+          KAFKA_BROKERS: localhost:9092
+          DATABASE_URL: postgres://orca:orca@localhost:5432/registry
+          FILESTORE_DATABASE_URL: postgres://orca:orca@localhost:5432/filestore
+          MEMORYSTORE_DATABASE_URL: postgres://orca:orca@localhost:5432/memorystore
+          S3_ENDPOINT: http://localhost:9000
+          S3_BUCKET: orca-files
+          S3_ACCESS_KEY: minioadmin
+          S3_SECRET_KEY: minioadmin
+          S3_KEY_PREFIX: managed-agents/
+          SESSION_JWT_PRIVATE_KEY_PEM: services/registry-service-ts/test/fixtures/session-jwt-private.pem
+        run: pnpm -F @orca/registry-service-ts test:integration
+      - name: Install OS prereqs (srt sandbox deps)
+        # The `local-sandbox-runtime.spec.ts` integration spec drives the
+        # real `srt` binary against `bubblewrap`; without those the
+        # spec hard-fails (per the locked "no skips" rule).
+        # ripgrep + socat are sandbox-runtime initialize prereqs;
+        # AppArmor sysctl unblocks bwrap's loopback config in a
+        # netns. Same set as `.github/workflows/e2e-stack.yml`.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bubblewrap \
+            ripgrep \
+            socat
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      - name: Install srt (sandbox-runtime CLI)
+        run: npm install -g @anthropic-ai/sandbox-runtime
+      - env:
+          KAFKA_BROKERS: localhost:9092
+          DATABASE_URL: postgres://orca:orca@localhost:5432/registry
+          FILESTORE_DATABASE_URL: postgres://orca:orca@localhost:5432/filestore
+          MEMORYSTORE_DATABASE_URL: postgres://orca:orca@localhost:5432/memorystore
+          # The harness uses one deployment root for files, attached memory
+          # stores, and execution outputs. The InMemory output-capture e2e
+          # test (`output-capture-e2e.spec.ts`) needs these values to construct
+          # its S3 client. The gated
+          # `file-prefetch-outputs-e2b.spec.ts` skips here (no E2B_API_KEY) —
+          # the nightly-e2b workflow runs that one with both secrets.
+          S3_ENDPOINT: http://localhost:9000
+          S3_BUCKET: orca-files
+          S3_REGION: us-east-1
+          S3_KEY_PREFIX: managed-agents/
+          # Both alias pairs are exported because dispatcher / file-store /
+          # output indexer paths still read the legacy `S3_ACCESS_KEY` /
+          # `S3_SECRET_KEY` names. config.ts prefers `S3_ACCESS_KEY_ID` /
+          # `S3_SECRET_ACCESS_KEY` when present.
+          S3_ACCESS_KEY_ID: minioadmin
+          S3_SECRET_ACCESS_KEY: minioadmin
+          S3_ACCESS_KEY: minioadmin
+          S3_SECRET_KEY: minioadmin
+          # github_repository resources need a host-side work
+          # dir for clone + a public URL the in-sandbox credential helper hits
+          # for `/v1/git-creds`. The current e2e test (`github-repo-e2e.spec.ts`)
+          # passes its own `gitCredsPublicUrl` to the dispatcher (random port),
+          # so these envs are the default for any future integration test that
+          # falls back to the env var.
+          HARNESS_WORK_DIR: /tmp/orca-test-work
+          GIT_CREDS_PUBLIC_URL: http://localhost:3000/v1/git-creds
+        run: pnpm -F @orca/harness-server test:integration
+
+      - name: Stage integration coverage reports
+        if: always()
+        run: bash .github/scripts/stage-coverage.sh integration
+      - name: Upload integration coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-integration
+          path: coverage-artifacts/
+          # See the note on the unit upload above.
+          if-no-files-found: warn
+          retention-days: 1
+
+  # Merges the unit and integration reports into one workspace-wide number and
+  # enforces the ratchet in `coverage-thresholds.json`.
+  #
+  # Merging matters because the two suites cover disjoint code: the integration
+  # suite is what exercises the S3/Kafka/Postgres glue. It is also why the merge
+  # is workspace-wide rather than per-package — harness-server integration specs
+  # import `registry-service-ts/src/server.ts` directly, so one package's run
+  # produces coverage for another's source.
+  #
+  # NOTE: this job is not yet one of the required status checks on `main`
+  # (the branch ruleset lists `test`, `integration`, and `lint-and-breaking` by
+  # job id). Until a repo admin adds `coverage`, it reports but does not block.
+  coverage:
+    runs-on: ubuntu-latest
+    needs: [changes, test, integration]
+    # Runs even when a suite failed, so partial (report-only) numbers still get
+    # posted — but not when the suites were skipped outright, because then there
+    # are no reports at all and `merge-coverage.mjs` hard-fails on an empty
+    # input set. Without that clause every prose-only PR would carry a red
+    # coverage job for having nothing to measure. `!= 'false'` keeps it aligned
+    # with the two jobs above: if the filter broke they ran, so their artifacts
+    # exist and are worth merging.
+    if: ${{ !cancelled() && needs.changes.outputs.ts != 'false' }}
+    # Wider than the workflow-level `contents: read`: `pull-requests: write` is
+    # for the sticky comment.
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+      - run: bash .github/scripts/pnpm-install-with-retry.sh
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-*
+          path: coverage-artifacts
+          merge-multiple: true
+      - name: Merge coverage and check the ratchet
+        # When either suite failed its reports are partial, so report the
+        # numbers but skip enforcement — otherwise a single failing test would
+        # also produce a misleading coverage regression.
+        env:
+          TEST_RESULT: ${{ needs.test.result }}
+          INTEGRATION_RESULT: ${{ needs.integration.result }}
+          # Rendered as the "Full HTML report" link in the summary; the script
+          # omits the line when this is unset (i.e. local runs).
+          COVERAGE_REPORT_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [[ "$TEST_RESULT" == "success" && "$INTEGRATION_RESULT" == "success" ]]; then
+            node scripts/merge-coverage.mjs --input-dir coverage-artifacts
+          else
+            echo "::warning::test=$TEST_RESULT integration=$INTEGRATION_RESULT — reporting coverage without enforcing the ratchet."
+            node scripts/merge-coverage.mjs --input-dir coverage-artifacts --report-only
+          fi
+      # `$GITHUB_STEP_SUMMARY` only renders on the run page, so the numbers
+      # never reached the PR. This posts them into the conversation.
+      #
+      # `always()` so a ratchet regression still comments — that is when it
+      # matters most — and `continue-on-error` so commenting can never be what
+      # fails the job (a PR from a fork gets a read-only token).
+      - name: Post coverage report to the PR
+        if: always() && github.event_name == 'pull_request'
+        continue-on-error: true
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const file = 'coverage/merged/summary.md';
+            if (!fs.existsSync(file)) {
+              core.warning('no coverage summary was produced; nothing to post');
+              return;
+            }
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.pull_request.number;
+            const builtSha = context.payload.pull_request.head.sha;
+
+            // Concurrency cancels superseded runs, but a comment step that had
+            // already started can still finish afterwards. Re-read the PR head
+            // and bail if this run no longer describes it, so a slow older run
+            // cannot overwrite a newer one's numbers.
+            const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number: issue_number });
+            if (pr.head.sha !== builtSha) {
+              core.warning(
+                `superseded: this run covers ${builtSha.slice(0, 7)}, PR head is now ` +
+                `${pr.head.sha.slice(0, 7)} — leaving the existing comment alone`,
+              );
+              return;
+            }
+
+            // Identifies our own comment so each run edits one in place
+            // instead of appending a new one on every push.
+            const marker = '<!-- orca-coverage-report -->';
+            const summary = fs.readFileSync(file, 'utf8');
+            // Naming the commit makes a stale comment obvious by eye.
+            const body = `${marker}\n${summary}\n<sub>Coverage for ${builtSha.slice(0, 7)}.</sub>\n`;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number, per_page: 100,
+            });
+            const existing = comments.find((c) => c.body?.startsWith(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+              core.info(`updated comment ${existing.id}`);
+            } else {
+              const { data } = await github.rest.issues.createComment({ owner, repo, issue_number, body });
+              core.info(`created comment ${data.id}`);
+            }
+
+      - name: Upload merged HTML report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html
+          path: coverage/merged/
+          if-no-files-found: warn
+          retention-days: 7

@@ -1,0 +1,120 @@
+{
+  "_comment": "Coverage ratchet baseline. Regenerate with `pnpm coverage:update` after adding tests. Values are merged unit+integration percentages; a run is failed when it falls more than `tolerance` points below any of these.",
+  "tolerance": 0.5,
+  "packages": {
+    "packages/agent-event-contract": {
+      "lines": 100,
+      "statements": 100,
+      "functions": 100,
+      "branches": 100
+    },
+    "packages/cloud-sandbox": {
+      "lines": 65.06,
+      "statements": 65.06,
+      "functions": 64.77,
+      "branches": 74.67
+    },
+    "packages/codex-harness": {
+      "lines": 98.95,
+      "statements": 98.95,
+      "functions": 93.33,
+      "branches": 93.27
+    },
+    "packages/file-store": {
+      "lines": 86.69,
+      "statements": 86.69,
+      "functions": 83.63,
+      "branches": 77.77
+    },
+    "packages/guardrails": {
+      "lines": 95.9,
+      "statements": 95.9,
+      "functions": 98.64,
+      "branches": 90.53
+    },
+    "packages/harness-catalog": {
+      "lines": 100,
+      "statements": 100,
+      "functions": 100,
+      "branches": 96.29
+    },
+    "packages/harness-tunnel": {
+      "lines": 94.98,
+      "statements": 94.98,
+      "functions": 99.12,
+      "branches": 87.93
+    },
+    "packages/memory-store": {
+      "lines": 84.2,
+      "statements": 84.2,
+      "functions": 85.57,
+      "branches": 78.84
+    },
+    "packages/oeadm": {
+      "lines": 90.1,
+      "statements": 90.1,
+      "functions": 89.85,
+      "branches": 82.86
+    },
+    "packages/sandbox-runtime": {
+      "lines": 86.45,
+      "statements": 86.45,
+      "functions": 87.5,
+      "branches": 78.53
+    },
+    "packages/skill-store": {
+      "lines": 87.5,
+      "statements": 87.5,
+      "functions": 95.74,
+      "branches": 81.72
+    },
+    "packages/transcript-store": {
+      "lines": 90.25,
+      "statements": 90.25,
+      "functions": 94.16,
+      "branches": 78.8
+    },
+    "services/environment-worker": {
+      "lines": 81.65,
+      "statements": 81.65,
+      "functions": 94.01,
+      "branches": 80.84
+    },
+    "services/harness-server": {
+      "lines": 86.89,
+      "statements": 86.89,
+      "functions": 91.26,
+      "branches": 83.07
+    },
+    "services/observability-exporter": {
+      "lines": 85.28,
+      "statements": 85.28,
+      "functions": 90.47,
+      "branches": 81.22
+    },
+    "services/registry-service-ts": {
+      "lines": 90.27,
+      "statements": 90.27,
+      "functions": 96.64,
+      "branches": 85.37
+    },
+    "services/sandbox-harness": {
+      "lines": 75.18,
+      "statements": 75.18,
+      "functions": 82.58,
+      "branches": 76.12
+    },
+    "services/session-runner": {
+      "lines": 87.35,
+      "statements": 87.35,
+      "functions": 93.63,
+      "branches": 81.69
+    }
+  },
+  "total": {
+    "lines": 88.37,
+    "statements": 88.37,
+    "functions": 91.97,
+    "branches": 84.56
+  }
+}

@@ -1,0 +1,40 @@
+name: Feature request
+description: Propose a new capability or a change in behavior.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Open-ended ideas are often easier to explore in
+        [Discussions](https://github.com/orca-ae/orca-agent-engine/discussions/categories/ideas) first.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: Describe the situation and what gets in your way today. Leave the solution for the next field.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What alternatives have you considered?
+  - type: dropdown
+    id: contract
+    attributes:
+      label: Does this change a public contract?
+      description: >-
+        Public contracts are the Anthropic-compatible /v1 API, the /apis/<group>/<version> extension
+        groups, the runner and worker tunnels and the .proto wire format, the database schema,
+        environment variables and configuration, and Helm values.
+      options:
+        - "No"
+        - "Yes, it changes one of these contracts"
+        - Not sure
+    validations:
+      required: true

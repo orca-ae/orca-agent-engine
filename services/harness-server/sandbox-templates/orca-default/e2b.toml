@@ -1,0 +1,16 @@
+# Copyright The Orca Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# E2B sandbox template config for the Orca harness.
+#
+# Field reference: https://e2b.dev/docs/sandbox-template
+#
+# No `template_id` is pinned here: every deployment builds its own template
+# (`e2b template create`, see README.md) and passes the printed id to the
+# harness as `E2B_TEMPLATE_ID`. `start_cmd` runs as user `user` at sandbox boot
+# and is expected to exit 0 (see start.sh contract).
+template_name = "orca-default"
+dockerfile = "e2b.Dockerfile"
+start_cmd = "/usr/local/bin/orca-start.sh"
+cpu_count = 2
+memory_mb = 2048

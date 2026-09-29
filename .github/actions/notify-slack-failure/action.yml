@@ -1,0 +1,68 @@
+# Copyright The Orca Authors
+# SPDX-License-Identifier: Apache-2.0
+
+name: Notify Slack on failure
+description: >-
+  Post a CI failure to a Slack incoming webhook. Fails loudly when the webhook
+  is unset, so a missing secret can never silently swallow the alert.
+
+# Four workflows need this notifier — e2e-stack, e2e-kind-helm, nightly-e2b and
+# nightly-anthropic-spec. Writing the payload four times is how one copy ends up
+# saying something different from the other three, so it lives here once and the
+# workflows call it. There is no `workflow_call` precedent in this repo; a
+# composite action is the smaller step and keeps the message in a single file.
+
+inputs:
+  webhook-url:
+    description: >-
+      Slack incoming-webhook URL, normally `secrets.SLACK_WEBHOOK_URL`. Marking
+      an input `required` does NOT reject an empty value — an unset secret
+      expands to the empty string and arrives here looking perfectly valid —
+      so the first step below checks it explicitly.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # A notifier that cannot notify is broken, and a green job would report the
+    # opposite. This step runs only when CI has already failed, so failing here
+    # costs nothing and makes "nobody was told" visible in the run instead of
+    # invisible in Slack's absence.
+    - name: Require the webhook to be configured
+      shell: bash
+      env:
+        WEBHOOK: ${{ inputs.webhook-url }}
+      run: |
+        if [ -z "${WEBHOOK}" ]; then
+          echo "::error::SLACK_WEBHOOK_URL is unset — this CI failure was NOT reported to Slack."
+          echo "::error::Add the secret at Settings → Secrets and variables → Actions."
+          exit 1
+        fi
+
+    # Floating major tag, matching how every other third-party action here is
+    # referenced (actions/checkout@v4, peter-evans/create-pull-request@v6,
+    # bufbuild/buf-action@v1). The SHA-pinning in e2e-stack.yml applies to build
+    # *inputs* whose drift would silently change what CI proves; this action
+    # only formats a message.
+    - name: Post the failure to Slack
+      uses: slackapi/slack-github-action@v2
+      with:
+        webhook: ${{ inputs.webhook-url }}
+        webhook-type: incoming-webhook
+        payload: |
+          text: ":red_circle: ${{ github.workflow }} failed on ${{ github.ref_name }}"
+          blocks:
+            - type: section
+              text:
+                type: mrkdwn
+                text: |
+                  :red_circle: *${{ github.workflow }}* failed on `${{ github.ref_name }}`
+                  *Trigger:* `${{ github.event_name }}`
+                  *Commit:* <${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}|`${{ github.sha }}`>
+            - type: actions
+              elements:
+                - type: button
+                  text:
+                    type: plain_text
+                    text: "View run"
+                  url: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

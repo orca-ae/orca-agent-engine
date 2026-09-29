@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "orca-managed-agents.harnessServiceName" . }}
+  labels:
+    {{- include "orca-managed-agents.labels" . | nindent 4 }}
+    app.kubernetes.io/component: harness
+spec:
+  type: {{ .Values.harness.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.harness.service.port }}
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "orca-managed-agents.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: harness

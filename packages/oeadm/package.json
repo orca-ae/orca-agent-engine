@@ -1,0 +1,37 @@
+{
+  "name": "@orca/oeadm",
+  "version": "0.0.0",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "description": "oeadm — the Orca engine operator CLI. One binary with `run` / `attach` / `env` / `worker` subcommands, over the registry's Anthropic-compatible HTTP API.",
+  "bin": {
+    "oeadm": "dist/bin.js"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsup src/index.ts src/bin.ts --format esm --dts --target node22 --no-splitting",
+    "start": "node dist/bin.js",
+    "dev": "tsx src/bin.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "lint": "eslint 'src/**/*.ts' 'test/**/*.ts'",
+    "format": "prettier --write 'src/**/*.ts' 'test/**/*.ts' '*.{json,md}'",
+    "format:check": "prettier --check 'src/**/*.ts' 'test/**/*.ts' '*.{json,md}'"
+  },
+  "dependencies": {
+    "@orca/environment-worker": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@vitest/coverage-v8": "^2.0.0",
+    "tsup": "^8.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
+  }
+}

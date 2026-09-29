@@ -1,0 +1,140 @@
+{{- $harnessSecretRefs := default (dict) .Values.harness.secretKeyRefs -}}
+{{- $harnessExtraEnv := default (list) .Values.harness.extraEnv -}}
+{{- $databaseSecretName := include "orca-managed-agents.databaseSecretName" . -}}
+{{- /* With every credential delivered through extraEnvFrom there is no `env`
+       entry left to render, and an empty `env:` key is invalid. */}}
+{{- $harnessHasEnv := or (ne (include "orca-managed-agents.secretName" .) "") (ne $databaseSecretName "") (gt (len $harnessSecretRefs) 0) (gt (len $harnessExtraEnv) 0) -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "orca-managed-agents.harnessServiceName" . }}
+  labels:
+    {{- include "orca-managed-agents.labels" . | nindent 4 }}
+    app.kubernetes.io/component: harness
+spec:
+  replicas: {{ .Values.harness.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "orca-managed-agents.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: harness
+  template:
+    metadata:
+      annotations:
+        {{- /* Roll the fleet when the rendered config or credentials change;
+               envFrom/secretKeyRef updates are otherwise invisible to running
+               containers. */}}
+        checksum/config: {{ include (print $.Template.BasePath "/configmap-harness.yaml") . | sha256sum }}
+        {{- if and .Values.secrets.create (not .Values.secrets.existingSecret) }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.harness.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "orca-managed-agents.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: harness
+        {{- with .Values.harness.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "orca-managed-agents.harnessServiceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.harness.automountServiceAccountToken }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: harness
+          image: "{{ .Values.images.harness.repository }}:{{ .Values.images.harness.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.images.harness.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.harness.httpPort }}
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "orca-managed-agents.fullname" . }}-harness-config
+            {{- /* Last wins for duplicate keys, so operator-supplied bundles
+                   override the chart ConfigMap. */}}
+            {{- with .Values.harness.extraEnvFrom }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- if $harnessHasEnv }}
+          env:
+            {{- include "orca-managed-agents.secretEnv" (dict "ctx" $ "key" "TRANSCRIPT_STORE_DATABASE_URL" "refs" $harnessSecretRefs "optional" (ne .Values.transcriptStore.backend "postgres") "fallbackSecretName" $databaseSecretName) | nindent 12 }}
+            {{- include "orca-managed-agents.secretEnv" (dict "ctx" $ "key" "FILESTORE_DATABASE_URL" "refs" $harnessSecretRefs "optional" false "fallbackSecretName" $databaseSecretName) | nindent 12 }}
+            {{- include "orca-managed-agents.secretEnv" (dict "ctx" $ "key" "ANTHROPIC_API_KEY" "refs" $harnessSecretRefs "optional" true) | nindent 12 }}
+            {{- include "orca-managed-agents.secretEnv" (dict "ctx" $ "key" "OPENAI_API_KEY" "refs" $harnessSecretRefs "optional" true) | nindent 12 }}
+            {{- range $key := list "S3_ACCESS_KEY_ID" "S3_SECRET_ACCESS_KEY" "S3_ACCESS_KEY" "S3_SECRET_KEY" "KAFKA_AUTH_TOKEN" "KAFKA_SASL_USERNAME" "KAFKA_SASL_PASSWORD" "PULSAR_AUTH_TOKEN" "PULSAR_OAUTH2_CLIENT_SECRET" "PULSAR_OAUTH2_PRIVATE_KEY" "OPEN_SANDBOX_API_KEY" "AGENTENV_API_KEY" "E2B_API_KEY" }}
+            {{- include "orca-managed-agents.secretEnv" (dict "ctx" $ "key" $key "refs" $harnessSecretRefs "optional" true) | nindent 12 }}
+            {{- end }}
+            {{- if (dig "schemaRegistry" "url" "" .Values.transcriptStore.kafka) }}
+            {{- range $key := list "KAFKA_SCHEMA_REGISTRY_USERNAME" "KAFKA_SCHEMA_REGISTRY_PASSWORD" }}
+            {{- include "orca-managed-agents.secretEnv" (dict "ctx" $ "key" $key "refs" $harnessSecretRefs "optional" true) | nindent 12 }}
+            {{- end }}
+            {{- end }}
+            {{- with $harnessExtraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- end }}
+          volumeMounts:
+            - name: workdir
+              mountPath: {{ .Values.harness.workDir | quote }}
+            - name: registry-internal-token
+              mountPath: {{ .Values.internalAuth.tokenMountPath | quote }}
+              readOnly: true
+            {{- if .Values.external.databases.tls.caSecretName }}
+            {{- include "orca-managed-agents.pgCaVolumeMount" . | nindent 12 }}
+            {{- end }}
+            {{- with .Values.harness.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.harness.startupProbe }}
+          startupProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.harness.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.harness.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.harness.resources | nindent 12 }}
+      volumes:
+        - name: workdir
+          emptyDir: {}
+        - name: registry-internal-token
+          projected:
+            # Projected files are owned by root. The pod fsGroup needs group
+            # read permission so the non-root Harness process can consume it.
+            defaultMode: 0440
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  audience: {{ .Values.internalAuth.audience | quote }}
+                  expirationSeconds: {{ .Values.internalAuth.tokenExpirationSeconds }}
+        {{- if .Values.external.databases.tls.caSecretName }}
+        {{- include "orca-managed-agents.pgCaVolume" . | nindent 8 }}
+        {{- end }}
+        {{- with .Values.harness.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.harness.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.harness.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.harness.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

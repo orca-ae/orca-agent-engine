@@ -1,0 +1,42 @@
+{{- $kafka := .Values.transcriptStore.kafka -}}
+{{- $encoding := default "raw" $kafka.encoding -}}
+{{- $sr := default (dict) $kafka.schemaRegistry -}}
+{{- $url := default "" $sr.url -}}
+{{- /* Values defaults do not enable the Registry. Explicit nondefault companions
+       are configuration intent and must not disappear behind URL-gated rendering. */ -}}
+{{- $nondefaultCompanions := or
+      (and (hasKey $sr "subject") (ne (toString $sr.subject) "orca.transcript.TranscriptEvent"))
+      (and (hasKey $sr "autoRegister") (ne (toJson $sr.autoRegister) "true"))
+      (and (hasKey $sr "requestTimeoutMs") (ne (toString $sr.requestTimeoutMs) "5000"))
+      (ne (default "none" $sr.authMode) "none")
+      (not (empty $sr.caFile)) (not (empty $sr.certFile)) (not (empty $sr.keyFile)) -}}
+{{- if not (has $encoding (list "raw" "avro")) -}}
+{{- fail "transcriptStore.kafka.encoding must be raw or avro" -}}
+{{- end -}}
+{{- if and (eq $encoding "avro") (empty $url) -}}
+{{- fail "transcriptStore.kafka.encoding=avro requires schemaRegistry.url" -}}
+{{- end -}}
+{{- if and (ne .Values.transcriptStore.backend "kafka") (or (ne $encoding "raw") (not (empty $url)) $nondefaultCompanions) -}}
+{{- fail "transcriptStore.kafka encoding/schemaRegistry requires backend=kafka" -}}
+{{- end -}}
+{{- if not (has (default "none" $sr.authMode) (list "none" "basic")) -}}
+{{- fail "transcriptStore.kafka.schemaRegistry.authMode must be none or basic" -}}
+{{- end -}}
+{{- if ne (empty $sr.certFile) (empty $sr.keyFile) -}}
+{{- fail "transcriptStore.kafka.schemaRegistry certFile/keyFile must be configured together" -}}
+{{- end -}}
+{{- if empty $url -}}
+{{- if $nondefaultCompanions -}}
+{{- fail "transcriptStore.kafka.schemaRegistry nondefault configuration requires url" -}}
+{{- end -}}
+{{- else -}}
+{{- if or (not (regexMatch "^https?://[^/?#@]+(/[^?#]*)?$" $url)) (contains "@" (get (urlParse $url) "host")) -}}
+{{- fail "transcriptStore.kafka.schemaRegistry.url requires http(s), no userinfo, query or fragment" -}}
+{{- end -}}
+{{- if and (or (eq $sr.authMode "basic") $sr.certFile $sr.caFile) (not (hasPrefix "https://" $url)) -}}
+{{- fail "transcriptStore.kafka.schemaRegistry authentication/TLS requires https" -}}
+{{- end -}}
+{{- if or (empty $sr.subject) (not (kindIs "bool" $sr.autoRegister)) (not (regexMatch "^[1-9][0-9]*$" (toString $sr.requestTimeoutMs))) -}}
+{{- fail "transcriptStore.kafka.schemaRegistry requires subject, boolean autoRegister and positive integer requestTimeoutMs" -}}
+{{- end -}}
+{{- end -}}

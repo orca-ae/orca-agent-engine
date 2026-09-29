@@ -1,0 +1,11 @@
+**/src/generated/**
+**/dist/**
+**/node_modules/**
+
+# Generated API artifacts. Each is regenerated and `git diff --exit-code`'d in CI,
+# so reformatting any of them would produce permanent, unfixable drift. The
+# vendored Anthropic spec additionally must stay byte-identical to what upstream
+# serves: `PINNED.json` records a sha256 over exactly these bytes.
+services/registry-service-ts/vendor/anthropic/**
+services/registry-service-ts/openapi/**
+docs/managed-agents/conformance-matrix.md

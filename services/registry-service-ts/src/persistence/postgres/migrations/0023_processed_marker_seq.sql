@@ -1,0 +1,2 @@
+ALTER TABLE "session_events_index" ADD COLUMN "processed_marker_seq" bigint;--> statement-breakpoint
+CREATE INDEX "session_events_index_user_event_marker_idx" ON "session_events_index" USING btree ("workspace_id","session_id",("payload"->>'user_event_id'),"seq","projection_ordinal","event_id") WHERE "session_events_index"."kind" in ('session.user_event_processed', 'session.deferred_user_message_submitted');

@@ -1,0 +1,30 @@
+{{- $exporter := default (dict) .Values.observabilityExporter -}}
+{{- if (dig "enabled" false $exporter) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "orca-managed-agents.fullname" . }}-observability-exporter-config
+  labels:
+    {{- include "orca-managed-agents.labels" . | nindent 4 }}
+data:
+  NODE_ENV: "production"
+  OBSERVABILITY_EXPORTER_STATE_BACKEND: {{ dig "stateBackend" "kafka" $exporter | quote }}
+  {{- if eq (dig "stateBackend" "kafka" $exporter) "kafka" }}
+  OBSERVABILITY_KAFKA_STATE_DIRECTORY: "/var/run/orca/exporter-state"
+  OBSERVABILITY_KAFKA_STATE_MAX_BYTES: "1073741824"
+  {{- end }}
+  TRANSCRIPT_STORE_BACKEND: "kafka"
+  REGISTRY_INTERNAL_BASE_URL: {{ default (include "orca-managed-agents.registryInternalUrl" .) $exporter.registryInternalBaseUrl | quote }}
+  INTERNAL_SERVICE_TOKEN_FILE: {{ printf "%s/token" .Values.internalAuth.tokenMountPath | quote }}
+  KAFKA_BROKERS: {{ .Values.transcriptStore.kafka.brokers | quote }}
+  KAFKA_CONNECTION_MODE: {{ .Values.transcriptStore.kafka.connectionMode | quote }}
+  KAFKA_TOPIC_PREFIX: {{ .Values.transcriptStore.kafka.topicPrefix | quote }}
+  KAFKA_TOPIC_REDISCOVER_INTERVAL_MS: {{ .Values.transcriptStore.kafka.topicRediscoverIntervalMs | quote }}
+  KAFKA_SSL: {{ .Values.transcriptStore.kafka.ssl | quote }}
+  KAFKA_SSL_REJECT_UNAUTHORIZED: {{ .Values.transcriptStore.kafka.sslRejectUnauthorized | quote }}
+  KAFKA_SSL_CA_FILE: {{ .Values.transcriptStore.kafka.sslCaFile | quote }}
+  KAFKA_SSL_CERT_FILE: {{ .Values.transcriptStore.kafka.sslCertFile | quote }}
+  KAFKA_SSL_KEY_FILE: {{ .Values.transcriptStore.kafka.sslKeyFile | quote }}
+  KAFKA_SASL_MECHANISM: {{ .Values.transcriptStore.kafka.saslMechanism | quote }}
+  {{- include "orca-managed-agents.kafkaTranscriptEncoding" . | nindent 2 }}
+{{- end }}

@@ -1,0 +1,41 @@
+{
+  "name": "@orca/observability-exporter",
+  "version": "0.0.0",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsup src/index.ts src/main.ts --format esm --dts --target node22",
+    "start": "node dist/main.js",
+    "test": "vitest run",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test:integration:kafka": "vitest run --config vitest.integration.config.ts test/integration/durable/kafka-only.spec.ts",
+    "test:smoke:litefuse": "vitest run --config vitest.smoke.config.ts",
+    "test:smoke:litefuse-kafka": "vitest run --config vitest.litefuse-kafka-smoke.config.ts",
+    "test:smoke:litefuse-vertical": "vitest run --config vitest.litefuse-vertical-smoke.config.ts",
+    "lint": "eslint 'src/**/*.ts' 'test/**/*.ts'"
+  },
+  "dependencies": {
+    "@bybrave/ip2": "^3.0.0",
+    "@orca/agent-event-contract": "workspace:*",
+    "@orca/transcript-store": "workspace:*",
+    "@orca/transcript-store-types": "workspace:*",
+    "better-sqlite3": "^12.11.1",
+    "kafkajs": "^2.2.4",
+    "pg": "^8.13.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.0.0",
+    "@types/pg": "^8.11.0",
+    "@vitest/coverage-v8": "^2.0.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
+  }
+}

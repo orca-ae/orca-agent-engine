@@ -1,0 +1,83 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1040 540" fill="none" role="img" aria-label="Agent Engine architecture">
+  <title>Agent Engine architecture</title>
+  <defs>
+    <marker id="ae-arrow-teal" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#3da09d" />
+    </marker>
+    <marker id="ae-arrow-lime" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#697586" />
+    </marker>
+  </defs>
+
+  <style>
+    .ae-box { fill: #eef7f6; stroke: #3da09d; stroke-width: 1; }
+    .ae-label { fill: #082b3d; font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-size: 19px; text-anchor: middle; }
+    .ae-line { stroke: #3da09d; stroke-width: 2; }
+    .ae-lime { stroke: #697586; stroke-width: 2; }
+    .ae-flowlabel { fill: #697586; font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-size: 15px; }
+  </style>
+
+  <!-- Full-bleed backdrop: keeps the diagram legible on hosts that render SVGs
+       against a transparent or dark page. -->
+  <rect x="0" y="0" width="1040" height="540" fill="#ffffff" />
+
+  <!-- Agent Engine container -->
+  <rect x="188" y="28" width="584" height="384" rx="20" fill="#ffffff" stroke="#cdd5df" stroke-width="1.5" />
+  <text x="480" y="57" class="ae-label" style="fill:#194c4e; font-size:20px;">Agent Engine</text>
+
+  <!-- SDK / CLI / UI -->
+  <rect x="24" y="95" width="120" height="250" rx="3" fill="#f8fafc" stroke="#cdd5df" stroke-width="1" />
+  <text x="84" y="152" class="ae-label" style="fill:#364152;">SDK</text>
+  <text x="84" y="228" class="ae-label" style="fill:#364152;">CLI</text>
+  <text x="84" y="304" class="ae-label" style="fill:#364152;">UI</text>
+
+  <!-- Registry -->
+  <rect x="214" y="88" width="116" height="300" rx="3" class="ae-box" />
+  <text x="272" y="245" class="ae-label">Registry</text>
+
+  <!-- Harness Server -->
+  <rect x="384" y="88" width="150" height="150" rx="3" class="ae-box" />
+  <text x="459" y="156" class="ae-label">Harness<tspan x="459" dy="26">Server</tspan></text>
+
+  <!-- Sandbox -->
+  <rect x="399" y="282" width="120" height="106" rx="3" class="ae-box" />
+  <text x="459" y="342" class="ae-label">Sandbox</text>
+
+  <!-- AI Gateway -->
+  <rect x="612" y="88" width="134" height="300" rx="3" class="ae-box" />
+  <text x="679" y="245" class="ae-label" style="font-size:18px;">AI Gateway</text>
+
+  <!-- MCP -->
+  <rect x="828" y="96" width="138" height="104" rx="3" class="ae-box" />
+  <text x="897" y="155" class="ae-label">MCP</text>
+
+  <!-- LLM Provider -->
+  <rect x="828" y="250" width="138" height="118" rx="3" class="ae-box" />
+  <text x="897" y="302" class="ae-label">LLM<tspan x="897" dy="26">Provider</tspan></text>
+
+  <!-- Data Streaming -->
+  <rect x="188" y="480" width="584" height="44" rx="3" fill="#f8fafc" stroke="#3da09d" stroke-width="1" />
+  <text x="480" y="509" class="ae-label" style="fill:#194c4e; font-size:20px;">Data Streaming</text>
+
+  <!-- Arrows -->
+  <!-- Registry <-> Harness Server -->
+  <line x1="330" y1="163" x2="384" y2="163" class="ae-line" marker-start="url(#ae-arrow-teal)" marker-end="url(#ae-arrow-teal)" />
+  <!-- Registry -> SDK/CLI/UI -->
+  <line x1="214" y1="238" x2="148" y2="238" class="ae-line" marker-end="url(#ae-arrow-teal)" />
+  <!-- Harness Server -> AI Gateway -->
+  <line x1="534" y1="145" x2="612" y2="145" class="ae-line" marker-end="url(#ae-arrow-teal)" />
+  <!-- Harness Server -> Sandbox -->
+  <line x1="459" y1="238" x2="459" y2="282" class="ae-line" marker-end="url(#ae-arrow-teal)" />
+  <!-- Sandbox -> AI Gateway -->
+  <line x1="519" y1="335" x2="612" y2="335" class="ae-line" marker-end="url(#ae-arrow-teal)" />
+  <!-- AI Gateway -> MCP -->
+  <line x1="746" y1="145" x2="828" y2="148" class="ae-line" marker-end="url(#ae-arrow-teal)" />
+  <!-- AI Gateway -> LLM Provider -->
+  <line x1="746" y1="300" x2="828" y2="305" class="ae-line" marker-end="url(#ae-arrow-teal)" />
+
+  <!-- Governed streams out -->
+  <line x1="272" y1="412" x2="272" y2="480" class="ae-lime" marker-end="url(#ae-arrow-lime)" />
+  <text x="260" y="452" class="ae-flowlabel" text-anchor="end">Transcript Store</text>
+  <line x1="679" y1="412" x2="679" y2="480" class="ae-lime" marker-end="url(#ae-arrow-lime)" />
+  <text x="692" y="452" class="ae-flowlabel" text-anchor="start">Audit Logs</text>
+</svg>

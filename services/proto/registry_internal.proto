@@ -1,0 +1,27 @@
+// Copyright The Orca Authors
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+
+package orca.registry_internal.v1;
+
+// Internal-only: used by ai-gateway to resolve vault credentials.
+// Cluster-internal traffic is authenticated by the service mesh + Kubernetes
+// NetworkPolicy / Istio AuthorizationPolicy — NOT by anything in this proto.
+service RegistryInternal {
+  rpc ResolveVault (ResolveVaultRequest) returns (ResolveVaultResponse);
+}
+
+message ResolveVaultRequest {
+  string workspace_id = 1;
+  string vault_id = 2;
+}
+
+message ResolveVaultResponse {
+  string vault_id = 1;
+  string version = 2;            // for cache keying
+  string scheme = 3;             // "bearer" | "basic" | ...
+  // Never log this field — exclude from any structured logging or trace export.
+  string secret_value = 4;       // raw credential
+  int64  ttl_seconds = 5;        // gateway should re-fetch after this
+}

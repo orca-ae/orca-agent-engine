@@ -1,0 +1,12 @@
+{{- if .Values.dataplaneNamespace.create }}
+# Dataplane namespace where OpenSandbox sandbox Pods run (configToml
+# [kubernetes] namespace). The chart's own destination namespace
+# (opensandbox-system) is created by the deployer (for example Helm
+# --create-namespace or ArgoCD CreateNamespace).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: opensandbox
+  labels:
+    app.kubernetes.io/part-of: opensandbox
+{{- end }}

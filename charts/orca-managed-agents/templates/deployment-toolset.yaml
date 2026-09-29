@@ -1,0 +1,113 @@
+{{- $toolset := default (dict) .Values.toolset -}}
+{{- $images := default (dict) .Values.images -}}
+{{- if and (dig "enabled" false $toolset) (hasKey $images "toolset") -}}
+{{- $toolsetImage := default (dict) (get $images "toolset") -}}
+{{- $apiKey := default (dict) (get $toolset "apiKey") -}}
+{{- $apiKeyRef := dig "secretKeyRef" (dict) $apiKey -}}
+{{- $accessToken := default (dict) (get $toolset "accessToken") -}}
+{{- $accessTokenRef := dig "secretKeyRef" (dict) $accessToken -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "orca-managed-agents.toolsetName" . }}
+  labels:
+    {{- include "orca-managed-agents.labels" . | nindent 4 }}
+    app.kubernetes.io/component: toolset
+spec:
+  replicas: {{ get $toolset "replicaCount" }}
+  selector:
+    matchLabels:
+      {{- include "orca-managed-agents.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: toolset
+  template:
+    metadata:
+      {{- with (get $toolset "podAnnotations") }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "orca-managed-agents.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: toolset
+        {{- with (get $toolset "podLabels") }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "orca-managed-agents.toolsetServiceAccountName" . }}
+      # The CLI needs only Registry network access. Do not expose a Kubernetes
+      # API credential to interactive shell users.
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: toolset
+          image: {{ include "orca-managed-agents.toolsetImage" . | quote }}
+          imagePullPolicy: {{ get $toolsetImage "pullPolicy" }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - |
+              child=
+              shutdown() {
+                if [ -n "$child" ]; then
+                  kill "$child" 2>/dev/null || true
+                  wait "$child" 2>/dev/null || true
+                fi
+                exit 0
+              }
+              trap shutdown TERM INT
+              sleep infinity &
+              child=$!
+              wait "$child"
+          env:
+            - name: ORCA_REGISTRY_URL
+              value: {{ include "orca-managed-agents.toolsetRegistryUrl" . | quote }}
+            {{- if not (empty (dig "name" "" $apiKeyRef)) }}
+            - name: ORCA_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "toolset.apiKey.secretKeyRef.name is required when API-key auth is selected" (dig "name" "" $apiKeyRef) | quote }}
+                  key: {{ required "toolset.apiKey.secretKeyRef.key is required when API-key auth is selected" (dig "key" "" $apiKeyRef) | quote }}
+            {{- else if not (empty (dig "name" "" $accessTokenRef)) }}
+            - name: ORCA_ACCESS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "toolset.accessToken.secretKeyRef.name is required when Bearer auth is selected" (dig "name" "" $accessTokenRef) | quote }}
+                  key: {{ required "toolset.accessToken.secretKeyRef.key is required when Bearer auth is selected" (dig "key" "" $accessTokenRef) | quote }}
+            {{- end }}
+            {{- with (get $toolset "extraEnv") }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with (get $toolset "extraEnvFrom") }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with (get $toolset "extraVolumeMounts") }}
+          volumeMounts:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml (get $toolset "resources") | nindent 12 }}
+      {{- with (get $toolset "extraVolumes") }}
+      volumes:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with (get $toolset "nodeSelector") }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with (get $toolset "affinity") }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with (get $toolset "tolerations") }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
