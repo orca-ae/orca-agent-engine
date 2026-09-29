@@ -10,6 +10,7 @@ import { v5 as uuidv5, v7 as uuidv7 } from 'uuid';
 import {
   BUILTIN_EVALUATORS,
   SKILL_LOAD_TOOL,
+  evaluateGuardrailExpression,
   evaluateGuardrails,
   type PreparedGuardrail,
 } from '@orca/guardrails';
@@ -5506,7 +5507,11 @@ function skillIsBlocked(prepared: PreparedExecutionV2, skill: SkillDescriptor): 
       sessionId: prepared.session.id,
       tool: { name: SKILL_LOAD_TOOL, input: { skill: skill.name } },
     },
-    { builtins: BUILTIN_EVALUATORS, readOnly: true },
+    {
+      builtins: BUILTIN_EVALUATORS,
+      expression: evaluateGuardrailExpression,
+      readOnly: true,
+    },
   );
   return decision.verdict === 'deny';
 }
