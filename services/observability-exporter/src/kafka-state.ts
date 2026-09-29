@@ -155,6 +155,11 @@ export interface DecodedKafkaTranscript {
   event: Event | null;
 }
 
+/** Completion markers are dispatch bookkeeping, not trace inputs or projection identities. */
+export function isKafkaCompletionMarker(event: Event): boolean {
+  return event.kind === 'session.user_event_completed';
+}
+
 /** Validate the entire broker batch before skipping replay or doing asynchronous lookups. */
 export function validateKafkaTranscriptOffsets(messages: readonly { offset: string }[]): void {
   let previousOffset = -1n;
@@ -186,7 +191,7 @@ export function projectKafkaEvents(
     if (BigInt(message.offset) < BigInt(next.nextOffset)) continue;
     const event = message.event;
     next.nextOffset = (BigInt(message.offset) + 1n).toString();
-    if (event === null) continue;
+    if (event === null || isKafkaCompletionMarker(event)) continue;
     const key = eventIdentityKey(event.id);
     const hash = kafkaTranscriptHash(event);
     const existing = identities.get(key);

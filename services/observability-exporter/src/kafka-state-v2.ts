@@ -12,6 +12,7 @@ import {
 import type { KafkaDiskIndex } from './kafka-disk-index.js';
 import {
   initialKafkaCheckpoint,
+  isKafkaCompletionMarker,
   parseKafkaCheckpoint,
   projectKafkaEvents,
   validateKafkaTranscriptOffsets,
@@ -422,7 +423,7 @@ export function collectKafkaMembership(
   const identities = new Set<string>();
   const accepted = new Set(reducer.pendingInputs.map((input) => input.eventId));
   for (const { event } of messages) {
-    if (event === null) continue;
+    if (event === null || isKafkaCompletionMarker(event)) continue;
     identities.add(eventIdentityKey(event.id));
     const id = boundedAgentEventId(event.id);
     if (id !== undefined) accepted.add(id);
