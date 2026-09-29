@@ -27,6 +27,11 @@ The Codex worker receives the catalog as developer instructions and reads each
 entrypoint through Orca's sandbox `read` tool with the Agent's permission policy.
 `block_skills` excludes matching bundles before catalog composition and
 materialization. Managed Skills use the catalog supplied by Orca.
+The cloud harness checks stateless tool-call policies against a synthetic `Skill`
+load with the skill name before composing the catalog or materializing files.
+It evaluates both builtin and CEL expression rules; an unrelated expression
+that allows the load does not remove the Skill. A denial or evaluation failure
+omits both the catalog entry and the bundle.
 
 Codex checkpoints pin the effective developer instructions, including this
 catalog. A policy update that changes the catalog causes native resume to fail

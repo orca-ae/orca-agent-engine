@@ -2756,9 +2756,31 @@ describe('Dispatcher with custom SessionEventSource', () => {
     }
   });
 
-  it.each(['claude_agent_sdk', 'codex_sdk'] as const)(
-    '%s: leaves a guardrail-blocked Skill out of materialization entirely',
-    async (harnessType) => {
+  it.each(
+    (['claude_agent_sdk', 'codex_sdk'] as const).flatMap((harnessType) => [
+      {
+        harnessType,
+        ruleKind: 'builtin',
+        rule: { kind: 'builtin', builtin: 'block_skills', params: { blocked: ['deploy-*'] } },
+      },
+      {
+        harnessType,
+        ruleKind: 'expression',
+        rule: {
+          kind: 'expression',
+          expression: "event.tool.name != 'Skill' || event.tool.input.skill != 'deploy-prod'",
+          onFalse: 'deny',
+        },
+      },
+      {
+        harnessType,
+        ruleKind: 'invalid expression',
+        rule: { kind: 'expression', expression: 'event.tool.name ==', onFalse: 'deny' },
+      },
+    ]),
+  )(
+    '$harnessType: leaves a guardrail-blocked Skill out of materialization entirely ($ruleKind)',
+    async ({ harnessType, rule }) => {
       // `block_skills` is written against the tool that loads a Skill, and this
       // runtime exposes no such tool — Skills are staged as files. The rule
       // compiled, validated and evaluated, and could never fire. The list built
@@ -2793,7 +2815,7 @@ describe('Dispatcher with custom SessionEventSource', () => {
             name: 'No deploy skills',
             tier: 'workspace',
             phases: ['tool_call'],
-            rule: { kind: 'builtin', builtin: 'block_skills', params: { blocked: ['deploy-*'] } },
+            rule,
             stateful: false,
           },
         ],
@@ -5058,9 +5080,14 @@ describe('Dispatcher with custom SessionEventSource', () => {
     await dispatcher.stop();
   });
 
-  it.each(['claude_agent_sdk', 'codex_sdk'] as const)(
-    '%s: discloses only the ordered Skill catalog and leaves agent tools unchanged',
-    async (harnessType) => {
+  it.each(
+    (['claude_agent_sdk', 'codex_sdk'] as const).flatMap((harnessType) => [
+      { harnessType, withExpression: false },
+      { harnessType, withExpression: true },
+    ]),
+  )(
+    '$harnessType: discloses only the ordered Skill catalog and leaves agent tools unchanged (expression=$withExpression)',
+    async ({ harnessType, withExpression }) => {
       const source = new FakeEventSource();
       const store = new RecordingStore();
       const harness = new RecordingStartInputHarness();
@@ -5108,6 +5135,25 @@ describe('Dispatcher with custom SessionEventSource', () => {
             },
           ],
         },
+        guardrails: withExpression
+          ? [
+              {
+                id: 'grd_approval_expression',
+                name: 'Approval requires evidence and a high risk score',
+                tier: 'agent',
+                phases: ['tool_call'],
+                rule: {
+                  kind: 'expression',
+                  expression:
+                    "event.tool.name != 'request_approval' || " +
+                    '(has(event.tool.input.evidence_refs) && size(event.tool.input.evidence_refs) >= 1 && ' +
+                    'has(event.tool.input.risk_score) && event.tool.input.risk_score >= 85)',
+                  onFalse: 'deny',
+                },
+                stateful: false,
+              },
+            ]
+          : [],
       });
       const dispatcher = new Dispatcher({
         eventSource: source,
