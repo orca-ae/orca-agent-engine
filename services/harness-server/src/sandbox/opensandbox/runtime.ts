@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { randomUUID } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 import type {
   EnvironmentSpec,
   SandboxCapabilities,
@@ -45,6 +46,8 @@ const READY_POLL_MS = 500;
 const EXECD_ISOLATION_EXTENSION = 'bootstrap.execd.isolation';
 const MAX_COMMAND_STREAM_BYTES = 1024 * 1024;
 const FUSE_DEVICE_EXTENSION = 'orca.fuse.device';
+const WRITE_POLICY_PROBE_FAILURE = 'orca_write_policy_probe_failed:';
+type CommandPurpose = 'command' | 'fuse_prerequisites' | 'filesystem_roots' | 'write_policy';
 
 export interface OpenSandboxRuntimeOptions {
   /** OpenSandbox server host[:port] or full URL. */
@@ -273,6 +276,7 @@ class OpenSandboxHandle implements SandboxHandle {
   private destroyed = false;
   private execdBaseUrl = '';
   private execdHeaders: Record<string, string> = {};
+  private commandSequence = 0;
 
   constructor(
     private readonly opts: {
@@ -326,6 +330,7 @@ class OpenSandboxHandle implements SandboxHandle {
         'rmdir "$probe_dir"',
         'trap - EXIT',
       ].join('\n'),
+      { purpose: 'fuse_prerequisites' },
     );
     if (result.exitCode !== 0) {
       throw new Error(
@@ -371,6 +376,7 @@ class OpenSandboxHandle implements SandboxHandle {
 
   async prepareFilesystemRoots(paths: readonly string[]): Promise<void> {
     const result = await this.runCommand(buildSandboxFilesystemRootPreflightCommand(paths), {
+      purpose: 'filesystem_roots',
       envs: { ...SANDBOX_READ_COMMAND_ENVS },
       timeoutMs: SANDBOX_FILESYSTEM_ROOT_PREFLIGHT_TIMEOUT_MS,
       requestTimeoutSeconds: Math.ceil(SANDBOX_FILESYSTEM_ROOT_PREFLIGHT_TIMEOUT_MS / 1_000) + 5,
@@ -383,25 +389,51 @@ class OpenSandboxHandle implements SandboxHandle {
   }
 
   async prepareWritePolicy(policy: SandboxWritePolicy): Promise<void> {
-    const readProbe = await this.runCommand(buildSandboxReadPrerequisiteProbeCommand(), {
-      envs: { ...SANDBOX_READ_COMMAND_ENVS },
-      timeoutMs: SANDBOX_READ_TIMEOUT_MS,
-      requestTimeoutSeconds: Math.ceil(SANDBOX_READ_TIMEOUT_MS / 1_000) + 5,
+    const envs = Object.entries(SANDBOX_READ_COMMAND_ENVS)
+      .map(([name, value]) => shellQuote(name + '=' + value))
+      .join(' ');
+    const probes = [
+      {
+        stage: 'ranged_read',
+        command:
+          'env ' + envs + ' /bin/bash -c ' + shellQuote(buildSandboxReadPrerequisiteProbeCommand()),
+      },
+      { stage: 'filesystem_alias', command: buildSkillsAliasProbeCommand(policy) },
+      { stage: 'isolation', command: buildOpenSandboxToolCommand('true', policy) },
+    ];
+    const command = [
+      'set -eu',
+      ...probes.map(({ stage, command }) =>
+        [
+          'if ' + command + '; then',
+          '  :',
+          'else',
+          '  probe_exit=$?',
+          "  printf '%s:%s\\n' " +
+            shellQuote(WRITE_POLICY_PROBE_FAILURE + stage) +
+            ' "$probe_exit" >&2',
+          '  exit "$probe_exit"',
+          'fi',
+        ].join('\n'),
+      ),
+    ].join('\n');
+    const timeoutMs = 3 * SANDBOX_READ_TIMEOUT_MS;
+    const result = await this.runCommand(command, {
+      purpose: 'write_policy',
+      timeoutMs,
+      requestTimeoutSeconds: Math.ceil(timeoutMs / 1_000) + 5,
     });
-    if (readProbe.exitCode !== 0) {
-      throw new Error(
-        `OpenSandbox ranged-read prerequisite probe failed: ${summarizeCommandOutput(
-          readProbe.stderr,
-        )}`,
-      );
-    }
-    const aliasProbe = await this.runCommand(buildSkillsAliasProbeCommand(policy));
-    if (aliasProbe.exitCode !== 0) {
-      throw new Error(`OpenSandbox filesystem-alias probe failed: ${aliasProbe.stderr}`);
-    }
-    const result = await this.runCommand(buildOpenSandboxToolCommand('true', policy));
     if (result.exitCode !== 0) {
-      throw new Error(`OpenSandbox write-policy sandbox probe failed: ${result.stderr}`);
+      const stage = writePolicyFailureStage(result.stderr);
+      const label =
+        stage === 'ranged_read'
+          ? 'ranged-read prerequisite'
+          : stage === 'filesystem_alias'
+            ? 'filesystem-alias'
+            : 'write-policy sandbox';
+      throw new Error(
+        'OpenSandbox ' + label + ' probe failed: ' + summarizeCommandOutput(result.stderr),
+      );
     }
   }
 
@@ -440,6 +472,7 @@ class OpenSandboxHandle implements SandboxHandle {
       timeoutMs?: number;
       envs?: Record<string, string>;
       requestTimeoutSeconds?: number;
+      purpose?: CommandPurpose;
     } = {},
   ): Promise<CommandExecution> {
     const commandRequestTimeoutSeconds =
@@ -454,22 +487,76 @@ class OpenSandboxHandle implements SandboxHandle {
     if (opts.timeoutMs !== undefined) body['timeout'] = Math.round(opts.timeoutMs);
     if (opts.envs !== undefined) body['envs'] = opts.envs;
 
-    const response = await this.execdFetch(
-      '/command',
-      {
-        method: 'POST',
-        headers: {
-          accept: 'text/event-stream',
-          'content-type': 'application/json',
+    const commandSequence = ++this.commandSequence;
+    const startedAt = new Date().toISOString();
+    const start = performance.now();
+    const timing: {
+      headers_ms?: number;
+      first_event_ms?: number;
+      execution_complete_ms?: number;
+      stream_end_ms?: number;
+    } = {};
+    let status: number | undefined;
+    let result: 'ok' | 'command_error' | 'transport_error' = 'transport_error';
+    let failedProbe: string | undefined;
+    try {
+      const response = await this.execdFetch(
+        '/command',
+        {
+          method: 'POST',
+          headers: {
+            accept: 'text/event-stream',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify(body),
         },
-        body: JSON.stringify(body),
-      },
-      requestTimeoutSeconds,
-    );
-    if (!response.ok) {
-      throw new Error(await formatHttpError(response, 'OpenSandbox command failed'));
+        requestTimeoutSeconds,
+      );
+      status = response.status;
+      timing.headers_ms = Math.round(performance.now() - start);
+      if (!response.ok) {
+        throw new Error(await formatHttpError(response, 'OpenSandbox command failed'));
+      }
+      const execution = await consumeCommandStream(
+        response,
+        requestTimeoutSeconds * 1_000,
+        (event) => {
+          const elapsed = Math.round(performance.now() - start);
+          timing.first_event_ms ??= elapsed;
+          if (event.type === 'execution_complete') timing.execution_complete_ms ??= elapsed;
+        },
+        () => {
+          timing.stream_end_ms = Math.round(performance.now() - start);
+        },
+      );
+      result = execution.exitCode === 0 ? 'ok' : 'command_error';
+      if (opts.purpose === 'write_policy') failedProbe = writePolicyFailureStage(execution.stderr);
+      return execution;
+    } finally {
+      // Never log command text, paths, output, endpoint URLs, or transport envs.
+      try {
+        console.info(
+          JSON.stringify({
+            event: 'opensandbox.command_timing',
+            sandbox_id: this.id,
+            command_sequence: commandSequence,
+            purpose: opts.purpose ?? 'command',
+            started_at: startedAt,
+            http_status: status,
+            result,
+            failed_probe: failedProbe,
+            ...timing,
+            total_ms: Math.round(performance.now() - start),
+            terminal_to_eof_ms:
+              timing.execution_complete_ms !== undefined && timing.stream_end_ms !== undefined
+                ? Math.max(0, timing.stream_end_ms - timing.execution_complete_ms)
+                : undefined,
+          }),
+        );
+      } catch {
+        /* Observability must not alter command success or failure. */
+      }
     }
-    return await consumeCommandStream(response, requestTimeoutSeconds * 1_000);
   }
 
   async execdFetch(
@@ -645,27 +732,35 @@ class OpenSandboxFiles implements SandboxFiles {
 async function consumeCommandStream(
   response: Response,
   streamTimeoutMs: number,
+  onEvent?: (event: ServerStreamEvent) => void,
+  onEnd?: () => void,
 ): Promise<CommandExecution> {
   const stdoutParts: string[] = [];
   const stderrParts: string[] = [];
   let complete = false;
   let exitCode: number | null = null;
 
-  await readJsonEvents(response, streamTimeoutMs, (event) => {
-    if (event.type === 'stdout' && event.text) stdoutParts.push(event.text);
-    if (event.type === 'stderr' && event.text) stderrParts.push(event.text);
-    if (event.type === 'execution_complete') complete = true;
-    if (event.type === 'error') {
-      const value = event.error?.['evalue'] ?? event.error?.['value'];
-      const parsed =
-        typeof value === 'string' && /^-?\d+$/.test(value.trim())
-          ? Number(value.trim())
-          : Number.NaN;
-      // An explicit error event is always a failed command, even when a
-      // buggy/malicious execd reports evalue=0.
-      exitCode = Number.isFinite(parsed) && parsed !== 0 ? parsed : 1;
-    }
-  });
+  await readJsonEvents(
+    response,
+    streamTimeoutMs,
+    (event) => {
+      onEvent?.(event);
+      if (event.type === 'stdout' && event.text) stdoutParts.push(event.text);
+      if (event.type === 'stderr' && event.text) stderrParts.push(event.text);
+      if (event.type === 'execution_complete') complete = true;
+      if (event.type === 'error') {
+        const value = event.error?.['evalue'] ?? event.error?.['value'];
+        const parsed =
+          typeof value === 'string' && /^-?\d+$/.test(value.trim())
+            ? Number(value.trim())
+            : Number.NaN;
+        // An explicit error event is always a failed command, even when a
+        // buggy/malicious execd reports evalue=0.
+        exitCode = Number.isFinite(parsed) && parsed !== 0 ? parsed : 1;
+      }
+    },
+    onEnd,
+  );
 
   return {
     stdout: stdoutParts.join('\n'),
@@ -678,9 +773,13 @@ async function readJsonEvents(
   response: Response,
   streamTimeoutMs: number,
   onEvent: (event: ServerStreamEvent) => void,
+  onEnd?: () => void,
 ): Promise<void> {
   const body = response.body;
-  if (!body) return;
+  if (!body) {
+    onEnd?.();
+    return;
+  }
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
@@ -696,7 +795,10 @@ async function readJsonEvents(
   try {
     while (true) {
       const { done, value } = await Promise.race([reader.read(), timedOut]);
-      if (done) break;
+      if (done) {
+        onEnd?.();
+        break;
+      }
       bytesRead += value.byteLength;
       if (bytesRead > MAX_COMMAND_STREAM_BYTES) {
         throw new Error(
@@ -840,6 +942,16 @@ function sleep(ms: number): Promise<void> {
 
 function errorMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
+}
+
+function shellQuote(value: string): string {
+  return "'" + escapeSingleQuotes(value) + "'";
+}
+
+function writePolicyFailureStage(stderr: string): string | undefined {
+  return stderr.match(
+    /orca_write_policy_probe_failed:(ranged_read|filesystem_alias|isolation):[0-9]+/,
+  )?.[1];
 }
 
 /** Match uploaded resources and the in-sandbox harness in the outer UID namespace. */

@@ -28,6 +28,32 @@ const FIRST_TOPIC = 'orca.ws_dispatcher.sessions.ses_first.events';
 const SECOND_TOPIC = 'orca.ws_dispatcher.sessions.ses_second.events';
 
 describe('Dispatcher Kafka discovery and replacement', () => {
+  it('uses a short fetch wait for initial, topic replacement, and crash recovery consumers', async () => {
+    const kafka = new FakeKafka([FIRST_TOPIC]);
+    const dispatcher = makeDispatcher(kafka);
+
+    try {
+      await dispatcher.start();
+      expect(kafka.consumerConfigs).toHaveLength(1);
+
+      kafka.topics = [FIRST_TOPIC, SECOND_TOPIC];
+      await rediscover(dispatcher);
+      expect(kafka.consumerConfigs).toHaveLength(2);
+
+      kafka.consumers[1]!.emitCrash();
+      await rediscover(dispatcher);
+      expect(kafka.consumerConfigs).toHaveLength(3);
+      for (const config of kafka.consumerConfigs) {
+        expect(config.maxWaitTimeInMs).toBe(250);
+        expect(await config.retry?.restartOnFailure?.(new Error('broker unavailable'))).toBe(false);
+      }
+      expect(activeTopics(dispatcher)).toEqual([FIRST_TOPIC, SECOND_TOPIC]);
+      expect(dispatcher.readiness()).toEqual({ ready: true, reasons: [] });
+    } finally {
+      await dispatcher.stop();
+    }
+  });
+
   it('commits a permanent preparation failure and the following interrupt without seeking or spawning', async () => {
     const kafka = new FakeKafka([FIRST_TOPIC]);
     const store = new TerminalGateStore();

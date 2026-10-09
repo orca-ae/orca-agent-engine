@@ -8,6 +8,15 @@ import { entryToEvent, eventToEntry, isClaudeSessionEntryEvent } from './event-m
 
 export const MAX_CONCURRENT_SESSION_THREADS = 25;
 
+interface ReadSnapshot {
+  entries: Map<string, SessionStoreEntry[]>;
+  subpaths: Set<string>;
+}
+
+interface ReadScope {
+  snapshot?: Promise<ReadSnapshot>;
+}
+
 /**
  * Implements the Claude Agent SDK's `SessionStore` over a `TranscriptStore`.
  *
@@ -46,6 +55,7 @@ export class ClaudeAgentSdkAdapter implements SessionStore {
   private readonly sdkToOrca = new Map<string, string>();
   private readonly appendLocks = new Map<string, Promise<void>>();
   private readonly activeThreadSubpathCache = new Map<string, Set<string>>();
+  private readonly readScopes = new Map<string, ReadScope>();
 
   constructor(
     private readonly store: TranscriptStore,
@@ -66,6 +76,52 @@ export class ClaudeAgentSdkAdapter implements SessionStore {
   /** Resolve an SDK key to the orca-side session id. Verbatim when unmapped. */
   private resolveOrcaSessionId(sdkSessionId: string): string {
     return this.sdkToOrca.get(sdkSessionId) ?? sdkSessionId;
+  }
+
+  /** Share resume reads only while this SDK query owns the scope. */
+  beginReadScope(orcaSessionId: string): () => void {
+    if (this.readScopes.has(orcaSessionId)) {
+      throw new Error('Claude session already has an active read scope');
+    }
+    const scope: ReadScope = {};
+    this.readScopes.set(orcaSessionId, scope);
+    return () => {
+      if (this.readScopes.get(orcaSessionId) === scope) this.readScopes.delete(orcaSessionId);
+    };
+  }
+
+  private scopedReadSnapshot(orcaSessionId: string): Promise<ReadSnapshot> | undefined {
+    const scope = this.readScopes.get(orcaSessionId);
+    if (!scope) return undefined;
+    if (!scope.snapshot) {
+      const snapshot = this.readSnapshot(orcaSessionId);
+      scope.snapshot = snapshot;
+      void snapshot.catch(() => {
+        if (scope.snapshot === snapshot) delete scope.snapshot;
+      });
+    }
+    return scope.snapshot;
+  }
+
+  private async readSnapshot(orcaSessionId: string): Promise<ReadSnapshot> {
+    const snapshot: ReadSnapshot = { entries: new Map(), subpaths: new Set() };
+    for await (const event of this.store.read(this.workspaceId, orcaSessionId, {
+      fromCursor: '',
+      maxEvents: 0,
+      subpath: '*',
+    })) {
+      if (event.subpath) snapshot.subpaths.add(event.subpath);
+      if (event.producedBy !== 'harness' || !isClaudeSessionEntryEvent(event)) continue;
+      const entries = snapshot.entries.get(event.subpath) ?? [];
+      entries.push(eventToEntry(event));
+      snapshot.entries.set(event.subpath, entries);
+    }
+    return snapshot;
+  }
+
+  private invalidateReadSnapshot(orcaSessionId: string): void {
+    const scope = this.readScopes.get(orcaSessionId);
+    if (scope) delete scope.snapshot;
   }
 
   async append(key: SessionKey, entries: SessionStoreEntry[]): Promise<void> {
@@ -98,7 +154,14 @@ export class ClaudeAgentSdkAdapter implements SessionStore {
         entry,
       }),
     );
-    await this.store.append(this.workspaceId, orcaSessionId, events);
+    // Reads may race a write or its uncertain response. Never publish local entries
+    // as durable state, or retain a snapshot started before the append settled.
+    this.invalidateReadSnapshot(orcaSessionId);
+    try {
+      await this.store.append(this.workspaceId, orcaSessionId, events);
+    } finally {
+      this.invalidateReadSnapshot(orcaSessionId);
+    }
     if (subpath) {
       this.markSubpathActive(orcaSessionId, subpath);
     }
@@ -129,6 +192,11 @@ export class ClaudeAgentSdkAdapter implements SessionStore {
   async load(key: SessionKey): Promise<SessionStoreEntry[] | null> {
     const subpath = key.subpath ?? '';
     const orcaSessionId = this.resolveOrcaSessionId(key.sessionId);
+    const snapshot = this.scopedReadSnapshot(orcaSessionId);
+    if (snapshot) {
+      const entries = (await snapshot).entries.get(subpath) ?? [];
+      return entries.length === 0 ? null : structuredClone(entries);
+    }
     const out: SessionStoreEntry[] = [];
     for await (const e of this.store.read(this.workspaceId, orcaSessionId, {
       fromCursor: '',
@@ -146,12 +214,14 @@ export class ClaudeAgentSdkAdapter implements SessionStore {
    * SDK transcript entry on the given subpath (default = main transcript)?
    *
    * The Claude harness uses this to decide whether a turn must `resume` the SDK
-   * session (an existing session) versus create it (the first turn). Unlike
-   * {@link load} it early-returns on the first matching event instead of
-   * materializing the whole transcript. Takes the orca session id directly
+   * session (an existing session) versus create it (the first turn). In a query
+   * scope it shares the snapshot with load/listSubkeys; outside a scope it
+   * early-returns on the first matching event. Takes the orca session id directly
    * (callers already hold it) rather than an SDK `SessionKey`.
    */
   async hasClaudeTranscript(orcaSessionId: string, subpath = ''): Promise<boolean> {
+    const snapshot = this.scopedReadSnapshot(orcaSessionId);
+    if (snapshot) return ((await snapshot).entries.get(subpath)?.length ?? 0) > 0;
     for await (const e of this.store.read(this.workspaceId, orcaSessionId, {
       fromCursor: '',
       maxEvents: 0,
@@ -164,6 +234,8 @@ export class ClaudeAgentSdkAdapter implements SessionStore {
 
   async listSubkeys(key: SessionKey): Promise<string[]> {
     const orcaSessionId = this.resolveOrcaSessionId(key.sessionId);
+    const snapshot = this.scopedReadSnapshot(orcaSessionId);
+    if (snapshot) return [...(await snapshot).subpaths].sort();
     const subpaths = new Set<string>();
     for await (const e of this.store.read(this.workspaceId, orcaSessionId, {
       fromCursor: '',

@@ -4,6 +4,7 @@
 import { access } from 'node:fs/promises';
 import { beforeEach, describe, it, expect, vi } from 'vitest';
 import type { Event, ReadOptions, TailOptions, TranscriptStore } from '@orca/transcript-store';
+import type { Options } from '@anthropic-ai/claude-agent-sdk';
 
 const { queryMock } = vi.hoisted(() => ({ queryMock: vi.fn() }));
 
@@ -462,6 +463,47 @@ describe('ClaudeAgentSdkHarness managed-agent protocol', () => {
       }),
     ).rejects.toThrow(/resume probe failed/);
     expect(queryMock).not.toHaveBeenCalled();
+    await expect(
+      harness.submit({
+        kind: 'user.message',
+        payload: { content: [{ type: 'text', text: 'retry' }] },
+      }),
+    ).rejects.toThrow(/resume probe failed/);
+    expect(queryMock).not.toHaveBeenCalled();
+  });
+
+  it('shares SDK resume lookups within a query and refreshes the next query', async () => {
+    const prior = entryToEvent({
+      workspaceId: 'ws_test',
+      sessionId: 'ses_test',
+      subpath: '',
+      producedBy: 'harness',
+      entry: { type: 'user', uuid: '11111111-1111-1111-1111-111111111111' },
+    });
+    const store = buildStoreReturning([prior]);
+    const read = vi.spyOn(store, 'read');
+    queryMock.mockImplementation(({ options }: { options: Options }) => ({
+      async *[Symbol.asyncIterator]() {
+        const key = { projectKey: 'orca-test', sessionId: options.resume! };
+        await options.sessionStore!.listSubkeys!(key);
+        expect(await options.sessionStore!.load(key)).toHaveLength(1);
+        expect(await options.sessionStore!.load(key)).toHaveLength(1);
+        yield* [];
+      },
+    }));
+    const harness = harnessWithStore(store);
+    try {
+      await harness.start({ workspaceId: 'ws_test', sessionId: 'ses_test', agentSnapshot: {} });
+      for (let turn = 0; turn < 2; turn++) {
+        await harness.submit({
+          kind: 'user.message',
+          payload: { content: [{ type: 'text', text: 'resume' }] },
+        });
+        expect(read).toHaveBeenCalledTimes(turn + 1);
+      }
+    } finally {
+      await harness.stop('idle.timeout');
+    }
   });
 
   it('does not start an SDK query when stop races a pending resume probe', async () => {
@@ -502,6 +544,8 @@ describe('ClaudeAgentSdkHarness managed-agent protocol', () => {
     await expect(stop).resolves.toBeUndefined();
     expect(queryMock).not.toHaveBeenCalled();
     await expect(access(configDir!)).rejects.toMatchObject({ code: 'ENOENT' });
+    const release = adapter.beginReadScope('ses_test');
+    release();
   });
 
   it('does not bypass SDK permissions for managed-agent turns', async () => {
@@ -1354,7 +1398,9 @@ describe('ClaudeAgentSdkHarness managed-agent protocol', () => {
   it('surfaces a terminal session.error + idle when the query crashes while parked on requires_action', async () => {
     const query = rejectableAsyncIterable();
     queryMock.mockReturnValueOnce(query.iterable);
-    const harness = buildHarness();
+    const store = buildStubStore();
+    const read = vi.spyOn(store, 'read');
+    const harness = harnessWithStore(store);
     await harness.start({
       workspaceId: 'ws_test',
       sessionId: 'ses_test',
@@ -1362,7 +1408,7 @@ describe('ClaudeAgentSdkHarness managed-agent protocol', () => {
         tool_permission_policies: { mcp__github__create_issue: 'always_ask' },
       },
     });
-    void harness.submit({
+    const submitting = harness.submit({
       kind: 'user.message',
       payload: { content: [{ type: 'text', text: 'create issue' }] },
     });
@@ -1387,6 +1433,10 @@ describe('ClaudeAgentSdkHarness managed-agent protocol', () => {
       payload: { stop_reason: { type: 'requires_action' } },
     });
     expect(harness.hasPendingRequiredAction()).toBe(true);
+    await submitting;
+    const sdkStore = (queryMock.mock.calls[0]?.[0]?.options as Options).sessionStore!;
+    await sdkStore.load({ projectKey: 'orca-test', sessionId: 'ses_test' });
+    expect(read).toHaveBeenCalledTimes(1);
 
     // The Claude CLI subprocess dies while awaiting the human decision.
     query.crash(new Error('Claude Code process exited with code 1'));
@@ -1402,6 +1452,8 @@ describe('ClaudeAgentSdkHarness managed-agent protocol', () => {
       payload: { stop_reason: { type: 'retries_exhausted' } },
     });
     expect(harness.hasPendingRequiredAction()).toBe(false);
+    await sdkStore.load({ projectKey: 'orca-test', sessionId: 'ses_test' });
+    expect(read).toHaveBeenCalledTimes(2);
   });
 
   it('does not resume a stale required-action gate after acceptance races with query failure', async () => {

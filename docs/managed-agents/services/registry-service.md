@@ -123,6 +123,28 @@ The gate is not a distributed rate limiter and does not reserve database connect
 authentication work before admission. Operators enable and tune it against their measured
 pool budget and mixed workload; disabling it restores ungated reads.
 
+### Database connection retention
+
+The Registry's file and memory pools expose independent idle-retention settings:
+`FILESTORE_POOL_MIN` and `MEMORYSTORE_POOL_MIN` default to `0`, while
+`FILESTORE_POOL_IDLE_TIMEOUT_MS` and `MEMORYSTORE_POOL_IDLE_TIMEOUT_MS` default to `10000`.
+These defaults preserve node-postgres's existing idle-eviction behavior. The minimum is a
+non-negative integer no greater than that pool's `*_POOL_MAX`; the timeout is a positive
+integer no greater than `2147483647` milliseconds. Invalid settings fail startup.
+
+These settings use node-postgres's native pool behavior: the minimum suppresses scheduling
+idle eviction when the pool is at or below that connection count. It does not pre-create
+connections, refill disconnected clients, or cancel already-scheduled eviction timers.
+For example, setting both minima to `1` and both timeouts to `60000` retains an established
+connection in each low-traffic pool and delays eviction of excess idle clients. Idle-client
+errors are logged; the driver removes the failed client and subsequent requests can open
+a replacement. In-flight query failures still propagate to their callers.
+
+The settings affect only the Registry's file and memory pools, not its metadata/transcript
+pools or the Harness. They neither cache query results nor change pool ceilings, authorization
+checks, or read consistency. Connection budgets include all services, replicas and the
+temporary overlap of old and new Pods during rolling updates.
+
 ### Performance metrics
 
 The internal `/metrics` endpoint exposes metrics from all three listeners and all enabled pools.

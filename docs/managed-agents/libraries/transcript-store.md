@@ -139,6 +139,10 @@ client, Postgres pool, or Pulsar client.
 - **Per-session topic** (single partition). Topic name: `orca.{workspace_id}.sessions.{session_id}.events` in raw mode, or `orca.{workspace_id}.sessions.{session_id}.events-avro` in Avro mode, optionally prefixed (see _Topic prefix_ below). Encoding selects one topic set for all sessions, not a per-session format.
 - **Topic creation.** Auto-created on first produce in dev (Apache Kafka KRaft). Elsewhere, topic creation follows the broker's configuration.
 - **Read / Tail.** Each call uses a kafkajs consumer with a fresh throwaway `groupId` per call (no group commit). `seek()` to `from_cursor` then poll. `Tail` stays open until canceled or a terminal error occurs.
+  Bounded reads set KafkaJS `maxWaitTimeInMs=100` to limit the broker wait for an empty
+  in-flight fetch during consumer shutdown. Unbounded tails retain the KafkaJS default.
+  Reads still await consumer cleanup before returning; this setting does not change
+  the snapshot high-watermark, cursor semantics, or consumer-group join behavior.
   When an unbounded tail's subscription encounters `UNKNOWN_TOPIC_OR_PARTITION`, it retries three
   times after 250, 500, and 1000 ms to tolerate the topic-creation window. These waits are cancelable
   and retain the original start offset, including offset 0 for a missing topic; they do not resample

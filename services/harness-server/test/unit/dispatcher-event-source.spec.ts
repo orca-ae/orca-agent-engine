@@ -54,6 +54,254 @@ import type {
 } from '../../src/clients/registry.js';
 
 describe('Dispatcher with custom SessionEventSource', () => {
+  it('uses one cold recovery scan and drains older deferred work before the new message', async () => {
+    const source = new FakeEventSource();
+    const store = new RecordingStore();
+    const ws = 'ws_cold_recovery';
+    const session = 'ses_cold_recovery';
+    const marker = (id: string, kind: string, userEventId: string, seq: number): Event => ({
+      ...userMessage(id, ws, session, '', seq),
+      producedBy: 'harness',
+      kind,
+      payload: Buffer.from(JSON.stringify({ user_event_id: userEventId })),
+    });
+    store.seed([
+      {
+        ...userMessage('evt_system_applied', ws, session, 'accepted instruction', 1),
+        kind: 'system.message',
+      },
+      {
+        ...userMessage('evt_system_unaccepted', ws, session, 'unaccepted instruction', 2),
+        kind: 'system.message',
+      },
+      marker('evt_system_processed', 'session.user_event_processed', 'evt_system_applied', 3),
+      userMessage('evt_done', ws, session, 'already completed', 4),
+      marker('evt_done_marker', 'session.user_event_completed', 'evt_done', 5),
+      userMessage('evt_old_first', ws, session, 'older first', 6),
+      userMessage('evt_old_second', ws, session, 'older second', 7),
+      userMessage('evt_already_submitted', ws, session, 'already submitted', 8),
+      marker('evt_defer_second', 'session.deferred_user_message', 'evt_old_second', 11),
+      marker('evt_defer_first', 'session.deferred_user_message', 'evt_old_first', 10),
+      marker('evt_defer_submitted', 'session.deferred_user_message', 'evt_already_submitted', 12),
+      marker(
+        'evt_submitted',
+        'session.deferred_user_message_submitted',
+        'evt_already_submitted',
+        13,
+      ),
+    ]);
+    const harness = new TerminalEchoHarness();
+    const start = vi.spyOn(harness, 'start');
+    const submit = vi.spyOn(harness, 'submit');
+    const dispatcher = new Dispatcher({
+      eventSource: source,
+      store,
+      groupId: 'cold-recovery-snapshot',
+      anthropicApiKey: 'unused',
+      modelDefault: 'fake',
+      harnessFactory: () => harness,
+    });
+    try {
+      await dispatcher.start();
+      await source.emit(userMessage('evt_new', ws, session, 'new message', 20));
+      expect(store.readCalls).toBe(1);
+      expect(start.mock.calls[0]?.[0]?.agentSnapshot.system).toContain('accepted instruction');
+      expect(start.mock.calls[0]?.[0]?.agentSnapshot.system).not.toContain(
+        'unaccepted instruction',
+      );
+      expect(submit.mock.calls.map(([event]) => event.id)).toEqual([
+        'evt_old_first',
+        'evt_old_second',
+        'evt_new',
+      ]);
+      await source.emit(userMessage('evt_done', ws, session));
+      expect(submit).toHaveBeenCalledTimes(3);
+      expect(store.readCalls).toBe(1);
+      expect(
+        (dispatcher as unknown as { coldRecoveryScopes: Map<string, unknown> }).coldRecoveryScopes
+          .size,
+      ).toBe(0);
+    } finally {
+      await dispatcher.stop();
+    }
+  });
+
+  it('refreshes shared recovery projections when durable completion invalidates an in-flight scan', async () => {
+    const store = new RecordingStore();
+    const dispatcher = new Dispatcher({
+      store,
+      groupId: 'cold-recovery-race',
+      anthropicApiKey: 'unused',
+      modelDefault: 'fake',
+    });
+    const ws = 'ws_cold_race',
+      session = 'ses_cold_race',
+      key = ws + '/' + session;
+    const state = dispatcher as unknown as {
+      coldRecoveryScopes: Map<string, object>;
+      clearCompletedUserEventCache(key: string): void;
+      loadCompletedUserEventIds(ws: string, session: string): Promise<Set<string>>;
+      loadAppliedSystemMessages(ws: string, session: string): Promise<string[]>;
+      getDeferredUserMessageQueue(
+        ws: string,
+        session: string,
+        key: string,
+      ): Promise<{ items: unknown[] }>;
+    };
+    state.coldRecoveryScopes.set(key, {});
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const read = vi.spyOn(store, 'read');
+    read.mockImplementationOnce(async function* () {
+      await gate;
+      yield* [];
+    });
+    const pending = state.loadCompletedUserEventIds(ws, session);
+    await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(1));
+    store.seed([
+      {
+        ...userMessage('evt_completed_after_read', ws, session),
+        producedBy: 'harness',
+        kind: 'session.user_event_completed',
+        payload: Buffer.from(JSON.stringify({ user_event_id: 'evt_done_after_read' })),
+      },
+    ]);
+    state.clearCompletedUserEventCache(key);
+    release();
+    expect(await pending).toEqual(new Set(['evt_done_after_read']));
+    expect(await state.loadAppliedSystemMessages(ws, session)).toEqual([]);
+    expect((await state.getDeferredUserMessageQueue(ws, session, key)).items).toEqual([]);
+    expect(read).toHaveBeenCalledTimes(2);
+    await dispatcher.stop();
+    expect(state.coldRecoveryScopes.size).toBe(0);
+  });
+
+  it('does not retain failed recovery scopes across source retry', async () => {
+    const source = new FakeEventSource();
+    const store = new RecordingStore();
+    const read = vi.spyOn(store, 'read');
+    read.mockImplementationOnce(() => ({
+      [Symbol.asyncIterator]: () => ({
+        next: async () => {
+          throw new Error('recovery read failed');
+        },
+      }),
+    }));
+    const harness = new TerminalEchoHarness();
+    const dispatcher = new Dispatcher({
+      eventSource: source,
+      store,
+      groupId: 'cold-recovery-retry',
+      anthropicApiKey: 'unused',
+      modelDefault: 'fake',
+      harnessFactory: () => harness,
+    });
+    const event = userMessage('evt_cold_retry', 'ws_cold_retry', 'ses_cold_retry');
+    try {
+      await dispatcher.start();
+      await expect(source.emit(event)).rejects.toBeInstanceOf(RetryableSessionEventError);
+      expect(
+        (dispatcher as unknown as { coldRecoveryScopes: Map<string, unknown> }).coldRecoveryScopes
+          .size,
+      ).toBe(0);
+      await source.emit(event);
+      expect(harness.submitCount).toBe(1);
+      expect(read).toHaveBeenCalledTimes(2);
+    } finally {
+      await dispatcher.stop();
+    }
+  });
+
+  it('does not publish a cold recovery scan that resolves after shutdown', async () => {
+    const store = new RecordingStore();
+    const dispatcher = new Dispatcher({
+      store,
+      groupId: 'cold-recovery-stop',
+      anthropicApiKey: 'unused',
+      modelDefault: 'fake',
+    });
+    const state = dispatcher as unknown as {
+      coldRecoveryScopes: Map<string, object>;
+      loadAppliedSystemMessages(ws: string, session: string): Promise<string[]>;
+    };
+    state.coldRecoveryScopes.set('ws_cold_stop/ses_cold_stop', {});
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const read = vi.spyOn(store, 'read').mockImplementationOnce(async function* () {
+      await gate;
+      yield* [];
+    });
+    const pending = state.loadAppliedSystemMessages('ws_cold_stop', 'ses_cold_stop');
+    const rejected = expect(pending).rejects.toThrow();
+    await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(1));
+    await dispatcher.stop();
+    release();
+    await rejected;
+    expect(state.coldRecoveryScopes.size).toBe(0);
+    expect(read).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps scoped and standalone recovery projections equivalent', async () => {
+    const ws = 'ws_cold_equivalence',
+      session = 'ses_cold_equivalence',
+      key = ws + '/' + session;
+    const marker = (id: string, kind: string, userEventId: string, seq: number): Event => ({
+      ...userMessage(id, ws, session, '', seq),
+      producedBy: 'harness',
+      kind,
+      payload: Buffer.from(JSON.stringify({ user_event_id: userEventId })),
+    });
+    const events = [
+      { ...userMessage('evt_system', ws, session, 'accepted', 1), kind: 'system.message' },
+      marker('evt_processed', 'session.user_event_processed', 'evt_system', 2),
+      userMessage('evt_deferred', ws, session, 'pending', 3),
+      marker('evt_defer', 'session.deferred_user_message', 'evt_deferred', 4),
+      marker('evt_done', 'session.user_event_completed', 'evt_completed', 5),
+      { ...marker('evt_bad', 'session.user_event_completed', '', 6), payload: Buffer.from('{') },
+      {
+        ...userMessage('evt_foreign', 'ws_foreign', session, 'foreign', 1),
+        kind: 'system.message',
+      },
+    ];
+    const results: unknown[] = [];
+    for (const scoped of [false, true]) {
+      const store = new RecordingStore();
+      store.seed(events);
+      const dispatcher = new Dispatcher({
+        store,
+        groupId: 'cold-equivalence',
+        anthropicApiKey: 'unused',
+        modelDefault: 'fake',
+      });
+      const state = dispatcher as unknown as {
+        coldRecoveryScopes: Map<string, object>;
+        loadCompletedUserEventIds(ws: string, session: string): Promise<Set<string>>;
+        loadAppliedSystemMessages(ws: string, session: string): Promise<string[]>;
+        getDeferredUserMessageQueue(
+          ws: string,
+          session: string,
+          key: string,
+        ): Promise<{ items: unknown[] }>;
+      };
+      if (scoped) state.coldRecoveryScopes.set(key, {});
+      try {
+        results.push({
+          completed: [...(await state.loadCompletedUserEventIds(ws, session))].sort(),
+          system: await state.loadAppliedSystemMessages(ws, session),
+          deferred: (await state.getDeferredUserMessageQueue(ws, session, key)).items,
+        });
+        expect(store.readCalls).toBe(scoped ? 1 : 3);
+      } finally {
+        await dispatcher.stop();
+      }
+    }
+    expect(results[1]).toEqual(results[0]);
+  });
+
   it('wires Codex durable usage to OpenAI and the wrapper does not record it again', async () => {
     const turns = turnStoreFixture();
     const registry = {

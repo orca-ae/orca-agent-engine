@@ -209,6 +209,20 @@ policy used by the other remote runtimes.
 
 1. Subscribe to incoming control + user events through the backend event source. Kafka uses consumer groups on session topics; Postgres leases the earliest unprocessed event per workspace/session within each group; Pulsar uses a `KeyShared` subscription over the session-topic regex with the session ID as the message key.
 2. For each session it claims, instantiate the configured `AgentHarness` (Claude Agent SDK) plus its session adapter (`ClaudeAgentSdkAdapter`). The adapter calls into the `TranscriptStore` library in-process — the SDK sees it as its native `SessionStore`.
+   Claude SDK queries share one all-subpath transcript snapshot between the
+   create/resume probe, SDK history loads, and subkey lookup. The snapshot is
+   scoped to that query, not retained between turns. Failed reads and SDK
+   appends invalidate it; appends invalidate both before and after persistence,
+   including uncertain failures. Returned SDK entries are independent copies.
+   A query parked on required action retains its scope until the query settles;
+   startup failures, completion, and settled cancellation release it.
+   Active-thread capacity refreshes remain separate reads. Dispatcher cold
+   startup uses its own snapshot, separate from the SDK snapshot: one scan
+   supplies completion IDs, accepted system messages, and pending deferred
+   messages. It is discarded before model execution and on handler teardown.
+   Receipt completion, recovery-cache resets, and failed reads invalidate it;
+   in-flight invalidation refreshes the projections before use. Shutdown
+   fences outstanding scans so they cannot restore retired recovery state.
    For coordinator agents, dispatcher expands registry's resolved
    `multiagent.agents[]` refs into fixed-version runtime snapshots and passes
    them to Claude Agent SDK as `Options.agents`. Each subagent gets its own
@@ -426,6 +440,31 @@ If Registry reports that the Session is already archived, terminated, or
 deleted, the dispatcher acknowledges the event without publishing a new idle
 result or reopening the Session.
 
+### OpenSandbox command timing
+
+The Harness OpenSandbox adapter logs one JSON `opensandbox.command_timing` record
+per execd command. `sandbox_id`, `command_sequence`, and `started_at` correlate
+the command with sandbox setup and later tool execution. `purpose` distinguishes
+`fuse_prerequisites`, `filesystem_roots`, `write_policy`, and other `command` calls.
+No command text, file paths, endpoint URLs, stdout/stderr, or environment values
+appear in these timing records.
+
+`headers_ms`, `first_event_ms`, `execution_complete_ms`, and `stream_end_ms` are
+monotonic elapsed times from the command call; boundaries not reached are omitted.
+The first event is a decoded JSON event, not the first network byte.
+`terminal_to_eof_ms` measures the non-negative gap from the decoded completion
+event to stream EOF. `total_ms`, `http_status`, and `result` cover success,
+command errors, and transport failures. The reader still waits for EOF and
+preserves late error events; timing does not change stream completion semantics.
+
+`prepareWritePolicy` runs its ranged-read prerequisite, filesystem-alias, and
+UID/GID-1000 Bubblewrap probes sequentially in one execd command, with a 30-second
+combined command budget and 35-second transport budget. Only the ranged-read
+probe receives the existing controlled transport environment; the other probes
+retain their bootstrap environment and identity. The first failure stops later
+probes, preserves the command exit code, and records the bounded `failed_probe`
+stage. Active setup checks are not skipped.
+
 ### Kafka discovery, readiness, and metrics
 
 Kafka discovery uses `admin.listTopics()` every
@@ -435,6 +474,11 @@ paths canonicalize that one metadata snapshot and pass its exact topic list to
 `consumer.subscribe({ topics })`; the dispatcher never uses a regex
 subscription. A topic created after that snapshot is absent from the current
 consumer and is picked up by the next discovery tick.
+Dispatcher consumers set KafkaJS `maxWaitTimeInMs=250` to limit the broker wait
+for an empty in-flight fetch when replacement or shutdown awaits disconnect.
+This setting does not change the discovery interval, consumer-group join
+behavior, or TranscriptStore Read/Tail consumers. Disconnect still waits for
+in-flight work to settle before the replacement starts.
 
 When a snapshot changes, dispatcher connects and explicitly subscribes a
 candidate while the current consumer remains active. It disconnects the old

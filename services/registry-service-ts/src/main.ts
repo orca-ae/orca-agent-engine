@@ -145,7 +145,10 @@ async function buildTranscriptBackend(): Promise<{
 const fileStorePool = new Pool({
   connectionString: config.fileStoreDatabaseUrl,
   max: config.fileStorePoolMax,
+  min: config.fileStorePoolMin,
+  idleTimeoutMillis: config.fileStorePoolIdleTimeoutMs,
 });
+fileStorePool.on('error', (error) => console.error('file-store idle connection error', error));
 stopPoolObservers.push(observePostgresPool(fileStorePool, 'file'));
 await applyMigrations(fileStorePool);
 const s3Config: ConstructorParameters<typeof S3Client>[0] = {
@@ -182,7 +185,10 @@ const skillStore = new S3SkillStore({
 const memoryPool = new Pool({
   connectionString: config.memorystoreDatabaseUrl,
   max: config.memorystorePoolMax,
+  min: config.memorystorePoolMin,
+  idleTimeoutMillis: config.memorystorePoolIdleTimeoutMs,
 });
+memoryPool.on('error', (error) => console.error('memory-store idle connection error', error));
 stopPoolObservers.push(observePostgresPool(memoryPool, 'memory'));
 await applyMemoryMigrations(memoryPool);
 const memoryStore = new LocalMemoryStore({
