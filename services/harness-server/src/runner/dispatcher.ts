@@ -393,6 +393,16 @@ interface DeferredUserMessageQueue {
   items: DeferredUserMessage[];
 }
 
+interface ColdRecoverySnapshot {
+  completedUserEventIds: Set<string>;
+  appliedSystemMessages: string[];
+  deferredUserMessages: DeferredUserMessage[];
+}
+
+interface ColdRecoveryScope {
+  snapshot?: Promise<ColdRecoverySnapshot>;
+}
+
 interface CompanionSystemMessage {
   eventId: string;
   payload: unknown;
@@ -647,6 +657,7 @@ export class Dispatcher {
   /** Per-session cache rebuilt from durable completion markers on first source delivery. */
   private readonly completedUserEventIds = new Map<string, Set<string>>();
   private readonly completedUserEventLoads = new Map<string, Promise<Set<string>>>();
+  private readonly coldRecoveryScopes = new Map<string, ColdRecoveryScope>();
   /**
    * One pending source timestamp per accepted user.message turn. Entries are
    * registered at source ingestion, before runner setup or Kafka dispatch can
@@ -1477,6 +1488,8 @@ export class Dispatcher {
     const consumer = this.opts.kafka.consumer({
       groupId: this.opts.groupId,
       sessionTimeout: KAFKA_CONSUMER_SESSION_TIMEOUT_MS,
+      // Topic replacement awaits disconnect; bound the wait for an in-flight empty fetch.
+      maxWaitTimeInMs: 250,
       // Dispatcher replaces crashed consumers. KafkaJS auto-restart can finish
       // joining after disconnect() and steal partitions from that replacement.
       retry: { restartOnFailure: async () => false },
@@ -2153,6 +2166,37 @@ export class Dispatcher {
     source?: UserEventSource,
     lifecycleGeneration = this.lifecycleGeneration,
   ): Promise<void> {
+    this.assertLifecycleCurrent(lifecycleGeneration);
+    const runnerKey = runnerKeyFor(workspaceId, sessionId);
+    const scope =
+      !this.runners.has(runnerKey) && !this.coldRecoveryScopes.has(runnerKey)
+        ? ({} as ColdRecoveryScope)
+        : undefined;
+    if (scope) this.coldRecoveryScopes.set(runnerKey, scope);
+    try {
+      await this.handleUserEventWithRecovery(
+        workspaceId,
+        sessionId,
+        kind,
+        payload,
+        source,
+        lifecycleGeneration,
+      );
+    } finally {
+      if (scope && this.coldRecoveryScopes.get(runnerKey) === scope) {
+        this.coldRecoveryScopes.delete(runnerKey);
+      }
+    }
+  }
+
+  private async handleUserEventWithRecovery(
+    workspaceId: string,
+    sessionId: string,
+    kind: string,
+    payload: unknown,
+    source: UserEventSource | undefined,
+    lifecycleGeneration: number,
+  ): Promise<void> {
     const runnerKey = `${workspaceId}/${sessionId}`;
     this.assertLifecycleCurrent(lifecycleGeneration);
     // Resolve ownership for every event, including cold interrupts. Do not cache:
@@ -2328,6 +2372,9 @@ export class Dispatcher {
         throw new DeferredDrainBlockedError(workspaceId, sessionId);
       }
     }
+    // Recovery reads share a snapshot only through startup/pre-drain, never
+    // across model execution or a later turn's durable changes.
+    this.invalidateColdRecoverySnapshot(runnerKey);
     harnessEventSubmitTotal.inc({ workspace_id: workspaceId, kind });
     try {
       this.assertLifecycleCurrent(lifecycleGeneration);
@@ -2583,6 +2630,109 @@ export class Dispatcher {
     }
   }
 
+  private coldRecoverySnapshot(
+    workspaceId: string,
+    sessionId: string,
+  ): Promise<ColdRecoverySnapshot> | undefined {
+    const runnerKey = runnerKeyFor(workspaceId, sessionId);
+    const scope = this.coldRecoveryScopes.get(runnerKey);
+    if (!scope) return undefined;
+    const generation = this.lifecycleGeneration;
+    if (!scope.snapshot) {
+      const snapshot = this.readColdRecoverySnapshot(workspaceId, sessionId, generation);
+      scope.snapshot = snapshot;
+      void snapshot.catch(() => {
+        if (scope.snapshot === snapshot) delete scope.snapshot;
+      });
+    }
+    const pending = scope.snapshot;
+    return pending.then((snapshot) => {
+      this.assertLifecycleCurrent(generation);
+      if (this.coldRecoveryScopes.get(runnerKey) === scope && scope.snapshot === pending) {
+        return snapshot;
+      }
+      // Receipt recovery or teardown can invalidate a read while it is in flight.
+      return (
+        this.coldRecoverySnapshot(workspaceId, sessionId) ??
+        this.readColdRecoverySnapshot(workspaceId, sessionId, generation)
+      );
+    });
+  }
+
+  private invalidateColdRecoverySnapshot(runnerKey: string): void {
+    const scope = this.coldRecoveryScopes.get(runnerKey);
+    if (scope) delete scope.snapshot;
+  }
+
+  private async readColdRecoverySnapshot(
+    workspaceId: string,
+    sessionId: string,
+    generation: number,
+  ): Promise<ColdRecoverySnapshot> {
+    const completed = new Set<string>();
+    const systemMessages = new Map<string, { seq: number; text: string }>();
+    const processed = new Set<string>();
+    const userMessages = new Map<string, unknown>();
+    const deferred: Array<{ seq: number; userEventId: string }> = [];
+    const submitted = new Set<string>();
+    for await (const event of this.opts.store.read(workspaceId, sessionId, {
+      fromCursor: '',
+      maxEvents: 0,
+      subpath: '*',
+    })) {
+      if (event.kind === USER_EVENT_COMPLETED_KIND) {
+        const marker = parseJsonPayload(event.payload);
+        const id =
+          marker && typeof marker === 'object' && !Array.isArray(marker)
+            ? (marker as Record<string, unknown>)['user_event_id']
+            : undefined;
+        if (typeof id === 'string' && id.length > 0) completed.add(id);
+      }
+      if (event.producedBy === 'client') {
+        if (event.kind === 'system.message') {
+          const text = systemMessageText(parseJsonPayload(event.payload));
+          if (text) systemMessages.set(event.id, { seq: event.seq, text });
+        } else if (event.kind === 'user.message') {
+          const payload = parseJsonPayload(event.payload);
+          if (payload !== null) userMessages.set(event.id, payload);
+        }
+        continue;
+      }
+      if (event.producedBy !== 'harness') continue;
+      if (
+        ![
+          InternalTranscriptEventKind.userEventProcessed,
+          DEFERRED_USER_MESSAGE_KIND,
+          DEFERRED_USER_MESSAGE_SUBMITTED_KIND,
+          USER_EVENT_COMPLETED_KIND,
+        ].includes(event.kind)
+      )
+        continue;
+      const marker = parseJsonPayload(event.payload);
+      const id =
+        marker && typeof marker === 'object' && !Array.isArray(marker)
+          ? (marker as Record<string, unknown>)['user_event_id']
+          : undefined;
+      if (typeof id !== 'string') continue;
+      if (event.kind === InternalTranscriptEventKind.userEventProcessed) processed.add(id);
+      else if (event.kind === DEFERRED_USER_MESSAGE_KIND)
+        deferred.push({ seq: event.seq, userEventId: id });
+      else submitted.add(id);
+    }
+    this.assertLifecycleCurrent(generation);
+    return {
+      completedUserEventIds: completed,
+      appliedSystemMessages: [...systemMessages.entries()]
+        .filter(([id]) => processed.has(id))
+        .sort((a, b) => a[1].seq - b[1].seq)
+        .map(([, message]) => message.text),
+      deferredUserMessages: deferred
+        .sort((a, b) => a.seq - b.seq)
+        .filter((message) => !submitted.has(message.userEventId))
+        .map(({ userEventId }) => ({ userEventId, payload: userMessages.get(userEventId) })),
+    };
+  }
+
   private async loadAppliedSystemMessages(
     workspaceId: string,
     sessionId: string,
@@ -2590,6 +2740,8 @@ export class Dispatcher {
     const systemMessages = new Map<string, { seq: number; text: string }>();
     const processedEventIds = new Set<string>();
     try {
+      const snapshot = this.coldRecoverySnapshot(workspaceId, sessionId);
+      if (snapshot) return [...(await snapshot).appliedSystemMessages];
       for await (const event of this.opts.store.read(workspaceId, sessionId, {
         fromCursor: '',
         maxEvents: 0,
@@ -3071,6 +3223,18 @@ export class Dispatcher {
     const existing = this.deferredUserMessageQueues.get(runnerKey);
     if (existing?.loadedFromTranscript) return existing;
 
+    const snapshot = this.coldRecoverySnapshot(workspaceId, sessionId);
+    if (snapshot) {
+      const recovered = await snapshot;
+      const memoryPayloads = this.deferredUserMessagePayloads.get(runnerKey);
+      const queue = this.createDeferredQueue(runnerKey, true);
+      for (const message of recovered.deferredUserMessages) {
+        const payload = memoryPayloads?.get(message.userEventId) ?? message.payload;
+        if (payload !== undefined) queue.items.push({ userEventId: message.userEventId, payload });
+      }
+      return queue;
+    }
+
     const userMessages = new Map<string, unknown>();
     const deferred: Array<{ seq: number; userEventId: string }> = [];
     const submitted = new Set<string>();
@@ -3145,6 +3309,7 @@ export class Dispatcher {
   }
 
   private clearDeferredUserMessages(runnerKey: string): void {
+    this.invalidateColdRecoverySnapshot(runnerKey);
     this.deferredUserMessagePayloads.delete(runnerKey);
     this.deferredUserMessageQueues.delete(runnerKey);
     this.clearPendingStatusRunningLatency(runnerKey);
@@ -3175,6 +3340,11 @@ export class Dispatcher {
     this.completedUserEventIds.set(runnerKey, completed);
     const load = (async (): Promise<Set<string>> => {
       try {
+        const snapshot = this.coldRecoverySnapshot(workspaceId, sessionId);
+        if (snapshot) {
+          for (const id of (await snapshot).completedUserEventIds) completed.add(id);
+          return completed;
+        }
         for await (const event of this.opts.store.read(workspaceId, sessionId, {
           fromCursor: '',
           maxEvents: 0,
@@ -3370,6 +3540,7 @@ export class Dispatcher {
         const completed = this.completedUserEventIds.get(runnerKey) ?? new Set<string>();
         for (const userEventId of userEventIds) completed.add(userEventId);
         this.completedUserEventIds.set(runnerKey, completed);
+        this.invalidateColdRecoverySnapshot(runnerKey);
       },
     };
   }
@@ -3379,6 +3550,7 @@ export class Dispatcher {
   }
 
   private clearCompletedUserEventCache(runnerKey: string): void {
+    this.invalidateColdRecoverySnapshot(runnerKey);
     this.completedUserEventIds.delete(runnerKey);
     this.completedUserEventLoads.delete(runnerKey);
   }
@@ -3701,6 +3873,7 @@ export class Dispatcher {
     this.activeTurnUserEventIds.clear();
     this.completedUserEventIds.clear();
     this.completedUserEventLoads.clear();
+    this.coldRecoveryScopes.clear();
     this.pendingStatusRunningLatency.clear();
     this.activeStatusRunningLatency.clear();
     this.kafkaMessageWork.clear();

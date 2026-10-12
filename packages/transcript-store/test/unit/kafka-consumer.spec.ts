@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { describe, expect, it, vi } from 'vitest';
-import type { EachMessagePayload, Kafka, KafkaMessage } from 'kafkajs';
+import type { ConsumerConfig, EachMessagePayload, Kafka, KafkaMessage } from 'kafkajs';
 import { consumeSession } from '../../src/kafka/consumer.js';
 import { KafkaTranscriptStore } from '../../src/kafka-store.js';
 import { kafkaMessageToEventForRoute } from '../../src/kafka/serialize.js';
@@ -107,14 +107,19 @@ function fakeKafka(
   kafka: Kafka;
   admin: FakeAdmin;
   consumer: FakeConsumer;
+  consumerConfigs: ConsumerConfig[];
 } {
   const admin = new FakeAdmin(highWatermark);
   const consumer = new FakeConsumer(joinOnRun);
+  const consumerConfigs: ConsumerConfig[] = [];
   const kafka = {
     admin: () => admin,
-    consumer: () => consumer,
+    consumer: (config: ConsumerConfig) => {
+      consumerConfigs.push(config);
+      return consumer;
+    },
   } as unknown as Kafka;
-  return { kafka, admin, consumer };
+  return { kafka, admin, consumer, consumerConfigs };
 }
 
 async function waitFor(predicate: () => boolean, timeoutMs = 1000): Promise<void> {
@@ -127,6 +132,35 @@ async function waitFor(predicate: () => boolean, timeoutMs = 1000): Promise<void
 }
 
 describe('consumeSession', () => {
+  it.each(['bounded', 'unbounded'] as const)(
+    'only overrides fetch wait for bounded reads (%s)',
+    async (mode) => {
+      const { kafka, consumerConfigs } = fakeKafka('0');
+      const handle = consumeSession(
+        kafka,
+        {
+          workspaceId: 'ws_a',
+          sessionId: 'ses_a',
+          fromCursor: '',
+          subpath: '',
+          mode,
+          signal: new AbortController().signal,
+        },
+        { onEvent: vi.fn(), onEnd: vi.fn() },
+      );
+      try {
+        expect(consumerConfigs).toHaveLength(1);
+        if (mode === 'bounded') {
+          expect(consumerConfigs[0]).toHaveProperty('maxWaitTimeInMs', 100);
+        } else {
+          expect(consumerConfigs[0]).not.toHaveProperty('maxWaitTimeInMs');
+        }
+      } finally {
+        await handle.stop();
+      }
+    },
+  );
+
   it.each(['read', 'tail'] as const)(
     'store %s uses the avro topic set and skips stale raw routes without decoding',
     async (operation) => {

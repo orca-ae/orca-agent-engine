@@ -30,6 +30,70 @@ const DISCOVERY_INTERVAL_MS = 100;
 const STAGE_DEADLINE_MS = 90_000;
 
 describe('Dispatcher real Kafka topic discovery regression', () => {
+  it('performs one authoritative Kafka read for cold dispatcher recovery', async () => {
+    const suffix = Date.now().toString(36);
+    const workspaceId = 'ws_cold_recovery_' + suffix;
+    const sessionId = 'ses_cold_recovery_' + suffix;
+    const groupId = 'harness-cold-recovery-' + suffix;
+    const outputs = new RecordedOutputs();
+    const executions = new ExecutionLedger();
+    const recorded = new RecordingTranscriptStore(outputs);
+    const backing = new KafkaTranscriptStore({ kafka: createKafka('cold-store-' + suffix) });
+    let reads = 0;
+    const store: TranscriptStore = {
+      append: async (ws, session, events) => {
+        const ids = await backing.append(ws, session, events);
+        await recorded.append(ws, session, events);
+        return ids;
+      },
+      read: (ws, session, options) => {
+        reads++;
+        return backing.read(ws, session, options);
+      },
+      tail: (ws, session, options) => backing.tail(ws, session, options),
+      archive: (ws, session) => backing.archive(ws, session),
+      close: () => backing.close(),
+    };
+    const dispatcher = new Dispatcher({
+      kafka: createKafka('cold-dispatcher-' + suffix),
+      groupId,
+      store,
+      topicPattern: workspaceTopicPattern(workspaceId),
+      topicRediscoverIntervalMs: DISCOVERY_INTERVAL_MS,
+      anthropicApiKey: 'unused',
+      modelDefault: 'fake',
+      harnessFactory: (_ws, id) => new AcceptanceRecordingHarness(id, executions),
+    });
+    const admin = createKafka('cold-admin-' + suffix).admin();
+    const topics = new Set<string>();
+    try {
+      await admin.connect();
+      const messages = makeMessages(workspaceId, [sessionId], 'cold-recovery', suffix);
+      await appendConcurrently(backing, messages, topics);
+      await dispatcher.start();
+      await waitForStage({
+        label: 'one-read cold recovery',
+        admin,
+        groupId,
+        dispatchers: [dispatcher],
+        newMessages: messages,
+        expectedMessages: messages,
+        outputs,
+        executions,
+      });
+      expect(reads).toBe(1);
+    } finally {
+      await dispatcher.stop().catch(() => {});
+      await backing.close().catch(() => {});
+      await admin.deleteGroups([groupId]).catch(() => {});
+      try {
+        await deleteTopicsAndWait(admin, topics);
+      } finally {
+        await admin.disconnect();
+      }
+    }
+  }, 60_000);
+
   it('retires a crashed consumer without an automatic restart joining after replacement', async () => {
     const suffix = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
     const workspaceId = `ws_dispatcher_restart_${suffix}`;

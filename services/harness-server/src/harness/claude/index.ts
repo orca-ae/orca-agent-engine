@@ -549,6 +549,8 @@ export class ClaudeAgentSdkHarness implements AgentHarness {
       finishStartup();
       if (this.queryStartup === startup) this.queryStartup = null;
     };
+    let releaseReadScope: (() => void) | undefined;
+    let queryOwnsReadScope = false;
 
     try {
       const env: Record<string, string> = {};
@@ -571,6 +573,7 @@ export class ClaudeAgentSdkHarness implements AgentHarness {
       // route to the correct transcript-store topic.
       const sdkSessionId = deriveClaudeSessionId(this.opts.sessionId);
       this.opts.adapter.registerSession(sdkSessionId, this.opts.sessionId);
+      releaseReadScope = this.opts.adapter.beginReadScope(this.opts.sessionId);
 
       // Session continuity. The SDK's CLI subprocess CREATES a session
       // for `sessionId` on the first turn and FAILS — "Claude Code process exited
@@ -970,11 +973,13 @@ export class ClaudeAgentSdkHarness implements AgentHarness {
           },
         )
         .finally(() => {
+          releaseReadScope?.();
           this.runtimeSubagentTypeById.clear();
           this.currentAbort = null;
           this.currentQuery = null;
         });
       this.currentQuery = currentQuery;
+      queryOwnsReadScope = true;
       completeStartup();
       void currentQuery.catch((err) => {
         console.error('Claude Agent SDK query failed', err);
@@ -1002,6 +1007,9 @@ export class ClaudeAgentSdkHarness implements AgentHarness {
       });
       await this.waitForQueryIdleOrDone(currentQuery);
     } finally {
+      // A parked requires_action returns before the query finishes. Its query
+      // retains the scope; startup failures and early exits release it here.
+      if (!queryOwnsReadScope) releaseReadScope?.();
       completeStartup();
     }
   }

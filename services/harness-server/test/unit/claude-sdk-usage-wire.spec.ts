@@ -16,6 +16,23 @@ import { InMemorySandboxRuntime } from '../../src/sandbox/in-memory/runtime.js';
 // Uses the real pinned SDK subprocess and MCP transport against a local Messages
 // API fixture. In particular canUseTool runs independently of the SDK iterator.
 describe('Claude SDK final model-call usage and tool permissions', () => {
+  it('shares a single transcript read during real SDK warm resume', async () => {
+    const fixture = await startFixture(async () => undefined, false);
+    try {
+      await fixture.submit();
+      expect(fixture.transcriptReads).toHaveLength(1);
+      await fixture.harness.submit({
+        id: 'evt_usage_wire_second',
+        kind: 'user.message',
+        payload: { content: [{ type: 'text', text: 'Continue the fixture conversation.' }] },
+      });
+      expect(fixture.transcriptReads).toEqual(['*', '*']);
+      expect(fixture.callsByRole.parent).toBe(2);
+    } finally {
+      await fixture.close();
+    }
+  }, 30_000);
+
   it('records final cumulative output and cache usage once across multiple content blocks', async () => {
     const onUsage = vi.fn<NonNullable<ClaudeHarnessOptions['onUsage']>>(async () => undefined);
     const fixture = await startFixture(onUsage, false);
@@ -314,19 +331,23 @@ async function startFixture(
   const address = server.address();
   if (address === null || typeof address === 'string') throw new Error('missing fixture port');
   const events: Event[] = [];
+  const transcriptReads: string[] = [];
   const store: TranscriptStore = {
     append: async (_w, _s, appended) => {
       events.push(...appended);
       return appended.map((event) => event.id);
     },
-    read: (_w, _s, options) => ({
-      async *[Symbol.asyncIterator]() {
-        for (const event of events) {
-          if (options.subpath === '*' || (event.subpath ?? '') === (options.subpath ?? ''))
-            yield event;
-        }
-      },
-    }),
+    read: (_w, _s, options) => {
+      transcriptReads.push(options.subpath);
+      return {
+        async *[Symbol.asyncIterator]() {
+          for (const event of [...events]) {
+            if (options.subpath === '*' || (event.subpath ?? '') === (options.subpath ?? ''))
+              yield event;
+          }
+        },
+      };
+    },
     tail: () => ({
       async *[Symbol.asyncIterator]() {
         yield* [];
@@ -406,6 +427,7 @@ async function startFixture(
   });
   return {
     harness,
+    transcriptReads,
     observed,
     sandbox,
     write,

@@ -135,6 +135,11 @@ export interface ServiceConfig {
   transcriptStorePoolMax: number;
   fileStorePoolMax: number;
   memorystorePoolMax: number;
+  /** Idle connection retention for the Registry's file and memory pools only. */
+  fileStorePoolMin: number;
+  memorystorePoolMin: number;
+  fileStorePoolIdleTimeoutMs: number;
+  memorystorePoolIdleTimeoutMs: number;
   /** Run the cron Trigger planner and dispatcher in this Registry process. */
   triggerSchedulerEnabled: boolean;
   triggerReconcileIntervalMs: number;
@@ -329,6 +334,24 @@ function parsePositiveInteger(env: NodeJS.ProcessEnv, name: string, fallback: nu
   const value = Number(raw);
   if (!Number.isInteger(value) || value < 1) {
     throw new Error(`${name}=${raw} is not a positive integer`);
+  }
+  return value;
+}
+
+function parsePoolMinimum(env: NodeJS.ProcessEnv, name: string, max: number): number {
+  const raw = optionalEnv(env, name);
+  if (raw === undefined) return 0;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 0 || value > max) {
+    throw new Error(`${name}=${raw} must be an integer between 0 and ${max}`);
+  }
+  return value;
+}
+
+function parsePoolIdleTimeoutMs(env: NodeJS.ProcessEnv, name: string): number {
+  const value = parsePositiveInteger(env, name, 10_000);
+  if (value > 2_147_483_647) {
+    throw new Error(`${name}=${value} exceeds the maximum timer delay of 2147483647 ms`);
   }
   return value;
 }
@@ -647,6 +670,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServiceConfig 
   const secretStoreMode = parseSecretStoreMode(env);
   const internalAuthMode = parseInternalAuthMode(env);
   const s3StaticCredentials = resolveS3StaticCredentials(env);
+  const fileStorePoolMax = parsePositiveInteger(env, 'FILESTORE_POOL_MAX', 10);
+  const memorystorePoolMax = parsePositiveInteger(env, 'MEMORYSTORE_POOL_MAX', 10);
   return {
     httpPort: Number(env['HTTP_PORT'] ?? 8080),
     batchReadsEnabled: parseBooleanEnv(env, 'REGISTRY_BATCH_READS_ENABLED', true),
@@ -736,8 +761,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServiceConfig 
       env['MEMORYSTORE_DATABASE_URL'] ?? 'postgres://orca:orca@localhost:5432/memorystore',
     databasePoolMax: parsePositiveInteger(env, 'DATABASE_POOL_MAX', 10),
     transcriptStorePoolMax: parsePositiveInteger(env, 'TRANSCRIPT_STORE_POOL_MAX', 10),
-    fileStorePoolMax: parsePositiveInteger(env, 'FILESTORE_POOL_MAX', 10),
-    memorystorePoolMax: parsePositiveInteger(env, 'MEMORYSTORE_POOL_MAX', 10),
+    fileStorePoolMax,
+    memorystorePoolMax,
+    fileStorePoolMin: parsePoolMinimum(env, 'FILESTORE_POOL_MIN', fileStorePoolMax),
+    memorystorePoolMin: parsePoolMinimum(env, 'MEMORYSTORE_POOL_MIN', memorystorePoolMax),
+    fileStorePoolIdleTimeoutMs: parsePoolIdleTimeoutMs(env, 'FILESTORE_POOL_IDLE_TIMEOUT_MS'),
+    memorystorePoolIdleTimeoutMs: parsePoolIdleTimeoutMs(env, 'MEMORYSTORE_POOL_IDLE_TIMEOUT_MS'),
     triggerSchedulerEnabled: parseBooleanEnv(env, 'TRIGGER_SCHEDULER_ENABLED', true),
     triggerReconcileIntervalMs: parsePositiveInteger(env, 'TRIGGER_RECONCILE_INTERVAL_MS', 5_000),
     triggerReconcileBatchSize: parsePositiveInteger(env, 'TRIGGER_RECONCILE_BATCH_SIZE', 100),

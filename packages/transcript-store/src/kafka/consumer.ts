@@ -131,6 +131,8 @@ export function consumeSession(
   const consumer = kafka.consumer({
     groupId,
     sessionTimeout: 10000,
+    // Bounded reads await cleanup; keep an in-flight empty fetch from delaying EOF.
+    ...(opts.mode === 'bounded' ? { maxWaitTimeInMs: 100 } : {}),
     retry: { restartOnFailure: async () => !stopped && !lifecycleSignal.aborted },
   });
   let disconnectPromise: Promise<void> | undefined;

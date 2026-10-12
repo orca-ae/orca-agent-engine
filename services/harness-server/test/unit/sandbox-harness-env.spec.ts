@@ -20,6 +20,8 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { spawnSync } from 'node:child_process';
+import { performance } from 'node:perf_hooks';
 import {
   buildE2BEndpointUrl,
   buildE2BPrerequisiteProbeCommand,
@@ -31,6 +33,8 @@ import {
   OpenSandboxRuntime,
 } from '../../src/sandbox/opensandbox/runtime.js';
 import type { EnvironmentSpec } from '../../src/sandbox/sandbox-runtime.js';
+import * as readPage from '../../src/sandbox/read-page.js';
+import * as writePolicy from '../../src/sandbox/write-policy.js';
 
 const BASE_OPTS = {
   image: 'ghcr.io/orca-ae/sandbox-harness-claude-code:latest',
@@ -319,8 +323,21 @@ describe('OpenSandboxRuntime.acquire hardening', () => {
       .map((call) => JSON.parse(call.body!).command as string);
     // The read and alias probes stay privileged; the execution probe uses
     // exactly the same identity and isolation as Bash, Glob and Grep.
-    expect(commands).toHaveLength(6);
-    for (const command of commands.slice(2)) {
+    expect(commands).toHaveLength(4);
+    expect(commands[0]).toContain(
+      "env 'BASH_ENV=' 'ENV=' 'NODE_OPTIONS=' 'PATH=/usr/local/bin:/usr/bin' /bin/bash -c",
+    );
+    expect(commands[0]).toContain('orca_write_policy_probe_failed:ranged_read');
+    expect(commands[0]).toContain('orca_write_policy_probe_failed:filesystem_alias');
+    expect(commands[0]).toContain('orca_write_policy_probe_failed:isolation');
+    expect(commands[0]).toContain(
+      'setpriv --reuid 1000 --regid 1000 --clear-groups --bounding-set=-all --no-new-privs',
+    );
+    const parsed = spawnSync('/bin/bash', ['-n', '-c', commands[0]!], {
+      env: { ...process.env, BASH_ENV: '', ENV: '', NODE_OPTIONS: '' },
+    });
+    expect(parsed.status).toBe(0);
+    for (const command of commands.slice(1)) {
       expect(command).toMatch(
         /^setpriv --reuid 1000 --regid 1000 --clear-groups --bounding-set=-all --no-new-privs -- 'bwrap'/,
       );
@@ -332,7 +349,10 @@ describe('OpenSandboxRuntime.acquire hardening', () => {
 
   it('fails policy setup when the ranged-read prerequisite probe fails', async () => {
     const calls = mockOpenSandboxFetch([
-      commandStream({ stderr: '/bin/sh: node: not found', exitCode: 127 }),
+      commandStream({
+        stderr: '/bin/sh: node: not found\norca_write_policy_probe_failed:ranged_read:127',
+        exitCode: 127,
+      }),
     ]);
     const handle = await newTestRuntime().acquire({});
 
@@ -344,7 +364,167 @@ describe('OpenSandboxRuntime.acquire hardening', () => {
     expect(commandCalls).toHaveLength(1);
     const commandBody = JSON.parse(commandCalls[0]!.body ?? '{}') as Record<string, unknown>;
     expect(commandBody['command']).toEqual(expect.stringContaining('/proc/self/fd/'));
-    expect(commandBody['timeout']).toBe(10_000);
+    expect(commandBody['timeout']).toBe(30_000);
+  });
+
+  it.each(['none', 'ranged_read', 'filesystem_alias', 'isolation'])(
+    'keeps ordered fail-fast shell control flow when %s fails',
+    async (failure) => {
+      vi.spyOn(readPage, 'buildSandboxReadPrerequisiteProbeCommand').mockReturnValue(
+        'test_probe ranged_read',
+      );
+      vi.spyOn(writePolicy, 'buildSkillsAliasProbeCommand').mockReturnValue(
+        'test_probe filesystem_alias',
+      );
+      vi.spyOn(writePolicy, 'buildBubblewrapCommand').mockReturnValue('test_probe isolation');
+      const calls = mockOpenSandboxFetch([]);
+      const handle = await newTestRuntime().acquire({});
+      await handle.prepareWritePolicy!({ writablePaths: [], readonlyPaths: [] });
+      const command = JSON.parse(calls.filter((call) => call.url.endsWith('/command'))[0]!.body!)
+        .command as string;
+      // Stub only the actual probe work; the separate identity test preserves
+      // the real setpriv/Bubblewrap command. Execute the generated shell guards.
+      const controlled = command.replace(
+        'setpriv --reuid 1000 --regid 1000 --clear-groups --bounding-set=-all --no-new-privs -- ',
+        '',
+      );
+      const prefix =
+        'test_probe() { echo "$1"; if [ "$FAIL_STAGE" = "$1" ]; then return 7; fi; }; export -f test_probe\n';
+      const execution = spawnSync('/bin/bash', ['-c', prefix + controlled], {
+        encoding: 'utf8',
+        env: { ...process.env, BASH_ENV: '', ENV: '', NODE_OPTIONS: '', FAIL_STAGE: failure },
+      });
+      const stages = ['ranged_read', 'filesystem_alias', 'isolation'];
+      const count = failure === 'none' ? 3 : stages.indexOf(failure) + 1;
+      expect(execution.stdout.trim().split('\n')).toEqual(stages.slice(0, count));
+      expect(execution.status).toBe(failure === 'none' ? 0 : 7);
+      if (failure !== 'none')
+        expect(execution.stderr).toContain('orca_write_policy_probe_failed:' + failure + ':7');
+    },
+  );
+
+  it.each([
+    ['filesystem_alias', 'filesystem-alias'],
+    ['isolation', 'write-policy sandbox'],
+  ])('identifies the failed %s probe within the single batch', async (stage, label) => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    const calls = mockOpenSandboxFetch([
+      commandStream({
+        stderr: 'denied\norca_write_policy_probe_failed:' + stage + ':73',
+        exitCode: 73,
+      }),
+    ]);
+    const handle = await newTestRuntime().acquire({});
+    await expect(
+      handle.prepareWritePolicy!({ writablePaths: [], readonlyPaths: [] }),
+    ).rejects.toThrow(label + ' probe failed');
+    expect(calls.filter((call) => call.url.endsWith('/command'))).toHaveLength(1);
+    expect(JSON.parse(info.mock.calls.at(-1)![0] as string)).toMatchObject({
+      purpose: 'write_policy',
+      result: 'command_error',
+      failed_probe: stage,
+    });
+  });
+
+  it('records command timing without closing the stream at execution_complete or leaking payloads', async () => {
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    const response = new Response(
+      new ReadableStream<Uint8Array>({
+        start(value) {
+          controller = value;
+        },
+      }),
+      { status: 200 },
+    );
+    let clock = 0;
+    const calls = mockOpenSandboxFetch([response], (url, init) => {
+      if (url.endsWith('/command') && !init?.body?.toString().includes('exec 9<>/dev/fuse'))
+        clock = 10;
+    });
+    const handle = await newTestRuntime().acquire({});
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    vi.spyOn(performance, 'now').mockImplementation(() => clock);
+    let settled = false;
+    const running = handle
+      .runPrivileged('echo private-command', { envs: { ORCA_S3_SECRET_ACCESS_KEY: 'private-env' } })
+      .then((value) => {
+        settled = true;
+        return value;
+      });
+    await vi.waitFor(() =>
+      expect(calls.filter((call) => call.url.endsWith('/command'))).toHaveLength(1),
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    clock = 20;
+    controller.enqueue(new TextEncoder().encode(sse({ type: 'stdout', text: 'private-output' })));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    clock = 30;
+    controller.enqueue(new TextEncoder().encode(sse({ type: 'execution_complete' })));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(settled).toBe(false);
+    expect(info).not.toHaveBeenCalled();
+    clock = 80;
+    controller.close();
+    await expect(running).resolves.toMatchObject({ exit_code: 0, stdout: 'private-output' });
+    const line = info.mock.calls[0]![0] as string;
+    expect(JSON.parse(line)).toMatchObject({
+      event: 'opensandbox.command_timing',
+      sandbox_id: 'sb_test',
+      command_sequence: 2,
+      purpose: 'command',
+      http_status: 200,
+      result: 'ok',
+      headers_ms: 10,
+      first_event_ms: 20,
+      execution_complete_ms: 30,
+      stream_end_ms: 80,
+      total_ms: 80,
+      terminal_to_eof_ms: 50,
+    });
+    for (const secret of ['private-command', 'private-env', 'private-output', 'execd.test'])
+      expect(line).not.toContain(secret);
+  });
+
+  it('records transport failure without logging the error message', async () => {
+    mockOpenSandboxFetch([new Error('private transport credential')]);
+    const handle = await newTestRuntime().acquire({});
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    await expect(handle.run({ tool: 'bash', args: { command: 'secret-command' } })).rejects.toThrow(
+      'private transport credential',
+    );
+    const line = info.mock.calls[0]![0] as string;
+    expect(JSON.parse(line)).toMatchObject({ result: 'transport_error', purpose: 'command' });
+    expect(line).not.toContain('private transport credential');
+    expect(line).not.toContain('secret-command');
+  });
+
+  it('preserves a late error following execution_complete', async () => {
+    mockOpenSandboxFetch([
+      new Response(
+        sse({ type: 'execution_complete' }) + sse({ type: 'error', error: { evalue: '23' } }),
+        { status: 200, headers: { 'content-type': 'text/event-stream' } },
+      ),
+    ]);
+    const handle = await newTestRuntime().acquire({});
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    await expect(handle.run({ tool: 'bash', args: { command: 'true' } })).resolves.toMatchObject({
+      exit_code: 23,
+    });
+    expect(JSON.parse(info.mock.calls[0]![0] as string)).toMatchObject({
+      result: 'command_error',
+      execution_complete_ms: expect.any(Number),
+    });
+  });
+
+  it('does not change a command result when the timing logger fails', async () => {
+    mockOpenSandboxFetch([commandStream({ exitCode: 0 })]);
+    const handle = await newTestRuntime().acquire({});
+    vi.spyOn(console, 'info').mockImplementation(() => {
+      throw new Error('logger unavailable');
+    });
+    await expect(handle.run({ tool: 'bash', args: { command: 'true' } })).resolves.toMatchObject({
+      exit_code: 0,
+    });
   });
 
   it('routes filesystem-root preflight through one timed sandbox command', async () => {

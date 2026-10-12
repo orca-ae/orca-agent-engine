@@ -580,6 +580,10 @@ describe('loadConfig — database pool sizing', () => {
     expect(config.transcriptStorePoolMax).toBe(10);
     expect(config.fileStorePoolMax).toBe(10);
     expect(config.memorystorePoolMax).toBe(10);
+    expect(config.fileStorePoolMin).toBe(0);
+    expect(config.memorystorePoolMin).toBe(0);
+    expect(config.fileStorePoolIdleTimeoutMs).toBe(10_000);
+    expect(config.memorystorePoolIdleTimeoutMs).toBe(10_000);
   });
 
   it('reads per-pool overrides from the environment', () => {
@@ -604,6 +608,49 @@ describe('loadConfig — database pool sizing', () => {
       /FILESTORE_POOL_MAX=ten is not a positive integer/,
     );
   });
+
+  it('configures file and memory retention independently without changing pool ceilings', () => {
+    expect(
+      loadConfig({
+        FILESTORE_POOL_MAX: '2',
+        MEMORYSTORE_POOL_MAX: '3',
+        FILESTORE_POOL_MIN: '1',
+        MEMORYSTORE_POOL_MIN: '2',
+        FILESTORE_POOL_IDLE_TIMEOUT_MS: '60000',
+        MEMORYSTORE_POOL_IDLE_TIMEOUT_MS: '30000',
+      }),
+    ).toMatchObject({
+      databasePoolMax: 10,
+      transcriptStorePoolMax: 10,
+      fileStorePoolMax: 2,
+      memorystorePoolMax: 3,
+      fileStorePoolMin: 1,
+      memorystorePoolMin: 2,
+      fileStorePoolIdleTimeoutMs: 60_000,
+      memorystorePoolIdleTimeoutMs: 30_000,
+    });
+  });
+
+  it.each([
+    ['FILESTORE_POOL_MIN', 'FILESTORE_POOL_MAX', 'fileStorePoolMin'],
+    ['MEMORYSTORE_POOL_MIN', 'MEMORYSTORE_POOL_MAX', 'memorystorePoolMin'],
+  ] as const)('validates %s against its matching ceiling', (minKey, maxKey, field) => {
+    expect(loadConfig({ [minKey]: '0', [maxKey]: '1' })[field]).toBe(0);
+    expect(loadConfig({ [minKey]: '1', [maxKey]: '1' })[field]).toBe(1);
+    expect(loadConfig({ [minKey]: ' ', [maxKey]: '1' })[field]).toBe(0);
+    for (const value of ['-1', '0.5', 'invalid', 'Infinity', '2']) {
+      expect(() => loadConfig({ [minKey]: value, [maxKey]: '1' })).toThrow(minKey);
+    }
+  });
+
+  it.each(['FILESTORE_POOL_IDLE_TIMEOUT_MS', 'MEMORYSTORE_POOL_IDLE_TIMEOUT_MS'])(
+    'rejects invalid or overflowing timer values for %s',
+    (key) => {
+      for (const value of ['0', '-1', '0.5', 'invalid', 'Infinity', '2147483648']) {
+        expect(() => loadConfig({ [key]: value })).toThrow(key);
+      }
+    },
+  );
 });
 
 describe('loadConfig — OIDC metadata claim fallback', () => {

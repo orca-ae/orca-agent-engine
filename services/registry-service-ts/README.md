@@ -176,6 +176,10 @@ Every write endpoint accepts `Idempotency-Key`. Cached for 24h. Replays return t
 | `DATABASE_POOL_MAX`                 | `10`                        | Postgres pool size for registry metadata                                                                                            |
 | `FILESTORE_POOL_MAX`                | `10`                        | Postgres pool size for file metadata                                                                                                |
 | `MEMORYSTORE_POOL_MAX`              | `10`                        | Postgres pool size for memory metadata                                                                                              |
+| `FILESTORE_POOL_MIN`                | `0`                         | Registry file-pool idle retention threshold; integer from zero through `FILESTORE_POOL_MAX`                                         |
+| `MEMORYSTORE_POOL_MIN`              | `0`                         | Registry memory-pool idle retention threshold; integer from zero through `MEMORYSTORE_POOL_MAX`                                     |
+| `FILESTORE_POOL_IDLE_TIMEOUT_MS`    | `10000`                     | Registry file-pool idle eviction delay in milliseconds; positive integer, at most `2147483647`                                      |
+| `MEMORYSTORE_POOL_IDLE_TIMEOUT_MS`  | `10000`                     | Registry memory-pool idle eviction delay in milliseconds; positive integer, at most `2147483647`                                    |
 | `TRANSCRIPT_STORE_POOL_MAX`         | `10`                        | Postgres pool size for the transcript backend                                                                                       |
 | `KAFKA_SASL_MECHANISM`              | (unset)                     | SASL mechanism for `KAFKA_CONNECTION_MODE=custom`                                                                                   |
 | `PRICE_REFRESH_URL`                 | (unset)                     | `http(s)` catalog the model-price refresher pulls from. Unset disables the refresher; seed and operator rows still apply            |
