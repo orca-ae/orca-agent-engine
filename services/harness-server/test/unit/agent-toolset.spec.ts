@@ -21,6 +21,21 @@ async function withSandbox<T>(
 }
 
 describe('agent_toolset', () => {
+  it('fences pre-aborted tools and forwards the exact executable cancellation signal', async () => {
+    await withSandbox(async (sandbox) => {
+      const run = vi.spyOn(sandbox, 'run');
+      const tools = buildAgentToolset(sandbox);
+      const cancelled = AbortSignal.abort();
+      for (const tool of tools)
+        await expect(tool.execute({}, { signal: cancelled })).rejects.toThrow();
+      expect(run).not.toHaveBeenCalled();
+      const signal = new AbortController().signal;
+      await expect(
+        tools.find((tool) => tool.name === 'bash')!.execute({ command: 'echo hi' }, { signal }),
+      ).rejects.toThrow('does not support per-call cancellation');
+      expect(run).toHaveBeenCalledWith({ tool: 'bash', args: { command: 'echo hi' } }, { signal });
+    });
+  });
   it('lists and deletes through the sandbox files API', async () => {
     await withSandbox(async (sandbox) => {
       await sandbox.files.write('/tmp/toolset-list/file.txt', Buffer.from('test'));

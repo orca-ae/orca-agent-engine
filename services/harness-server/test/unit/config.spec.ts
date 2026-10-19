@@ -10,6 +10,53 @@ import { loadConfig } from '../../src/config.js';
 
 const baseEnv = { SANDBOX_RUNTIME: 'local' };
 
+describe('loadConfig — SDK turn deadlines', () => {
+  it('keeps the ten-minute default and parses operator overrides', () => {
+    expect(loadConfig(baseEnv)).toMatchObject({
+      harnessTurnTimeoutMs: 600_000,
+      harnessTurnTimeoutOverridesMs: {},
+    });
+    expect(
+      loadConfig({
+        ...baseEnv,
+        HARNESS_TURN_TIMEOUT_MS: '900000',
+        HARNESS_TURN_TIMEOUT_OVERRIDES_MS: '{"dsh_sdk":1200000,"pi_sdk":300000}',
+      }),
+    ).toMatchObject({
+      harnessTurnTimeoutMs: 900_000,
+      harnessTurnTimeoutOverridesMs: { dsh_sdk: 1_200_000, pi_sdk: 300_000 },
+    });
+  });
+
+  it.each(['', '0', '-1', '1.5', 'NaN', 'Infinity', '2147483648', 'invalid'])(
+    'rejects invalid global timeout %j',
+    (value) => {
+      expect(() => loadConfig({ ...baseEnv, HARNESS_TURN_TIMEOUT_MS: value })).toThrow(
+        'HARNESS_TURN_TIMEOUT_MS',
+      );
+    },
+  );
+
+  it.each([
+    '',
+    '{',
+    'null',
+    '[]',
+    '1',
+    '{"typo":1000}',
+    '{"claude_code":1000}',
+    '{"dsh_sdk":0}',
+    '{"dsh_sdk":1.5}',
+    '{"dsh_sdk":"1000"}',
+    '{"dsh_sdk":null}',
+    '{"dsh_sdk":2147483648}',
+  ])('rejects invalid override map %j', (value) => {
+    expect(() => loadConfig({ ...baseEnv, HARNESS_TURN_TIMEOUT_OVERRIDES_MS: value })).toThrow(
+      'HARNESS_TURN_TIMEOUT_OVERRIDES_MS',
+    );
+  });
+});
+
 describe('loadConfig — Kafka connection parsing', () => {
   it('defaults to plaintext Kafka with existing local-stack values', () => {
     const config = loadConfig(baseEnv);

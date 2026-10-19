@@ -11,6 +11,7 @@
  * impl.
  */
 
+import type { SandboxCallOptions } from '@orca/sandbox-runtime';
 import type { ReadPage, ReadPageInput } from './read-page.js';
 
 export interface ToolCall {
@@ -83,7 +84,7 @@ export interface SandboxHandle {
   /** Stable id; surfaces in audit + logs. */
   id: string;
   /** Run a tool call (bash, glob, grep, …). */
-  run(call: ToolCall): Promise<ToolResult>;
+  run(call: ToolCall, options?: SandboxCallOptions): Promise<ToolResult>;
   /**
    * Prove that planned resource/Skill roots are still plain, canonical paths
    * before any trusted materializer writes or mounts them. Remote image-backed
@@ -97,7 +98,11 @@ export interface SandboxHandle {
    */
   prepareWritePolicy?(policy: SandboxWritePolicy): Promise<void>;
   /** Execute an agent tool call through the installed filesystem boundary. */
-  runWithWritePolicy?(call: ToolCall, policy: SandboxWritePolicy): Promise<ToolResult>;
+  runWithWritePolicy?(
+    call: ToolCall,
+    policy: SandboxWritePolicy,
+    options?: SandboxCallOptions,
+  ): Promise<ToolResult>;
   /** Resolve symlinks and missing suffixes to a canonical sandbox-visible path. */
   canonicalizePathForPolicy?(path: string): Promise<string>;
   /** Filesystem operations — used by mount strategies + agent_toolset's read/write/edit/list/delete. */
@@ -135,6 +140,8 @@ export interface SandboxHandle {
  * mount and a sandbox-local directory.
  */
 export interface SandboxCapabilities {
+  /** Confirmed execd kill-and-wait for run/runWithWritePolicy; not file API rollback. */
+  supportsPerCallCancellation?: boolean;
   /**
    * Whether the runtime can mount FUSE filesystems inside the sandbox.
    * E2B with `orca-default` advertises true. OpenSandbox advertises true only

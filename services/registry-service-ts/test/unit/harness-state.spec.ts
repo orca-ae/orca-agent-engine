@@ -11,6 +11,23 @@ import {
 } from '../../src/domain/harness-state.js';
 
 describe('native checkpoint revisions', () => {
+  it('normalizes DSH state without losing its runtime identity and fails closed on unknown formats', () => {
+    const dsh = {
+      version: 1,
+      format: 'dsh_sdk',
+      sdkVersion: '0.2.1-alpha.2',
+      threadId: '11111111-1111-1111-1111-111111111111',
+      instructionsSha256: 'a'.repeat(64),
+      files: {
+        'orca.json': 'e30=',
+        '_no-cwd/11111111-1111-1111-1111-111111111111/session.v4.jsonl': 'e30=',
+      },
+    };
+    expect(normalizeHarnessState({ ...dsh, ignored: true })).toEqual(dsh);
+    expect(harnessStateRevision(dsh)).toMatch(/^[a-f0-9]{64}$/);
+    expect(() => normalizeHarnessState({ ...dsh, format: 'unknown' })).toThrow();
+    expect(() => normalizeHarnessState({ ...dsh, sdkVersion: 'unknown' })).toThrow();
+  });
   const a = 'sessions/2026/09/20/rollout-a-thread.jsonl';
   const b = 'sessions/2026/09/20/rollout-b-thread.jsonl';
   const state = { version: 1, threadId: 'thread', files: { [a]: 'YQ==', [b]: 'Yg==' } };

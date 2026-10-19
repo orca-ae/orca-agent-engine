@@ -1,6 +1,8 @@
 // Copyright The Orca Authors
 // SPDX-License-Identifier: Apache-2.0
 
+import { runCancellableOpenSandboxCommand, type SandboxCallOptions } from '@orca/sandbox-runtime';
+
 import { randomUUID } from 'node:crypto';
 import type {
   EnvironmentSpec,
@@ -111,6 +113,7 @@ export class OpenSandboxRuntime implements SandboxRuntime {
     this.capabilities = {
       supportsFuse: opts.enableFuse ?? true,
       supportsWritePolicy: true,
+      supportsPerCallCancellation: true,
     };
   }
 
@@ -368,7 +371,8 @@ class OpenSandboxHandle implements SandboxHandle {
     }
   }
 
-  async run(call: ToolCall): Promise<ToolResult> {
+  async run(call: ToolCall, options?: SandboxCallOptions): Promise<ToolResult> {
+    options?.signal?.throwIfAborted();
     if (this.destroyed) throw new Error(`sandbox ${this.id} destroyed`);
     const parsed = parseToolCall(call);
     if (parsed.tool === 'invalid') {
@@ -378,6 +382,7 @@ class OpenSandboxHandle implements SandboxHandle {
     if (parsed.tool === 'bash') {
       const args = parsed.args;
       const execution = await this.runCommand(args.command, {
+        ...options,
         ...(args.timeout_ms !== undefined ? { timeoutMs: args.timeout_ms } : {}),
       });
       return {
@@ -394,7 +399,7 @@ class OpenSandboxHandle implements SandboxHandle {
       // only non-zero success — a bad root must reach the agent as an error,
       // not a false empty match list.
       const cmd = `cd '${escapeSingleQuotes(cwd)}' || exit 2; compgen -G '${escapeSingleQuotes(args.pattern)}'`;
-      const execution = await this.runCommand(cmd);
+      const execution = await this.runCommand(cmd, options);
       const matches = execution.stdout.split('\n').filter((s) => s.length > 0);
       if (execution.truncated === true || execution.exitCode > 1) {
         // A truncated stream synthesizes exit 1 — indistinguishable from
@@ -411,7 +416,7 @@ class OpenSandboxHandle implements SandboxHandle {
       const cwd = args.root ?? '.';
       // grep exits 0 match / 1 no match / >=2 error; cd failure exits 2.
       const cmd = `cd '${escapeSingleQuotes(cwd)}' || exit 2; grep -rn '${escapeSingleQuotes(args.pattern)}' .`;
-      const execution = await this.runCommand(cmd);
+      const execution = await this.runCommand(cmd, options);
       if (execution.truncated === true || execution.exitCode > 1) {
         // See glob above; grep additionally exits 2 on any error even when it
         // matched, so partial matches ride along with the fault.
@@ -466,7 +471,9 @@ class OpenSandboxHandle implements SandboxHandle {
   async runWithWritePolicy(
     call: ToolCall,
     policy: ValidatedSandboxWritePolicy,
+    options?: SandboxCallOptions,
   ): Promise<ToolResult> {
+    options?.signal?.throwIfAborted();
     const parsed = parseToolCall(call);
     if (parsed.tool === 'invalid') {
       return { exit_code: 2, stderr: parsed.error };
@@ -474,6 +481,7 @@ class OpenSandboxHandle implements SandboxHandle {
     if (parsed.tool === 'bash') {
       const args = parsed.args;
       const result = await this.runCommand(buildOpenSandboxToolCommand(args.command, policy), {
+        ...options,
         ...(args.timeout_ms !== undefined ? { timeoutMs: args.timeout_ms } : {}),
       });
       return { stdout: result.stdout, stderr: result.stderr, exit_code: result.exitCode };
@@ -485,7 +493,7 @@ class OpenSandboxHandle implements SandboxHandle {
         parsed.tool === 'glob'
           ? `cd '${escapeSingleQuotes(cwd)}' || exit 2; compgen -G '${escapeSingleQuotes(args.pattern)}'`
           : `cd '${escapeSingleQuotes(cwd)}' || exit 2; grep -rn '${escapeSingleQuotes(args.pattern)}' .`;
-      const result = await this.runCommand(buildOpenSandboxToolCommand(body, policy));
+      const result = await this.runCommand(buildOpenSandboxToolCommand(body, policy), options);
       const output =
         parsed.tool === 'glob'
           ? result.stdout.split('\n').filter((s) => s.length > 0)
@@ -509,6 +517,7 @@ class OpenSandboxHandle implements SandboxHandle {
   async runCommand(
     command: string,
     opts: {
+      signal?: AbortSignal;
       timeoutMs?: number;
       envs?: Record<string, string>;
       requestTimeoutSeconds?: number;
@@ -526,6 +535,15 @@ class OpenSandboxHandle implements SandboxHandle {
     if (opts.timeoutMs !== undefined) body['timeout'] = Math.round(opts.timeoutMs);
     if (opts.envs !== undefined) body['envs'] = opts.envs;
 
+    if (opts.signal) {
+      return await runCancellableOpenSandboxCommand(
+        (path, init) => this.execdFetch(path, init, requestTimeoutSeconds),
+        JSON.stringify(body),
+        (response, onEvent) =>
+          consumeCommandStream(response, requestTimeoutSeconds * 1_000, onEvent),
+        opts.signal,
+      );
+    }
     const response = await this.execdFetch(
       '/command',
       {
@@ -745,6 +763,7 @@ class OpenSandboxFiles implements SandboxFiles {
 async function consumeCommandStream(
   response: Response,
   streamTimeoutMs: number,
+  onEvent?: (event: ServerStreamEvent) => void,
 ): Promise<CommandExecution> {
   const stdoutParts: string[] = [];
   const stderrParts: string[] = [];
@@ -752,6 +771,7 @@ async function consumeCommandStream(
   let exitCode: number | null = null;
 
   await readJsonEvents(response, streamTimeoutMs, (event) => {
+    onEvent?.(event);
     if (event.type === 'stdout' && event.text) stdoutParts.push(event.text);
     if (event.type === 'stderr' && event.text) stderrParts.push(event.text);
     if (event.type === 'execution_complete') complete = true;

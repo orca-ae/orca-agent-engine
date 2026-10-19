@@ -53,8 +53,21 @@ export const piGatewayBindings = [
     query: ['alt'],
   },
 ];
-export function withPiGatewayRoutes(config) {
-  for (const binding of piGatewayBindings) {
+export const dshGatewayBindings = [
+  {
+    provider: 'deepseek',
+    api: 'anthropic-messages',
+    origin: 'https://api.deepseek.com/anthropic',
+    path: '/v1/messages',
+    env: 'DEEPSEEK_API_KEY',
+    auth: { type: 'header', name: 'x-api-key' },
+    headers: { 'anthropic-version': '2023-06-01' },
+    forward: ['anthropic-beta'],
+  },
+];
+
+export function withPiGatewayRoutes(config, bindings = piGatewayBindings) {
+  for (const binding of bindings) {
     const name = `pi-${binding.provider}-${binding.api}`;
     config.vaults.push({
       name,
@@ -91,14 +104,20 @@ export function withPiGatewayRoutes(config) {
   return config;
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const [, , source, output] = process.argv;
-  if (!source || !output)
-    throw new Error('Usage: node scripts/render-pi-gateway-config.mjs SOURCE OUTPUT');
+  const [, , source, output, harness = 'pi'] = process.argv;
+  if (!source || !output || !['pi', 'dsh'].includes(harness))
+    throw new Error('Usage: node scripts/render-pi-gateway-config.mjs SOURCE OUTPUT [pi|dsh]');
   writeFileSync(
     output,
-    yaml.dump(withPiGatewayRoutes(yaml.load(readFileSync(source, 'utf8'))), {
-      lineWidth: 120,
-      noRefs: true,
-    }),
+    yaml.dump(
+      withPiGatewayRoutes(
+        yaml.load(readFileSync(source, 'utf8')),
+        harness === 'dsh' ? dshGatewayBindings : piGatewayBindings,
+      ),
+      {
+        lineWidth: 120,
+        noRefs: true,
+      },
+    ),
   );
 }

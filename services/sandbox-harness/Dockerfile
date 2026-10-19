@@ -17,8 +17,10 @@ COPY packages/harness-catalog/package.json ./packages/harness-catalog/
 COPY packages/codex-harness/package.json ./packages/codex-harness/
 COPY packages/sdk-harness/package.json ./packages/sdk-harness/
 COPY packages/pi-harness/package.json ./packages/pi-harness/
+COPY packages/dsh-harness/package.json ./packages/dsh-harness/
 COPY services/sandbox-harness/package.json ./services/sandbox-harness/
 RUN pnpm install --frozen-lockfile --filter @orca/sandbox-harness...
+RUN node -e "const p = require('./packages/dsh-harness/node_modules/@deepseek-ai/dsh/package.json'); if (p.version !== '0.2.1-alpha.2') throw new Error('DSH image requires 0.2.1-alpha.2')"
 
 COPY packages/codex-harness/tsconfig.json ./packages/codex-harness/
 COPY packages/codex-harness/src ./packages/codex-harness/src
@@ -26,6 +28,9 @@ COPY packages/sdk-harness/tsconfig.json ./packages/sdk-harness/
 COPY packages/sdk-harness/src ./packages/sdk-harness/src
 COPY packages/pi-harness/tsconfig.json ./packages/pi-harness/
 COPY packages/pi-harness/src ./packages/pi-harness/src
+COPY packages/dsh-harness/tsconfig.json ./packages/dsh-harness/
+COPY packages/dsh-harness/src ./packages/dsh-harness/src
+COPY packages/dsh-harness/profile ./packages/dsh-harness/profile
 COPY packages/harness-catalog/tsconfig.json ./packages/harness-catalog/
 COPY packages/harness-catalog/src ./packages/harness-catalog/src
 COPY services/sandbox-harness/tsconfig.json ./services/sandbox-harness/
@@ -33,6 +38,7 @@ COPY services/sandbox-harness/src ./services/sandbox-harness/src
 RUN pnpm -F @orca/sdk-harness build && \
     pnpm -F @orca/harness-catalog build && \
     pnpm -F @orca/pi-harness build && \
+    pnpm -F @orca/dsh-harness build && \
     pnpm -F @orca/codex-harness build \
     && pnpm -F @orca/sandbox-harness build
 
@@ -158,6 +164,10 @@ COPY --from=build /app/packages/sdk-harness/node_modules /app/packages/sdk-harne
 COPY --from=build /app/packages/pi-harness/package.json /app/packages/pi-harness/package.json
 COPY --from=build /app/packages/pi-harness/dist /app/packages/pi-harness/dist
 COPY --from=build /app/packages/pi-harness/node_modules /app/packages/pi-harness/node_modules
+COPY --from=build /app/packages/dsh-harness/package.json /app/packages/dsh-harness/package.json
+COPY --from=build /app/packages/dsh-harness/dist /app/packages/dsh-harness/dist
+COPY --from=build /app/packages/dsh-harness/profile /app/packages/dsh-harness/profile
+COPY --from=build /app/packages/dsh-harness/node_modules /app/packages/dsh-harness/node_modules
 COPY --from=build /app/packages/codex-harness/package.json /app/packages/codex-harness/package.json
 COPY --from=build /app/packages/codex-harness/dist /app/packages/codex-harness/dist
 COPY --from=build /app/packages/codex-harness/node_modules /app/packages/codex-harness/node_modules

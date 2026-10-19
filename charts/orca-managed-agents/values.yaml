@@ -53,7 +53,7 @@ images:
   # sandboxHarness images are never deployed by this chart — harness-server
   # requests them per-session from OpenSandbox. The repository/tag here (same
   # empty-tag-defaults-to-appVersion convention as registry/harness) become
-  # the SANDBOX_HARNESS_CLAUDE_CODE_IMAGE env var in the harness ConfigMap,
+  # the SANDBOX_HARNESS_CLAUDE_CODE_IMAGE / SANDBOX_HARNESS_DSH_IMAGE env vars,
   # which overrides @orca/harness-catalog's build-time default at runtime.
   # codex has no release build yet, so it has no override here.
   #
@@ -72,6 +72,10 @@ images:
       tag: ''
       # Full manifest-list digest, for example
       # sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
+      digest: ''
+    dsh:
+      repository: ghcr.io/orca-ae/sandbox-harness-dsh
+      tag: ''
       digest: ''
 
 secrets:
@@ -568,6 +572,12 @@ harness:
   sandboxRuntime: opensandbox
   workDir: /var/tmp/orca-harness
   sessionIdleTimeoutMs: '60000'
+  # SDK whole-turn deadline, including tools, confirmations and native children.
+  # Gateway tokens must cover this deadline plus 30s; raise Registry
+  # AI_GATEWAY_LLM_JWT_TTL_SECS for longer turns. No mid-turn token refresh.
+  turnTimeoutMs: 600000
+  # Optional overrides for codex_sdk, pi_sdk and dsh_sdk (integer milliseconds).
+  turnTimeoutOverridesMs: {}
   # Sandbox-reachable callback URL for the git credential helper. Defaults to
   # the cluster-qualified Registry Service URL, which is required because
   # sandboxes run outside the release namespace.
@@ -632,7 +642,7 @@ harness:
     periodSeconds: 20
 
 aiGateway:
-  # Isolated Pi native routes. Each binding uses one protocol and a static API key.
+  # Isolated SDK native routes (Pi/DSH). Keys stay in Gateway-only Secret env refs.
   # Requires the native_api_key Gateway implementation; legacy SDK routes stay separate.
   piProviders: []
   # - provider: anthropic
@@ -643,6 +653,9 @@ aiGateway:
   #   allowedPaths: [/v1/messages]
   #   headers: { anthropic-version: '2023-06-01' }
   #   forwardHeaders: [anthropic-beta]
+  # DSH uses the same binding list, with provider: deepseek, api: anthropic-messages,
+  # baseUrl: https://api.deepseek.com/anthropic and apiKeyEnv: DEEPSEEK_API_KEY.
+  # Keep the Messages auth/paths/headers above; enable only with DSH harness usage authority.
   # Requires an AI Gateway image with native /v1/responses support. The provider
   # key lives only in the Gateway; inject OPENAI_API_KEY via extraEnv Secret refs.
   openai:

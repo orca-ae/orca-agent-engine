@@ -1,6 +1,8 @@
 // Copyright The Orca Authors
 // SPDX-License-Identifier: Apache-2.0
 
+import type { SandboxCallOptions } from './opensandbox-cancellation.js';
+
 import { existsSync, realpathSync } from 'node:fs';
 import { basename, dirname, posix as path, relative, resolve, sep } from 'node:path';
 import type {
@@ -252,8 +254,8 @@ export async function createPolicyEnforcedSandbox(
   return {
     id: sandbox.id,
     files,
-    run: async (call: ToolCall): Promise<ToolResult> =>
-      await sandbox.runWithWritePolicy(call, policy),
+    run: async (call: ToolCall, options?: SandboxCallOptions): Promise<ToolResult> =>
+      await sandbox.runWithWritePolicy(call, policy, options),
     pause: async () => await sandbox.pause(),
     resume: async () => await sandbox.resume(),
     destroy: async () => await sandbox.destroy(),

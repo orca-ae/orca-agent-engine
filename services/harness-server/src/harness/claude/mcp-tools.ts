@@ -210,6 +210,7 @@ export function buildOrcaSdkTools(
           .describe('Optional timeout in milliseconds; SIGKILL after expiry.'),
       },
       async ({ command, timeout_ms }) => {
+        // TODO: propagate per-call abort through Claude SDK MCP and verify actual shell termination, not just RPC cancellation.
         const args: { command: string; timeout_ms?: number } = { command };
         if (timeout_ms !== undefined) args.timeout_ms = timeout_ms;
         const result = await sandbox.run({ tool: 'bash', args });

@@ -5,6 +5,33 @@ Kafka as OTLP traces. `pnpm start` runs the service entrypoint. The package expo
 established wire/projector API; persistence, Registry integration, and runtime orchestration are
 service-internal modules rather than a reusable library contract.
 
+## Flat thread observations
+
+An accepted input anchors one trace, including a client `user.message` addressed to a canonical
+child thread. The primary-stream acceptance marker references that input's event ID; the same
+identity survives batching, restart and marker replay. Canonical `subagents/<native UUID>` tool and
+`turn_model_summary` observations are direct children of the root span, with their actual subpath,
+source event IDs and allowlisted parent/thread identity metadata. Tool correlation includes the
+originating subpath; model ends join their start ID on the same thread. Each summary reports only
+that thread's own usage. The exporter does not infer provider calls or aggregate billing usage.
+Only terminal primary lifecycle events close the trace; model ends and child lifecycle events do
+not. Child assistant messages and cross-thread notifications do not contribute to root captured I/O;
+an accepted child-addressed client input follows the same capture policy as a primary input.
+The reducer and checkpoint parser allow 128 open model summaries, covering a DSH root plus 127
+children whose summary ends arrive at whole-tree commit. Exceeding that bound fails closed.
+Older readers limited to 64 open summaries cannot resume larger checkpoints; upgrade readers
+before admitting such turns and drain them before downgrade.
+
+The root sampling and capture pin applies to the whole trace, including the existing shared
+capture ceilings and state limits. Primary-stream client tool replies/confirmations address child
+actions through `payload.subpath` and the existing tool-use identity, not through arrival order.
+
+Child-aware reducer checkpoints use version 5; metadata-only/raw-I/O outbox traces use projected
+schema v3/v4 respectively. Existing reducer v1–v4 and outbox v1/v2 remain readable, and root-only
+projection retains its previous IDs and output. Older exporter binaries reject the new versions.
+Upgrade readers before enabling native children, and drain child-aware work before downgrade;
+there is no offset reset, migration service or historical replay.
+
 ## Default Kafka broker-native runtime
 
 `OBSERVABILITY_EXPORTER_STATE_BACKEND=kafka` is the default. The process uses
@@ -503,15 +530,21 @@ an unmatched use becomes an `incomplete` observation with unset span status (OTL
 invented execution result. Its end source ID/time identify the observation cutoff.
 Langfuse receives tool children as `tool`; coarse turn model summaries remain generic `span`.
 
-Each turn retains at most 256 tool uses (open and completed combined) and 256 result receipts;
-the pending client input collection is separately bounded at 1,024 entries. Result receipts retain
-bounded source IDs, timestamps, family/outcome enums, and optional correlation digests, including
-for unmatched results. Unmatched results also increment a counter saturating at
-`Number.MAX_SAFE_INTEGER`, retained at completion as `orca.turn.unmatched_tool_result_count` when
-positive. A single orphan result does not itself quarantine a Session, but exceeding either tool
-collection limit raises `CanonicalProjectionStateError`: Kafka fails the instance closed, while the
-legacy SQL runtime quarantines the Session's projection. Duplicate source identities are idempotent and conflicting identities are not silently
-overwritten. Acceptance-marker-first unresolved behavior remains unchanged.
+Each turn retains the first 256 tool uses (open and completed combined), across all threads.
+Completion receipts for those uses have reserved capacity; up to 256 additional pending/unmatched
+result receipts are retained separately. An admitted use reconciles the earliest retained matching
+result-before-use receipt. Receipts retain bounded source IDs, timestamps, family/outcome enums and
+optional correlation digests, not result content. Pending client inputs remain separately bounded
+at 1,024 entries. Unmatched results increment `orca.turn.unmatched_tool_result_count` (decremented
+when reconciled). Overflow omits observations rather than quarantining the trace: the root exposes
+`orca.turn.tool_observations_truncated=true`, `orca.turn.omitted_tool_call_event_count` and
+`orca.turn.omitted_tool_result_event_count`. These count omitted events, not complete executions,
+and saturate at `Number.MAX_SAFE_INTEGER`. Observation loss does not alter root status or model usage.
+State v6 persists overflow counters and separate receipt capacity; v1–v5 checkpoints and legacy
+outbox traces remain readable, while older binaries reject v6. Retained source identities are
+idempotent and conflicts fail closed. Omitted identities have no global deduplication set; their
+replay protection relies on existing canonical event/cursor checkpoints. Acceptance-marker-first
+unresolved behavior remains unchanged.
 
 ## Delivery outcomes
 

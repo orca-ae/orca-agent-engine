@@ -36,6 +36,10 @@ export function piLlmRoute(provider: string, id: string): string {
   return `llm-pi-${provider}-${api}`;
 }
 
+// DSH 0.2.1-alpha.2 SDK-created agents use the DeepSeek Messages adapter.
+export const DSH_MODEL = 'deepseek-v4-flash';
+export const DSH_LLM_ROUTE = 'llm-pi-deepseek-anthropic-messages';
+
 export interface HarnessModelPolicy {
   modelsByProvider?: typeof PI_SDK_MODELS;
   defaultProvider: string;
@@ -76,6 +80,7 @@ export const HARNESS_MODEL_POLICIES: Partial<Record<HarnessType, HarnessModelPol
     providers: Object.keys(PI_SDK_MODELS),
     modelsByProvider: PI_SDK_MODELS,
   },
+  dsh_sdk: { defaultProvider: 'deepseek', providers: ['deepseek'], models: { [DSH_MODEL]: [] } },
   codex_sdk: { defaultProvider: 'openai', providers: ['openai'], models: CODEX_SDK_MODELS },
 };
 
@@ -104,6 +109,8 @@ export function validateHarnessModel(
       return `model.effort '${model.effort}' is not supported for ${model.provider}/${model.id}`;
     return null;
   }
+  if (selected.harness === 'dsh_sdk' && model.speed && model.speed !== 'standard')
+    return 'dsh_sdk does not support model.speed fast';
   if (policy.models) {
     const id = model.provider === 'anthropic' ? stripDatedSnapshotSuffix(model.id) : model.id;
     if (!Object.hasOwn(policy.models, id)) {

@@ -65,6 +65,9 @@ export class PiSdkWorker implements SdkWorker {
         this.pending.get(command.id)?.(command.result);
         this.pending.delete(command.id);
         return;
+      case 'orchestration_result':
+      case 'archive_fence':
+        throw new Error(`Pi SDK does not support ${command.type}`);
       case 'interrupt':
         this.interrupted = true;
         this.cancelTools();

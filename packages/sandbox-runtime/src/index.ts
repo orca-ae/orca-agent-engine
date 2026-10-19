@@ -147,3 +147,9 @@ export type {
   ChangedResourceFile,
   DeletedResourceFile,
 } from './resource-transfer.js';
+
+export {
+  runCancellableOpenSandboxCommand,
+  rejectUnsupportedCancellation,
+} from './opensandbox-cancellation.js';
+export type { SandboxCallOptions } from './opensandbox-cancellation.js';

@@ -1,0 +1,9 @@
+{
+  "name": "orca-managed-profile",
+  "private": true,
+  "dsh": {
+    "profile": {
+      "bundles": []
+    }
+  }
+}

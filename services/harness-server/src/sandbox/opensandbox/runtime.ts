@@ -1,6 +1,8 @@
 // Copyright The Orca Authors
 // SPDX-License-Identifier: Apache-2.0
 
+import { runCancellableOpenSandboxCommand, type SandboxCallOptions } from '@orca/sandbox-runtime';
+
 import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import type {
@@ -101,6 +103,7 @@ export class OpenSandboxRuntime implements SandboxRuntime {
     this.capabilities = {
       supportsFuse: true,
       supportsWritePolicy: true,
+      supportsPerCallCancellation: true,
     };
   }
 
@@ -339,12 +342,14 @@ class OpenSandboxHandle implements SandboxHandle {
     }
   }
 
-  async run(call: ToolCall): Promise<ToolResult> {
+  async run(call: ToolCall, options?: SandboxCallOptions): Promise<ToolResult> {
+    options?.signal?.throwIfAborted();
     if (this.destroyed) throw new Error(`sandbox ${this.id} destroyed`);
 
     if (call.tool === 'bash') {
       const args = call.args as { command: string; timeout_ms?: number };
       const execution = await this.runCommand(args.command, {
+        ...options,
         timeoutMs: args.timeout_ms,
       });
       return {
@@ -358,7 +363,7 @@ class OpenSandboxHandle implements SandboxHandle {
       const args = call.args as { pattern: string; root?: string };
       const cwd = args.root ?? '.';
       const cmd = `cd '${escapeSingleQuotes(cwd)}' && compgen -G '${escapeSingleQuotes(args.pattern)}' || true`;
-      const execution = await this.runCommand(cmd);
+      const execution = await this.runCommand(cmd, options);
       const matches = execution.stdout.split('\n').filter((s) => s.length > 0);
       return { output: matches };
     }
@@ -367,7 +372,7 @@ class OpenSandboxHandle implements SandboxHandle {
       const args = call.args as { pattern: string; root?: string };
       const cwd = args.root ?? '.';
       const cmd = `cd '${escapeSingleQuotes(cwd)}' && grep -rn '${escapeSingleQuotes(args.pattern)}' . || true`;
-      const execution = await this.runCommand(cmd);
+      const execution = await this.runCommand(cmd, options);
       return { output: execution.stdout };
     }
 
@@ -437,10 +442,16 @@ class OpenSandboxHandle implements SandboxHandle {
     }
   }
 
-  async runWithWritePolicy(call: ToolCall, policy: SandboxWritePolicy): Promise<ToolResult> {
+  async runWithWritePolicy(
+    call: ToolCall,
+    policy: SandboxWritePolicy,
+    options?: SandboxCallOptions,
+  ): Promise<ToolResult> {
+    options?.signal?.throwIfAborted();
     if (call.tool === 'bash') {
       const args = call.args as { command: string; timeout_ms?: number };
       const result = await this.runCommand(buildOpenSandboxToolCommand(args.command, policy), {
+        ...options,
         timeoutMs: args.timeout_ms,
       });
       return { stdout: result.stdout, stderr: result.stderr, exit_code: result.exitCode };
@@ -452,7 +463,7 @@ class OpenSandboxHandle implements SandboxHandle {
         call.tool === 'glob'
           ? `cd '${escapeSingleQuotes(cwd)}' && compgen -G '${escapeSingleQuotes(args.pattern)}' || true`
           : `cd '${escapeSingleQuotes(cwd)}' && grep -rn '${escapeSingleQuotes(args.pattern)}' . || true`;
-      const result = await this.runCommand(buildOpenSandboxToolCommand(body, policy));
+      const result = await this.runCommand(buildOpenSandboxToolCommand(body, policy), options);
       return call.tool === 'glob'
         ? { output: result.stdout.split('\n').filter((s) => s.length > 0) }
         : { output: result.stdout };
@@ -469,6 +480,7 @@ class OpenSandboxHandle implements SandboxHandle {
   async runCommand(
     command: string,
     opts: {
+      signal?: AbortSignal;
       timeoutMs?: number;
       envs?: Record<string, string>;
       requestTimeoutSeconds?: number;
@@ -500,6 +512,17 @@ class OpenSandboxHandle implements SandboxHandle {
     let result: 'ok' | 'command_error' | 'transport_error' = 'transport_error';
     let failedProbe: string | undefined;
     try {
+      if (opts.signal) {
+        const execution = await runCancellableOpenSandboxCommand(
+          (path, init) => this.execdFetch(path, init, requestTimeoutSeconds),
+          JSON.stringify(body),
+          (response, onEvent) =>
+            consumeCommandStream(response, requestTimeoutSeconds * 1_000, onEvent),
+          opts.signal,
+        );
+        result = execution.exitCode === 0 ? 'ok' : 'command_error';
+        return execution;
+      }
       const response = await this.execdFetch(
         '/command',
         {

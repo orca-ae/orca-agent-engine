@@ -4,6 +4,7 @@
 export type { AgentEvent, AgentEventId, AgentEventSubpath } from './events.js';
 
 export { isAgentEventId } from './ids.js';
+export { stableSessionThreadId, SESSION_THREAD_ID_NAMESPACE } from './threads.js';
 
 export {
   PRIMARY_AGENT_SUBPATH,

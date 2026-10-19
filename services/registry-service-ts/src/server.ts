@@ -176,6 +176,8 @@ export interface BuildAppOptions {
   /** Same public listener, addressed locally for trusted Git seed fetches. */
   registryLocalBaseUrl?: string;
   sessionJwtLlmPolicy?: SessionJwtLlmPolicy;
+  /** Operator LLM JWT lifetime, also used by the internal SDK ai-gateway minter. */
+  llmJwtTtlSecs?: number;
   fileStore: FileStore;
   /**
    * Optional Fastify log level (`fatal|error|warn|info|debug|trace|silent`).
@@ -1175,6 +1177,7 @@ function buildSurfaceApp(
       opts.sessionJwtLlmPolicy,
       opts.fetchImpl,
       {
+        ...(opts.llmJwtTtlSecs !== undefined ? { llmJwtTtlSecs: opts.llmJwtTtlSecs } : {}),
         ...(opts.environmentClaimTtlMs !== undefined
           ? { environmentClaimTtlMs: opts.environmentClaimTtlMs }
           : {}),

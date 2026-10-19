@@ -22,6 +22,7 @@ export function turnStoreFixture(
   };
   const store: CodexTurnStore = {
     claim: async () => structuredClone(snapshot),
+    inspect: async () => structuredClone(snapshot),
     recover: options.recover ?? (async () => {}),
     update: async (action) => {
       if (action.type === 'begin') snapshot.receipt = structuredClone(action.receipt);

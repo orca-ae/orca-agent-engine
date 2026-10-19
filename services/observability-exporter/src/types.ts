@@ -4,6 +4,22 @@
 /** Stable schema label for the transport-free projected trace model. */
 export const PROJECTED_TRACE_SCHEMA_VERSION = 'orca.observability.projected-trace.v1' as const;
 export const IO_PROJECTED_TRACE_SCHEMA_VERSION = 'orca.observability.projected-trace.v2' as const;
+export const TREE_PROJECTED_TRACE_SCHEMA_VERSION = 'orca.observability.projected-trace.v3' as const;
+export const TREE_IO_PROJECTED_TRACE_SCHEMA_VERSION =
+  'orca.observability.projected-trace.v4' as const;
+export function isProjectionSchema(value: unknown): value is ProjectedTrace['schemaVersion'] {
+  return [
+    PROJECTED_TRACE_SCHEMA_VERSION,
+    IO_PROJECTED_TRACE_SCHEMA_VERSION,
+    TREE_PROJECTED_TRACE_SCHEMA_VERSION,
+    TREE_IO_PROJECTED_TRACE_SCHEMA_VERSION,
+  ].some((v) => v === value);
+}
+export function isIoProjectionSchema(value: unknown): boolean {
+  return (
+    value === IO_PROJECTED_TRACE_SCHEMA_VERSION || value === TREE_IO_PROJECTED_TRACE_SCHEMA_VERSION
+  );
+}
 export type CaptureMode = 'metadata_only' | 'raw_io';
 export const IO_VERSION = 'orca.observability.raw-io.v1' as const;
 export interface CapturedValue {
@@ -79,7 +95,11 @@ export interface ProjectedSpan {
 
 /** One accepted primary-path client turn; content is opt-in under schema v2. */
 export interface ProjectedTrace {
-  schemaVersion: typeof PROJECTED_TRACE_SCHEMA_VERSION | typeof IO_PROJECTED_TRACE_SCHEMA_VERSION;
+  schemaVersion:
+    | typeof PROJECTED_TRACE_SCHEMA_VERSION
+    | typeof IO_PROJECTED_TRACE_SCHEMA_VERSION
+    | typeof TREE_PROJECTED_TRACE_SCHEMA_VERSION
+    | typeof TREE_IO_PROJECTED_TRACE_SCHEMA_VERSION;
   traceId: string;
   workspaceId: string;
   sessionId: string;

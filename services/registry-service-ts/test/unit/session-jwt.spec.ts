@@ -7,7 +7,11 @@ import { fileURLToPath } from 'node:url';
 import { generateKeyPairSync } from 'node:crypto';
 import { describe, it, expect } from 'vitest';
 import { SignJWT, importPKCS8, decodeJwt } from 'jose';
-import { SessionJwtMinter, type SessionJwtConfig } from '../../src/auth/session-jwt.js';
+import {
+  SessionJwtMinter,
+  sdkGatewayJwtTtlSecs,
+  type SessionJwtConfig,
+} from '../../src/auth/session-jwt.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -36,6 +40,34 @@ function buildMinter(overrides: Partial<SessionJwtConfig> = {}): SessionJwtMinte
     ...overrides,
   });
 }
+
+describe.each(['codex_sdk', 'pi_sdk', 'dsh_sdk'])('SDK ai-gateway lifetime: %s', (harness) => {
+  it.each([
+    [undefined, 660],
+    [120, 660],
+    [1800, 1800],
+  ] as const)(
+    'mints the operator-selected lifetime %s with the unchanged minimum',
+    async (configured, expected) => {
+      const minter = buildMinter();
+      const { token } = await minter.mint(BASE_CLAIMS, {
+        audience: 'ai-gateway',
+        ttlSecs: sdkGatewayJwtTtlSecs(harness, configured)!,
+      });
+      const decoded = decodeJwt(token);
+      expect(decoded.exp! - decoded.iat!).toBe(expected);
+    },
+  );
+});
+
+describe.each(['claude_agent_sdk', 'claude_code', 'mock'])('non-SDK lifetime: %s', (harness) => {
+  it('leaves the Session JWT lifetime unaffected by the LLM setting', async () => {
+    expect(sdkGatewayJwtTtlSecs(harness, 1800)).toBeUndefined();
+    const { token } = await buildMinter().mint(BASE_CLAIMS);
+    const decoded = decodeJwt(token);
+    expect(decoded.exp! - decoded.iat!).toBe(300);
+  });
+});
 
 describe('SessionJwtMinter', () => {
   describe('default audience (Phase 4 backwards compat)', () => {

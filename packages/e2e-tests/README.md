@@ -232,6 +232,40 @@ ORCA_E2E_SANDBOX_HARNESS=1 pnpm e2e:agent
 pnpm -F @orca/e2e-tests test
 ```
 
+## DSH colocated smoke
+
+DSH uses the same sandbox-harness Dockerfile and Layer B.1 helpers. It runs only
+the scoped smoke below, not the separate-mode, Skills or custom-tool scenarios.
+
+```bash
+docker build -f services/sandbox-harness/Dockerfile \
+  --build-arg DEFAULT_AGENT=dsh-sdk -t sandbox-harness-dsh:e2e .
+node scripts/render-pi-gateway-config.mjs \
+  services/dev/ai-gateway-llm-config.yaml /tmp/dsh-gateway.yaml dsh
+ORCA_E2E_AGENT_HARNESS=dsh_sdk pnpm e2e:agent:sandbox
+```
+
+Run against an endpoint-capable cloud sandbox stack, as for the existing
+OpenSandbox B.1 scenarios. Load/publish the built image where that backend can
+pull it, set harness-server `SANDBOX_HARNESS_DSH_IMAGE` to that image, and apply
+the rendered configuration to the actual Gateway (rendering alone does not
+configure it). Gateway receives `DEEPSEEK_API_KEY` through its own secret/env
+injection. Registry needs
+`SESSION_JWT_LLM_ROUTES=llm-pi-deepseek-anthropic-messages` and
+`SESSION_JWT_LLM_MODELS=deepseek-v4-flash`; the selected DSH native destination
+disables external usage sinks while the harness remains the usage writer.
+Do not disable the sandbox's trusted-image/entrypoint checks to load a test tag.
+
+For a pre-provisioned stack, set `ORCA_BASE_URL` and `ORCA_API_KEY`; the smoke
+then uses that workspace without database seeding or a provider key in the client.
+Without that pair it uses the existing local seed helper and requires the local
+provider-key preflight. Missing prerequisites fail instead of reporting success.
+
+The single case verifies managed bash execution, a downloaded session output,
+two-turn context retention, a cloud sandbox assignment and positive persisted
+usage. It does not claim cold sandbox recovery, approval denial, exact-once
+accounting or interruption coverage; those remain separate acceptance checks.
+
 When you are done:
 
 ```bash

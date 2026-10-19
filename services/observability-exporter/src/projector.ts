@@ -4,6 +4,7 @@
 import type { Event } from '@orca/transcript-store-types';
 import type { SessionStopReasonType } from '@orca/agent-event-contract';
 import {
+  MAX_PROJECTED_TOOLS_PER_TURN,
   closeTools,
   initialToolProjectionState,
   isClientToolResult,
@@ -30,6 +31,8 @@ import {
 import { deterministicChildSpanId, deterministicRootSpanId, deterministicTraceId } from './ids.js';
 import { isTraceSampled, parseTraceSamplingPolicy, type TraceSamplingPolicy } from './sampling.js';
 import {
+  TREE_PROJECTED_TRACE_SCHEMA_VERSION,
+  TREE_IO_PROJECTED_TRACE_SCHEMA_VERSION,
   PROJECTED_TRACE_SCHEMA_VERSION,
   IO_PROJECTED_TRACE_SCHEMA_VERSION,
   IO_VERSION,
@@ -53,6 +56,13 @@ import {
   MAX_CAPTURED_IO_BYTES_PER_TURN,
   MAX_PENDING_CAPTURED_IO_BYTES,
 } from './captured-io.js';
+
+import {
+  isCanonicalSubpath,
+  readThreadMetadata,
+  parseThreadMetadata,
+  THREAD_METADATA_KEYS,
+} from './thread-projection.js';
 
 const PRIMARY_SUBPATH = '';
 
@@ -189,7 +199,8 @@ const TURN_MODEL_SUMMARY = 'turn_model_summary';
 const COMPANION_SYSTEM_EVENT_ID_FIELD = '_orca_companion_system_event_id';
 const MAX_PENDING_INPUTS = 1_024;
 const MAX_COMPANION_SYSTEM_EVENTS = 64;
-const MAX_OPEN_MODEL_SUMMARIES = 64;
+// DSH can keep root + 127 child summaries open until the whole tree commits.
+const MAX_OPEN_MODEL_SUMMARIES = 128;
 const MAX_OPEN_EVALUATIONS = 64;
 const OUTCOME_EVALUATION = 'outcome_evaluation';
 const IGNORED_INTERNAL_EVENT_KINDS = new Set([
@@ -241,6 +252,8 @@ interface PendingInput {
 }
 
 interface OpenModelSummary {
+  subpath?: string;
+  threadMetadata?: ProjectedSpan['metadata'];
   sourceEventId: string;
   startedAt: string;
   provider?: string;
@@ -255,6 +268,7 @@ interface OpenEvaluation {
 }
 
 interface ActiveTurn {
+  threads?: { subpath: string; metadata: ProjectedSpan['metadata'] }[];
   io?: ProjectedIo;
   workspaceId: string;
   sessionId: string;
@@ -282,10 +296,12 @@ interface ActiveTurn {
 
 /**
  * Allowlisted reducer state. v4 may retain bounded raw turn/tool I/O and approval facts
- * under a sticky raw_io pin; older versions contain metadata only.
+ * under a sticky raw_io pin; v5 adds bounded canonical thread lineage; v6 separates
+ * completion receipts from bounded pending results and records observation loss.
+ * v1–v5 remain readable; old binaries reject v6 rather than dropping overflow state.
  */
 export interface CanonicalProjectionState {
-  version: 1 | 2 | 3 | 4;
+  version: 1 | 2 | 3 | 4 | 5 | 6;
   captureMode?: CaptureMode;
   pendingInputs: PendingInput[];
   activeTurn: ActiveTurn | null;
@@ -335,18 +351,19 @@ export function initialCanonicalProjectionState(): CanonicalProjectionState {
 export function parseCanonicalProjectionState(value: unknown): CanonicalProjectionState {
   if (
     !isRecord(value) ||
-    (value.version !== 1 && value.version !== 2 && value.version !== 3 && value.version !== 4) ||
+    (value.version !== 1 &&
+      value.version !== 2 &&
+      value.version !== 3 &&
+      value.version !== 4 &&
+      value.version !== 5 &&
+      value.version !== 6) ||
     !Array.isArray(value.pendingInputs)
   ) {
     throw new CanonicalProjectionStateError();
   }
-  if (
-    value.version === 4 &&
-    value.captureMode !== 'metadata_only' &&
-    value.captureMode !== 'raw_io'
-  )
+  if (value.version >= 4 && value.captureMode !== 'metadata_only' && value.captureMode !== 'raw_io')
     throw new CanonicalProjectionStateError();
-  const ioEnabled = value.version === 4 && value.captureMode === 'raw_io';
+  const ioEnabled = value.version >= 4 && value.captureMode === 'raw_io';
   const toolVersion = value.version >= 3;
   if (value.pendingInputs.length > MAX_PENDING_INPUTS) throw new CanonicalProjectionStateError();
   const pendingInputs = value.pendingInputs.map((input) =>
@@ -355,12 +372,12 @@ export function parseCanonicalProjectionState(value: unknown): CanonicalProjecti
 
   const parsed: CanonicalProjectionState = {
     version: value.version,
-    ...(value.version === 4 ? { captureMode: value.captureMode as CaptureMode } : {}),
+    ...(value.version >= 4 ? { captureMode: value.captureMode as CaptureMode } : {}),
     pendingInputs,
     activeTurn:
       value.activeTurn === null
         ? null
-        : parseActiveTurn(value.activeTurn, value.version >= 3, ioEnabled),
+        : parseActiveTurn(value.activeTurn, value.version >= 3, ioEnabled, value.version >= 6),
     ...(value.version === 2 || (value.version >= 3 && value.sampling !== undefined)
       ? { sampling: parseSamplingState(value.sampling) }
       : {}),
@@ -387,6 +404,18 @@ export function parseCanonicalProjectionState(value: unknown): CanonicalProjecti
       }
     }
   }
+  if (
+    parsed.version < 5 &&
+    parsed.activeTurn !== null &&
+    (parsed.activeTurn.threads !== undefined ||
+      parsed.activeTurn.tools.uses.some(
+        (use) => use.subpath !== undefined || use.threadMetadata !== undefined,
+      ) ||
+      [...parsed.activeTurn.openModelSummaries, ...parsed.activeTurn.completedModelSummaries].some(
+        (summary) => (summary.subpath ?? '') !== '',
+      ))
+  )
+    throw new CanonicalProjectionStateError();
   checkIoBudgets(parsed, true);
   return parsed;
 }
@@ -518,7 +547,7 @@ export function reduceCanonicalEventBatch(
     throw new CanonicalProjectionStateError();
   // Legacy nonempty checkpoints are metadata-only; neither migration nor a later
   // authorization expansion may enrich an already established session.
-  if (next.version === 4 || captureMode === 'raw_io') {
+  if (next.version >= 4 || captureMode === 'raw_io') {
     next.captureMode ??=
       next.activeTurn !== null ||
       next.pendingInputs.length > 0 ||
@@ -527,7 +556,7 @@ export function reduceCanonicalEventBatch(
         ? 'metadata_only'
         : captureMode;
     if (captureMode === 'metadata_only') next.captureMode = captureMode;
-    next.version = 4;
+    if (next.version < 5) next.version = 4;
   } else {
     // Preserve the legacy metadata-only checkpoint shape, including empty/gap
     // batches. v4 is required only once I/O capability has been considered.
@@ -556,16 +585,35 @@ export function reduceCanonicalEventBatch(
   for (const { event } of [...events.entries()]
     .map(([index, event]) => ({ event, index }))
     .sort(compareEvents)) {
-    if (event.subpath !== PRIMARY_SUBPATH) continue;
-
-    if (isPrimaryClientInput(event)) {
+    if (!isCanonicalSubpath(event.subpath)) continue;
+    const primary = event.subpath === PRIMARY_SUBPATH;
+    // Child follow-ups are accepted by a primary-stream marker referencing this input ID.
+    if ((primary || event.kind === 'user.message') && isClientInput(event)) {
       const eventId = boundedAgentEventId(event.id);
       if (eventId === undefined) throw new CanonicalProjectionStateError();
       addPendingInput(next, event, eventId, acceptedSourceIds);
       continue;
     }
+    if (
+      !primary &&
+      ![
+        'agent.tool_use',
+        'agent.mcp_tool_use',
+        'agent.custom_tool_use',
+        'agent.tool_result',
+        'agent.mcp_tool_result',
+        'span.model_request_start',
+        'span.model_request_end',
+        'session.thread_created',
+        'session.thread_status_running',
+        'session.thread_status_idle',
+        'session.thread_status_rescheduled',
+        'session.thread_status_terminated',
+      ].includes(event.kind)
+    )
+      continue;
 
-    if (event.kind === 'session.user_event_processed') {
+    if (primary && event.kind === 'session.user_event_processed') {
       const markerEventId = boundedAgentEventId(event.id);
       if (markerEventId === undefined) throw new CanonicalProjectionStateError();
       processAcceptanceMarker(
@@ -583,6 +631,11 @@ export function reduceCanonicalEventBatch(
 
     const active = next.activeTurn;
     if (active === null) continue;
+    if (!primary) {
+      if (next.version < 5) next.version = 5;
+      next.captureMode ??= 'metadata_only';
+      if (sampled) rememberThread(active, event);
+    }
     if (
       sampled &&
       [
@@ -600,16 +653,33 @@ export function reduceCanonicalEventBatch(
         active.executionStartedAt,
       );
       const added = event.kind.endsWith('_use')
-        ? projectToolUse(active.tools, event.kind, id, at, parsePayload(event), event.id, ioEnabled)
+        ? projectToolUse(
+            active.tools,
+            event.kind,
+            id,
+            at,
+            parsePayload(event),
+            event.id,
+            ioEnabled,
+            event.subpath,
+            threadMetadata(active, event),
+            deterministicTraceId(active.workspaceId, active.sessionId, active.anchorEventId),
+          )
         : projectToolResult(
             active.tools,
-            readToolResult(event.kind, parsePayload(event), ioEnabled ? active.tools : undefined),
+            readToolResult(
+              event.kind,
+              parsePayload(event),
+              ioEnabled ? active.tools : undefined,
+              event.subpath,
+            ),
             id,
             at,
             deterministicTraceId(active.workspaceId, active.sessionId, active.anchorEventId),
           );
       if (added)
         active.sourceEventCount = Math.min(Number.MAX_SAFE_INTEGER, active.sourceEventCount + 1);
+      upgradeToolState(next);
       checkIoBudgets(next);
       continue;
     }
@@ -617,7 +687,7 @@ export function reduceCanonicalEventBatch(
 
     switch (event.kind) {
       case 'agent.message': {
-        if (!sampled || !ioEnabled || active.io === undefined) break;
+        if (!primary || !sampled || !ioEnabled || active.io === undefined) break;
         const payload = parsePayload(event);
         if (payload.partial === true) break;
         appendTurnOutput(active.io, captureTextContent(payload.content));
@@ -835,7 +905,21 @@ function processAcceptanceMarker(
     active.companionSystemEventIds.push(source.companionSystemEventId);
   }
   consumePendingInput(state, sourceIndex, acceptedSourceIds, newlyAcceptedSourceIds);
+  upgradeToolState(state);
   checkIoBudgets(state);
+}
+
+function upgradeToolState(state: CanonicalProjectionState): void {
+  const tools = state.activeTurn?.tools;
+  if (
+    tools !== undefined &&
+    (tools.results.length > MAX_PROJECTED_TOOLS_PER_TURN ||
+      tools.omittedCallEventCount > 0 ||
+      tools.omittedResultEventCount > 0)
+  ) {
+    state.version = 6;
+    state.captureMode ??= 'metadata_only';
+  }
 }
 
 function addPendingInput(
@@ -870,6 +954,7 @@ function addPendingInput(
           event.kind,
           payload,
           state.captureMode === 'raw_io' ? state.activeTurn.tools : undefined,
+          originatingSubpath(payload),
         )
       : undefined;
   const userId = optionalBoundedString(event.userId, 512);
@@ -878,7 +963,7 @@ function addPendingInput(
     state.captureMode === 'raw_io' &&
     state.activeTurn !== null &&
     sampleActiveTurn(state)
-      ? readToolApproval(payload)
+      ? readToolApproval(payload, originatingSubpath(payload))
       : undefined;
   const toolTraceId =
     (toolResult === undefined && toolApproval === undefined) || state.activeTurn === null
@@ -987,6 +1072,10 @@ function startTurnModelSummary(active: ActiveTurn, event: Event): void {
   const requestedModel = optionalBoundedString(payload.model, 256);
   active.openModelSummaries.push({
     sourceEventId: event.id,
+    ...(event.subpath === '' ? {} : { subpath: event.subpath }),
+    ...(Object.keys(threadMetadata(active, event)).length === 0
+      ? {}
+      : { threadMetadata: threadMetadata(active, event) }),
     startedAt: atOrAfter(
       normalizeTimestamp(event.producedAt, active.executionStartedAt),
       active.executionStartedAt,
@@ -1002,7 +1091,8 @@ function endTurnModelSummary(active: ActiveTurn, event: Event): void {
   const startEventId = readEventId(payload, 'model_request_start_id');
   if (startEventId === undefined) return;
   const openIndex = active.openModelSummaries.findIndex(
-    (summary) => summary.sourceEventId === startEventId,
+    (summary) =>
+      summary.sourceEventId === startEventId && (summary.subpath ?? '') === event.subpath,
   );
   if (openIndex < 0) return;
   const [open] = active.openModelSummaries.splice(openIndex, 1);
@@ -1027,12 +1117,12 @@ function endTurnModelSummary(active: ActiveTurn, event: Event): void {
     spanId: deterministicChildSpanId(
       traceId,
       TURN_MODEL_SUMMARY,
-      PRIMARY_SUBPATH,
+      open.subpath ?? '',
       open.sourceEventId,
     ),
     parentSpanId: deterministicRootSpanId(traceId),
     sourceEventId: open.sourceEventId,
-    subpath: PRIMARY_SUBPATH,
+    subpath: open.subpath ?? '',
     name: 'orca.agent.turn_model_summary',
     observationType: TURN_MODEL_SUMMARY,
     startedAt: open.startedAt,
@@ -1044,7 +1134,8 @@ function endTurnModelSummary(active: ActiveTurn, event: Event): void {
       'orca.model.observation.kind': TURN_MODEL_SUMMARY,
       'orca.source.start_event_id': open.sourceEventId,
       'orca.source.end_event_id': event.id,
-      'orca.thread.subpath': PRIMARY_SUBPATH,
+      'orca.thread.subpath': open.subpath ?? '',
+      ...open.threadMetadata,
     },
     ...(Object.keys(modelSummary).length === 0 ? {} : { modelSummary }),
   });
@@ -1137,7 +1228,13 @@ function evaluationStatus(result: string): ProjectedSpan['status'] {
 
 function closeTurn(active: ActiveTurn, terminal: Event, terminalReason: string): ProjectedTrace {
   const schemaVersion =
-    active.io === undefined ? PROJECTED_TRACE_SCHEMA_VERSION : IO_PROJECTED_TRACE_SCHEMA_VERSION;
+    active.threads !== undefined
+      ? active.io === undefined
+        ? TREE_PROJECTED_TRACE_SCHEMA_VERSION
+        : TREE_IO_PROJECTED_TRACE_SCHEMA_VERSION
+      : active.io === undefined
+        ? PROJECTED_TRACE_SCHEMA_VERSION
+        : IO_PROJECTED_TRACE_SCHEMA_VERSION;
   const traceId = deterministicTraceId(active.workspaceId, active.sessionId, active.anchorEventId);
   const rootSpanId = deterministicRootSpanId(traceId);
   const tools = closeTools(
@@ -1189,6 +1286,13 @@ function closeTurn(active: ActiveTurn, terminal: Event, terminalReason: string):
     ...(active.tools.unmatchedResultCount === 0
       ? {}
       : { 'orca.turn.unmatched_tool_result_count': active.tools.unmatchedResultCount }),
+    ...(active.tools.omittedCallEventCount === 0 && active.tools.omittedResultEventCount === 0
+      ? {}
+      : {
+          'orca.turn.tool_observations_truncated': true,
+          'orca.turn.omitted_tool_call_event_count': active.tools.omittedCallEventCount,
+          'orca.turn.omitted_tool_result_event_count': active.tools.omittedResultEventCount,
+        }),
   };
 
   return {
@@ -1276,7 +1380,12 @@ function parsePendingInput(value: unknown, toolVersion = true, ioEnabled = false
   };
 }
 
-function parseActiveTurn(value: unknown, toolVersion = true, ioEnabled = false): ActiveTurn {
+function parseActiveTurn(
+  value: unknown,
+  toolVersion = true,
+  ioEnabled = false,
+  overflowEnabled = false,
+): ActiveTurn {
   if (!isRecord(value)) throw new CanonicalProjectionStateError();
   if (ioEnabled && value.io !== undefined) {
     const io = parseProjectedIo(value.io);
@@ -1345,6 +1454,15 @@ function parseActiveTurn(value: unknown, toolVersion = true, ioEnabled = false):
         );
   const traceId = deterministicTraceId(workspaceId, sessionId, anchorEventId);
   const rootSpanId = deterministicRootSpanId(traceId);
+  const completedModelSummaries = value.completedModelSummaries.map(parseCompletedModelSummarySpan);
+  for (const span of completedModelSummaries) {
+    if (
+      span.parentSpanId !== rootSpanId ||
+      span.spanId !==
+        deterministicChildSpanId(traceId, TURN_MODEL_SUMMARY, span.subpath, span.sourceEventId)
+    )
+      throw new CanonicalProjectionStateError();
+  }
   const startIds = new Set<string>();
   for (const evaluation of [...(openEvaluations ?? []), ...(completedEvaluations ?? [])]) {
     if (startIds.has(evaluation.sourceEventId)) throw new CanonicalProjectionStateError();
@@ -1368,6 +1486,7 @@ function parseActiveTurn(value: unknown, toolVersion = true, ioEnabled = false):
     sessionId,
     anchorEventId,
     acceptanceEventId,
+    ...(value.threads === undefined ? {} : { threads: parseThreads(value.threads) }),
     ...(userId === undefined ? {} : { userId }),
     inputReceivedAt,
     acceptedAt,
@@ -1384,12 +1503,13 @@ function parseActiveTurn(value: unknown, toolVersion = true, ioEnabled = false):
     interruptCount,
     sawNonRetryableError: value.sawNonRetryableError,
     openModelSummaries: value.openModelSummaries.map(parseOpenModelSummary),
-    completedModelSummaries: value.completedModelSummaries.map(parseCompletedModelSummarySpan),
+    completedModelSummaries,
     tools: toolVersion
       ? parseToolProjectionState(
           value.tools,
           deterministicTraceId(workspaceId, sessionId, anchorEventId),
           ioEnabled,
+          overflowEnabled,
         )
       : initialToolProjectionState(),
     ...(openEvaluations === undefined ? {} : { openEvaluations }),
@@ -1495,6 +1615,10 @@ function parseOpenModelSummary(value: unknown): OpenModelSummary {
   return {
     sourceEventId: value.sourceEventId,
     startedAt: value.startedAt,
+    ...(value.subpath === undefined ? {} : { subpath: parseSubpath(value.subpath) }),
+    ...(value.threadMetadata === undefined
+      ? {}
+      : { threadMetadata: parseThreadFields(value.threadMetadata) }),
     ...(provider === undefined ? {} : { provider }),
     ...(requestedModel === undefined ? {} : { requestedModel }),
   };
@@ -1514,7 +1638,7 @@ function parseCompletedModelSummarySpan(value: unknown): ProjectedSpan {
   if (
     !isSpanId(spanId) ||
     !isBoundedAgentEventId(sourceEventId) ||
-    subpath !== PRIMARY_SUBPATH ||
+    !isCanonicalSubpath(subpath) ||
     name !== 'orca.agent.turn_model_summary' ||
     !isTimestamp(startedAt) ||
     !isTimestamp(endedAt) ||
@@ -1525,7 +1649,7 @@ function parseCompletedModelSummarySpan(value: unknown): ProjectedSpan {
   ) {
     throw new CanonicalProjectionStateError();
   }
-  const metadata = parseSummaryMetadata(value.metadata, sourceEventId);
+  const metadata = parseSummaryMetadata(value.metadata, sourceEventId, subpath);
   const modelSummary =
     value.modelSummary === undefined ? undefined : parseModelSummary(value.modelSummary);
   return {
@@ -1546,6 +1670,7 @@ function parseCompletedModelSummarySpan(value: unknown): ProjectedSpan {
 function parseSummaryMetadata(
   value: Record<string, unknown>,
   sourceEventId: string,
+  subpath: string,
 ): Record<string, ProjectedMetadataValue> {
   const expectedKeys = [
     'observation_type',
@@ -1555,6 +1680,7 @@ function parseSummaryMetadata(
     'orca.source.start_event_id',
     'orca.thread.subpath',
   ];
+  expectedKeys.push(...Object.keys(parseThreadMetadata(value)));
   if (
     !hasExactKeys(value, expectedKeys) ||
     value.observation_type !== TURN_MODEL_SUMMARY ||
@@ -1562,7 +1688,7 @@ function parseSummaryMetadata(
     value['orca.projection.schema_version'] !== PROJECTED_TRACE_SCHEMA_VERSION ||
     value['orca.source.start_event_id'] !== sourceEventId ||
     !isBoundedAgentEventId(value['orca.source.end_event_id']) ||
-    value['orca.thread.subpath'] !== PRIMARY_SUBPATH
+    value['orca.thread.subpath'] !== subpath
   ) {
     throw new CanonicalProjectionStateError();
   }
@@ -1618,7 +1744,7 @@ function compareEvents(left: OrderedEvent, right: OrderedEvent): number {
   return leftSeq - rightSeq || left.index - right.index;
 }
 
-function isPrimaryClientInput(event: Event): boolean {
+function isClientInput(event: Event): boolean {
   return (
     event.producedBy === 'client' &&
     (event.kind.startsWith('user.') || event.kind === 'system.message')
@@ -1788,3 +1914,50 @@ function isNonNegativeSafeInteger(value: unknown): value is number {
 }
 
 const EPOCH = '1970-01-01T00:00:00.000Z';
+
+function parseSubpath(value: unknown): string {
+  if (!isCanonicalSubpath(value)) throw new CanonicalProjectionStateError();
+  return value;
+}
+function parseThreadFields(value: unknown): ProjectedSpan['metadata'] {
+  if (!isRecord(value) || Object.keys(value).some((key) => !THREAD_METADATA_KEYS.includes(key)))
+    throw new CanonicalProjectionStateError();
+  return parseThreadMetadata(value);
+}
+function parseThreads(value: unknown): NonNullable<ActiveTurn['threads']> {
+  if (!Array.isArray(value) || value.length > MAX_PROJECTED_TOOLS_PER_TURN)
+    throw new CanonicalProjectionStateError();
+  const threads = value.map((entry) => {
+    if (!isRecord(entry) || entry.subpath === '') throw new CanonicalProjectionStateError();
+    return { subpath: parseSubpath(entry.subpath), metadata: parseThreadFields(entry.metadata) };
+  });
+  if (new Set(threads.map((thread) => thread.subpath)).size !== threads.length)
+    throw new CanonicalProjectionStateError();
+  return threads;
+}
+function rememberThread(active: ActiveTurn, event: Event): void {
+  const threads = (active.threads ??= []);
+  let thread = threads.find((entry) => entry.subpath === event.subpath);
+  if (thread === undefined) {
+    if (threads.length >= MAX_PROJECTED_TOOLS_PER_TURN) throw new CanonicalProjectionStateError();
+    thread = { subpath: event.subpath, metadata: {} };
+    threads.push(thread);
+  }
+  for (const [key, value] of Object.entries(readThreadMetadata(parsePayload(event)))) {
+    if (thread.metadata[key] !== undefined && thread.metadata[key] !== value)
+      throw new CanonicalProjectionStateError();
+    thread.metadata[key] = value;
+  }
+}
+function threadMetadata(active: ActiveTurn, event: Event): ProjectedSpan['metadata'] {
+  if (event.subpath === '') return {};
+  return {
+    ...active.threads?.find((thread) => thread.subpath === event.subpath)?.metadata,
+    ...readThreadMetadata(parsePayload(event)),
+  };
+}
+function originatingSubpath(payload: Record<string, unknown>): string {
+  // Primary-stream client replies may address a child action. Never use arrival order.
+  const value = payload.subpath;
+  return value === undefined ? '' : parseSubpath(value);
+}

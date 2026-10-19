@@ -1,11 +1,18 @@
 // Copyright The Orca Authors
 // SPDX-License-Identifier: Apache-2.0
 
+import {
+  isCanonicalSubpath,
+  parseThreadMetadata,
+  THREAD_METADATA_KEYS,
+} from './thread-projection.js';
 import { createHash } from 'node:crypto';
 import { boundedAgentEventId, isBoundedAgentEventId } from './event-identity.js';
 import { deterministicChildSpanId, deterministicRootSpanId } from './ids.js';
 import { CanonicalProjectionStateError } from './projector.js';
 import {
+  isProjectionSchema,
+  isIoProjectionSchema,
   PROJECTED_TRACE_SCHEMA_VERSION,
   IO_PROJECTED_TRACE_SCHEMA_VERSION,
   IO_VERSION,
@@ -29,6 +36,8 @@ export interface ToolResult {
   output?: CapturedValue;
 }
 interface ToolUse {
+  subpath?: string;
+  threadMetadata?: ProjectedSpan['metadata'];
   family: ToolFamily;
   correlationKey: string;
   sourceEventId: string;
@@ -54,16 +63,17 @@ const APPROVAL_KEYS = ['result', 'source_event_id', 'acceptance_event_id', 'acce
 
 export function readToolApproval(
   payload: Record<string, unknown>,
+  subpath = '',
 ): PendingToolApproval | undefined {
   if (payload.result !== 'allow' && payload.result !== 'deny') return undefined;
-  const local = correlation('local', payload.tool_use_id);
+  const local = correlation('local', payload.tool_use_id, subpath);
   if (local === undefined) return undefined;
   return {
     result: payload.result,
     correlationKeys: {
       local,
-      mcp: correlation('mcp', payload.tool_use_id)!,
-      custom: correlation('custom', payload.tool_use_id)!,
+      mcp: correlation('mcp', payload.tool_use_id, subpath)!,
+      custom: correlation('custom', payload.tool_use_id, subpath)!,
     },
   };
 }
@@ -149,12 +159,21 @@ export interface ToolProjectionState {
   uses: ToolUse[];
   results: { sourceEventId: string; producedAt: string; result: ToolResult }[];
   unmatchedResultCount: number;
+  omittedCallEventCount: number;
+  omittedResultEventCount: number;
 }
 export const initialToolProjectionState = (): ToolProjectionState => ({
   uses: [],
   results: [],
   unmatchedResultCount: 0,
+  omittedCallEventCount: 0,
+  omittedResultEventCount: 0,
 });
+
+const increment = (count: number): number => Math.min(Number.MAX_SAFE_INTEGER, count + 1);
+function isCompletionReceipt(state: ToolProjectionState, id: string): boolean {
+  return state.uses.some((use) => use.completed?.metadata['orca.source.end_event_id'] === id);
+}
 
 function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -175,12 +194,12 @@ function timestamp(value: unknown): value is string {
 function digest(value: unknown): value is string {
   return typeof value === 'string' && /^[a-f0-9]{64}$/u.test(value);
 }
-function correlation(f: ToolFamily, value: unknown): string | undefined {
+function correlation(f: ToolFamily, value: unknown, subpath = ''): string | undefined {
   if (typeof value !== 'string' || value.length === 0) return undefined;
-  // Hash correlation identity only, never tool content. Family and primary subpath
+  // Hash correlation identity only, never tool content. Family and originating subpath
   // are domain separated, including for sandbox-native IDs that are not evt_*.
   return createHash('sha256')
-    .update(JSON.stringify(['orca.observability.tool-correlation.v1', f, '', value]))
+    .update(JSON.stringify(['orca.observability.tool-correlation.v1', f, subpath, value]))
     .digest('hex');
 }
 export function isClientToolResult(kind: string): boolean {
@@ -190,6 +209,7 @@ export function readToolResult(
   kind: string,
   payload: Record<string, unknown>,
   state?: ToolProjectionState,
+  subpath = '',
 ): ToolResult {
   const f =
     kind === 'user.custom_tool_result'
@@ -197,7 +217,11 @@ export function readToolResult(
       : kind === 'agent.mcp_tool_result'
         ? 'mcp'
         : 'local';
-  const key = correlation(f, payload[f === 'custom' ? 'custom_tool_use_id' : 'tool_use_id']);
+  const key = correlation(
+    f,
+    payload[f === 'custom' ? 'custom_tool_use_id' : 'tool_use_id'],
+    subpath,
+  );
   return {
     family: f,
     ...(key === undefined ? {} : { correlationKey: key }),
@@ -236,6 +260,9 @@ export function projectToolUse(
   payload: Record<string, unknown>,
   rawSourceId = id,
   ioEnabled = false,
+  subpath = '',
+  threadMetadata: ProjectedSpan['metadata'] = {},
+  traceId: string,
 ): boolean {
   const f: ToolFamily =
     kind === 'agent.custom_tool_use' ? 'custom' : kind === 'agent.mcp_tool_use' ? 'mcp' : 'local';
@@ -249,9 +276,10 @@ export function projectToolUse(
         : Object.hasOwn(payload, 'tool_use_id')
           ? payload.tool_use_id
           : rawSourceId,
+      subpath,
     ) ??
     createHash('sha256')
-      .update(JSON.stringify(['orca.observability.invalid-tool-correlation.v1', f, '', id]))
+      .update(JSON.stringify(['orca.observability.invalid-tool-correlation.v1', f, subpath, id]))
       .digest('hex');
   if (state.results.some((r) => r.sourceEventId === id)) fail();
   const existing = state.uses.find(
@@ -267,13 +295,18 @@ export function projectToolUse(
       fail();
     return false;
   }
-  if (state.uses.length >= MAX_PROJECTED_TOOLS_PER_TURN) fail();
+  if (state.uses.length >= MAX_PROJECTED_TOOLS_PER_TURN) {
+    state.omittedCallEventCount = increment(state.omittedCallEventCount);
+    return true;
+  }
   const toolName = ioEnabled ? captureToolName(payload.name) : undefined;
   state.uses.push({
     family: f,
     correlationKey: key,
     sourceEventId: id,
     startedAt: at,
+    ...(subpath === '' ? {} : { subpath }),
+    ...(Object.keys(threadMetadata).length === 0 ? {} : { threadMetadata }),
     ...(ioEnabled
       ? {
           io: {
@@ -284,6 +317,19 @@ export function projectToolUse(
         }
       : {}),
   });
+  const pending = state.results.find(
+    (r) => r.result.family === f && r.result.correlationKey === key,
+  );
+  if (pending !== undefined) {
+    completeTool(
+      state.uses.at(-1)!,
+      pending.result,
+      traceId,
+      pending.sourceEventId,
+      pending.producedAt,
+    );
+    state.unmatchedResultCount = Math.max(0, state.unmatchedResultCount - 1);
+  }
   return true;
 }
 export function projectToolResult(
@@ -295,27 +341,46 @@ export function projectToolResult(
 ): boolean {
   if (state.uses.some((u) => u.sourceEventId === id)) fail();
   // Receipts preserve correlation/status duplicate semantics, not another payload copy.
-  const { output, ...receipt } = result;
+  const { output: _output, ...receipt } = result;
   const previous = state.results.find((r) => r.sourceEventId === id);
   if (previous !== undefined) {
     if (JSON.stringify(previous.result) !== JSON.stringify(receipt) || previous.producedAt !== at)
       fail();
     return false;
   }
-  if (state.results.length >= MAX_PROJECTED_TOOLS_PER_TURN) fail();
-  state.results.push({ sourceEventId: id, producedAt: at, result: receipt });
   const use = state.uses.find(
     (u) => u.family === result.family && u.correlationKey === result.correlationKey,
   );
   if (use === undefined || use.completed !== undefined) {
-    state.unmatchedResultCount = Math.min(Number.MAX_SAFE_INTEGER, state.unmatchedResultCount + 1);
+    state.unmatchedResultCount = increment(state.unmatchedResultCount);
+    // Reserve completion receipts for admitted uses; pending/unmatched receipts
+    // have their own bound. Omitted identities are not globally deduplicated.
+    if (
+      state.results.filter((r) => !isCompletionReceipt(state, r.sourceEventId)).length >=
+      MAX_PROJECTED_TOOLS_PER_TURN
+    ) {
+      state.omittedResultEventCount = increment(state.omittedResultEventCount);
+      return true;
+    }
+    state.results.push({ sourceEventId: id, producedAt: at, result: receipt });
     return true;
   }
+  state.results.push({ sourceEventId: id, producedAt: at, result: receipt });
+  completeTool(use, result, traceId, id, at);
+  return true;
+}
+function completeTool(
+  use: ToolUse,
+  result: ToolResult,
+  traceId: string,
+  id: string,
+  at: string,
+): void {
+  const { output } = result;
   if (use.io !== undefined && output !== undefined) use.io.output = output;
   use.completed = toolSpan(use, traceId, id, at, result.outcome);
   delete use.io;
   delete use.lastApproval;
-  return true;
 }
 function toolSpan(
   use: ToolUse,
@@ -325,10 +390,10 @@ function toolSpan(
   outcome: 'success' | 'error' | 'incomplete',
 ): ProjectedSpan {
   return {
-    spanId: deterministicChildSpanId(traceId, 'tool', '', use.sourceEventId),
+    spanId: deterministicChildSpanId(traceId, 'tool', use.subpath ?? '', use.sourceEventId),
     parentSpanId: deterministicRootSpanId(traceId),
     sourceEventId: use.sourceEventId,
-    subpath: '',
+    subpath: use.subpath ?? '',
     name: 'orca.agent.tool',
     observationType: 'tool',
     startedAt: use.startedAt,
@@ -345,7 +410,8 @@ function toolSpan(
       'orca.tool.outcome': outcome,
       'orca.source.start_event_id': use.sourceEventId,
       'orca.source.end_event_id': endId,
-      'orca.thread.subpath': '',
+      'orca.thread.subpath': use.subpath ?? '',
+      ...use.threadMetadata,
       ...(use.lastApproval === undefined ? {} : approvalMetadata(use.lastApproval)),
     },
   };
@@ -376,9 +442,11 @@ export function parseCompletedToolSpan(value: unknown): ProjectedSpan {
     'orca.thread.subpath',
   ];
   const outcome = m['orca.tool.outcome'];
+  const threadMetadata = parseThreadMetadata(m);
+  keys.push(...Object.keys(threadMetadata));
   if (APPROVAL_KEYS.some((key) => Object.hasOwn(m, key))) {
     if (
-      m['orca.projection.schema_version'] !== IO_PROJECTED_TRACE_SCHEMA_VERSION ||
+      !isIoProjectionSchema(m['orca.projection.schema_version']) ||
       m['orca.tool.family'] === 'custom'
     )
       return fail();
@@ -394,18 +462,15 @@ export function parseCompletedToolSpan(value: unknown): ProjectedSpan {
     Object.keys(m).length !== keys.length ||
     keys.some((k) => !Object.hasOwn(m, k)) ||
     m.observation_type !== 'tool' ||
-    ![PROJECTED_TRACE_SCHEMA_VERSION, IO_PROJECTED_TRACE_SCHEMA_VERSION].includes(
-      m['orca.projection.schema_version'] as typeof PROJECTED_TRACE_SCHEMA_VERSION,
-    ) ||
-    (value.io !== undefined &&
-      m['orca.projection.schema_version'] !== IO_PROJECTED_TRACE_SCHEMA_VERSION) ||
+    !isProjectionSchema(m['orca.projection.schema_version']) ||
+    (value.io !== undefined && !isIoProjectionSchema(m['orca.projection.schema_version'])) ||
     !family(m['orca.tool.family']) ||
     !['success', 'error', 'incomplete'].includes(String(outcome)) ||
     m['orca.source.start_event_id'] !== value.sourceEventId ||
     !isBoundedAgentEventId(m['orca.source.end_event_id']) ||
-    m['orca.thread.subpath'] !== '' ||
+    m['orca.thread.subpath'] !== value.subpath ||
     !isBoundedAgentEventId(value.sourceEventId) ||
-    value.subpath !== '' ||
+    !isCanonicalSubpath(value.subpath) ||
     value.name !== 'orca.agent.tool' ||
     value.observationType !== 'tool' ||
     typeof value.spanId !== 'string' ||
@@ -423,7 +488,7 @@ export function parseCompletedToolSpan(value: unknown): ProjectedSpan {
     spanId: value.spanId,
     parentSpanId: value.parentSpanId,
     sourceEventId: value.sourceEventId,
-    subpath: '',
+    subpath: value.subpath,
     name: 'orca.agent.tool',
     observationType: 'tool',
     startedAt: value.startedAt,
@@ -437,24 +502,36 @@ export function parseToolProjectionState(
   value: unknown,
   traceId: string,
   ioEnabled = false,
+  overflowEnabled = false,
 ): ToolProjectionState {
   if (
     !record(value) ||
     !Array.isArray(value.uses) ||
     !Array.isArray(value.results) ||
     value.uses.length > MAX_PROJECTED_TOOLS_PER_TURN ||
-    value.results.length > MAX_PROJECTED_TOOLS_PER_TURN ||
+    value.results.length > MAX_PROJECTED_TOOLS_PER_TURN * (overflowEnabled ? 2 : 1) ||
     !Number.isSafeInteger(value.unmatchedResultCount) ||
     (value.unmatchedResultCount as number) < 0
   )
     return fail();
+  const counters = ['omittedCallEventCount', 'omittedResultEventCount'] as const;
+  for (const key of counters) {
+    if (value[key] === undefined && !overflowEnabled) continue;
+    if (
+      !Number.isSafeInteger(value[key]) ||
+      (value[key] as number) < 0 ||
+      (!overflowEnabled && value[key] !== 0)
+    )
+      return fail();
+  }
   const uses: ToolUse[] = value.uses.map((u: unknown) => {
     if (
       !record(u) ||
       !family(u.family) ||
       !digest(u.correlationKey) ||
       !isBoundedAgentEventId(u.sourceEventId) ||
-      !timestamp(u.startedAt)
+      !timestamp(u.startedAt) ||
+      (u.subpath !== undefined && !isCanonicalSubpath(u.subpath))
     )
       return fail();
     const completed =
@@ -490,8 +567,10 @@ export function parseToolProjectionState(
       (completed.status === 'unset' ||
         completed.sourceEventId !== u.sourceEventId ||
         completed.startedAt !== u.startedAt ||
+        completed.subpath !== (u.subpath ?? '') ||
         completed.metadata['orca.tool.family'] !== u.family ||
-        completed.spanId !== deterministicChildSpanId(traceId, 'tool', '', u.sourceEventId) ||
+        completed.spanId !==
+          deterministicChildSpanId(traceId, 'tool', u.subpath ?? '', u.sourceEventId) ||
         completed.parentSpanId !== deterministicRootSpanId(traceId))
     )
       return fail();
@@ -500,6 +579,10 @@ export function parseToolProjectionState(
       correlationKey: u.correlationKey,
       sourceEventId: u.sourceEventId,
       startedAt: u.startedAt,
+      ...(u.subpath === undefined ? {} : { subpath: u.subpath as string }),
+      ...(u.threadMetadata === undefined
+        ? {}
+        : { threadMetadata: parseUseThreadMetadata(u.threadMetadata) }),
       ...(completed === undefined ? {} : { completed }),
       ...(ioEnabled && u.io !== undefined ? { io: parseProjectedIo(u.io) } : {}),
       ...(lastApproval === undefined ? {} : { lastApproval }),
@@ -535,5 +618,34 @@ export function parseToolProjectionState(
     )
       fail();
   }
-  return { uses, results, unmatchedResultCount: value.unmatchedResultCount as number };
+  const state = {
+    uses,
+    results,
+    unmatchedResultCount: value.unmatchedResultCount as number,
+    omittedCallEventCount: (value.omittedCallEventCount as number | undefined) ?? 0,
+    omittedResultEventCount: (value.omittedResultEventCount as number | undefined) ?? 0,
+  };
+  if (
+    results.filter((r) => !isCompletionReceipt(state, r.sourceEventId)).length >
+    MAX_PROJECTED_TOOLS_PER_TURN
+  )
+    fail();
+  // Legacy checkpoints may already contain a use whose earlier receipt was
+  // never reconciled. Normalize it once, using the same first-receipt rule.
+  for (const use of uses) {
+    if (use.completed !== undefined) continue;
+    const pending = results.find(
+      (r) => r.result.family === use.family && r.result.correlationKey === use.correlationKey,
+    );
+    if (pending === undefined) continue;
+    completeTool(use, pending.result, traceId, pending.sourceEventId, pending.producedAt);
+    state.unmatchedResultCount = Math.max(0, state.unmatchedResultCount - 1);
+  }
+  return state;
+}
+
+function parseUseThreadMetadata(value: unknown): ProjectedSpan['metadata'] {
+  if (!record(value) || Object.keys(value).some((key) => !THREAD_METADATA_KEYS.includes(key)))
+    return fail();
+  return parseThreadMetadata(value);
 }

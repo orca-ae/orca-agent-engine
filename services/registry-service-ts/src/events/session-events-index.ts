@@ -479,6 +479,7 @@ function parsePayload(event: Event): HttpEventInput {
 }
 
 interface SessionThreadMutation {
+  parentSubpath?: string;
   source: 'lifecycle' | 'subpath';
   id: string;
   workspaceId: string;
@@ -502,10 +503,42 @@ interface ThreadAgentMetadata {
 async function upsertSessionThreadsFromEvents(db: DbClient, events: Event[]): Promise<void> {
   const sessionDefaults = new Map<string, { agentId: string; agentVersion: number } | null>();
   const sessionSubagentRosters = new Map<string, Map<string, ThreadAgentMetadata>>();
-  for (const event of events) {
+  const mutations = events.flatMap((event) => {
     const mutation = extractSessionThreadMutation(event) ?? extractSubpathThreadMutation(event);
-    if (!mutation) continue;
-
+    return mutation ? [mutation] : [];
+  });
+  // A batch can contain grandchildren before their declarations. Keep each
+  // thread's own event order while inserting its parent before the child FK.
+  const ordered: SessionThreadMutation[] = [];
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const visit = (mutation: SessionThreadMutation): void => {
+    const key = `${mutation.workspaceId}:${mutation.sessionId}:${mutation.subpath}`;
+    if (visited.has(key)) return;
+    if (visiting.has(key)) throw new Error('Cyclic session thread lineage');
+    visiting.add(key);
+    if (mutation.parentSubpath) {
+      const parent = mutations.find(
+        (candidate) =>
+          candidate.workspaceId === mutation.workspaceId &&
+          candidate.sessionId === mutation.sessionId &&
+          candidate.subpath === mutation.parentSubpath,
+      );
+      if (parent) visit(parent);
+    }
+    visiting.delete(key);
+    visited.add(key);
+    ordered.push(
+      ...mutations.filter(
+        (candidate) =>
+          candidate.workspaceId === mutation.workspaceId &&
+          candidate.sessionId === mutation.sessionId &&
+          candidate.subpath === mutation.subpath,
+      ),
+    );
+  };
+  for (const mutation of mutations) visit(mutation);
+  for (const mutation of ordered) {
     const cacheKey = `${mutation.workspaceId}:${mutation.sessionId}`;
     let defaults = sessionDefaults.get(cacheKey);
     if (defaults === undefined) {
@@ -550,7 +583,11 @@ async function upsertSessionThreadsFromEvents(db: DbClient, events: Event[]): Pr
         parentThreadId:
           mutation.subpath === ''
             ? null
-            : stableSessionThreadId(mutation.workspaceId, mutation.sessionId, ''),
+            : stableSessionThreadId(
+                mutation.workspaceId,
+                mutation.sessionId,
+                mutation.parentSubpath ?? '',
+              ),
         status: mutation.status,
         stopReason: mutation.stopReason ?? null,
         archivedAt: null,
@@ -563,12 +600,21 @@ async function upsertSessionThreadsFromEvents(db: DbClient, events: Event[]): Pr
           mutation.source === 'lifecycle'
             ? {
                 id: mutation.id,
-                parentThreadId:
-                  mutation.subpath === ''
-                    ? null
-                    : stableSessionThreadId(mutation.workspaceId, mutation.sessionId, ''),
+                ...(mutation.parentSubpath !== undefined
+                  ? {
+                      parentThreadId:
+                        mutation.subpath === ''
+                          ? null
+                          : stableSessionThreadId(
+                              mutation.workspaceId,
+                              mutation.sessionId,
+                              mutation.parentSubpath,
+                            ),
+                    }
+                  : {}),
                 status: mutation.status,
                 stopReason: mutation.stopReason ?? null,
+                ...(mutation.agentName !== undefined ? { agentName: mutation.agentName } : {}),
                 updatedAt: mutation.updatedAt,
               }
             : hasExplicitAgent
@@ -618,6 +664,9 @@ function extractSessionThreadMutation(event: Event): SessionThreadMutation | nul
     readString(agent, ['name']);
   return {
     source: 'lifecycle',
+    ...(typeof payload.parent_subpath === 'string'
+      ? { parentSubpath: payload.parent_subpath }
+      : {}),
     id,
     workspaceId: event.workspaceId,
     sessionId: event.sessionId,

@@ -187,9 +187,9 @@ describe('metadata-only primary tool projection', () => {
     );
     const full = reduceCanonicalEventBatch(base, uses).state;
     expect(full.activeTurn?.tools.uses).toHaveLength(MAX_PROJECTED_TOOLS_PER_TURN);
-    expect(() => reduceCanonicalEventBatch(full, [event(999, 'agent.tool_use')])).toThrow(
-      CanonicalProjectionStateError,
-    );
+    const overflow = reduceCanonicalEventBatch(full, [event(999, 'agent.tool_use')]).state;
+    expect(overflow.activeTurn?.tools.uses).toHaveLength(MAX_PROJECTED_TOOLS_PER_TURN);
+    expect(overflow.activeTurn?.tools.omittedCallEventCount).toBe(1);
     base.activeTurn!.tools.unmatchedResultCount = Number.MAX_SAFE_INTEGER;
     expect(
       reduceCanonicalEventBatch(base, [event(3, 'agent.tool_result')]).state.activeTurn?.tools
@@ -199,9 +199,11 @@ describe('metadata-only primary tool projection', () => {
       event(i + 3, 'agent.tool_result'),
     );
     const orphans = reduceCanonicalEventBatch(base, results).state;
-    expect(() => reduceCanonicalEventBatch(orphans, [event(999, 'agent.tool_result')])).toThrow(
-      CanonicalProjectionStateError,
-    );
+    const resultOverflow = reduceCanonicalEventBatch(orphans, [
+      event(999, 'agent.tool_result'),
+    ]).state;
+    expect(resultOverflow.activeTurn?.tools.results).toHaveLength(MAX_PROJECTED_TOOLS_PER_TURN);
+    expect(resultOverflow.activeTurn?.tools.omittedResultEventCount).toBe(1);
   });
   it('does not attach an old unaccepted result to a later turn reusing a native ID', () => {
     const first = reduceCanonicalEventBatch(initialCanonicalProjectionState(), [
@@ -273,7 +275,13 @@ describe('metadata-only primary tool projection', () => {
             }
           : {}),
       };
-      legacy.activeTurn!.tools = { uses: [], results: [], unmatchedResultCount: 999 };
+      legacy.activeTurn!.tools = {
+        uses: [],
+        results: [],
+        unmatchedResultCount: 999,
+        omittedCallEventCount: 0,
+        omittedResultEventCount: 0,
+      };
       const restored = reduceCanonicalEventBatch(legacy, []);
       expect(restored.state.version).toBe(3);
       expect(restored.state.activeTurn?.tools.unmatchedResultCount).toBe(0);

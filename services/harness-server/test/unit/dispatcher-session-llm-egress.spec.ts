@@ -81,6 +81,62 @@ describe('Dispatcher Session LLM egress selection', () => {
   });
 });
 
+describe('Dispatcher SDK turn deadlines', () => {
+  const build = (global?: number, overrides?: { dsh_sdk?: number; pi_sdk?: number }) => {
+    const dispatcher = new Dispatcher({
+      groupId: 'sdk-deadlines',
+      store: {} as TranscriptStore,
+      anthropicApiKey: '',
+      modelDefault: 'unused',
+      gatewayLlmUrl: 'http://gateway.test/v1',
+      registry: {
+        mintLlmGatewayJwt: vi.fn().mockResolvedValue({
+          token: 'sdk-jwt',
+          expiresAt: Math.floor(Date.now() / 1000) + 660,
+        }),
+      } as unknown as RegistryClient,
+      ...(global === undefined ? {} : { harnessTurnTimeoutMs: global }),
+      ...(overrides === undefined ? {} : { harnessTurnTimeoutOverridesMs: overrides }),
+    });
+    return (id: 'codex_sdk' | 'pi_sdk' | 'dsh_sdk', colocated = true) =>
+      (
+        dispatcher['buildCodexHarness'](
+          'ws_test',
+          'ses_test',
+          { runtime_revision: 7 } as SessionRecord,
+          colocated,
+          id,
+        ) as unknown as { opts: CodexSdkHarnessOptions }
+      ).opts;
+  };
+
+  it('keeps the default and applies global and per-harness deadlines in both SDK modes', () => {
+    for (const id of ['codex_sdk', 'pi_sdk', 'dsh_sdk'] as const) {
+      for (const colocated of id === 'dsh_sdk' ? [true] : [false, true]) {
+        const defaults = build()(id, colocated);
+        expect(defaults.turnTimeoutMs).toBe(600_000);
+        defaults.llmGatewayJwtProvider?.close();
+        const configured = build(300_000, { dsh_sdk: 900_000 })(id, colocated);
+        expect(configured.turnTimeoutMs).toBe(id === 'dsh_sdk' ? 900_000 : 300_000);
+        configured.llmGatewayJwtProvider?.close();
+      }
+    }
+  });
+
+  it('requires the effective deadline plus 30 seconds of JWT validity before DSH execution', async () => {
+    const shorter = build(300_000)('dsh_sdk');
+    await expect(shorter.llmGatewayJwtProvider!.getValidToken()).resolves.toMatchObject({
+      token: 'sdk-jwt',
+    });
+    shorter.llmGatewayJwtProvider!.close();
+    const longer = build(300_000, { dsh_sdk: 900_000 })('dsh_sdk');
+    await expect(longer.llmGatewayJwtProvider!.getValidToken()).rejects.toThrow(
+      /930000ms.*AI_GATEWAY_LLM_JWT_TTL_SECS/,
+    );
+    longer.llmGatewayJwtProvider!.close();
+  });
+});
+
 describe('Dispatcher Codex separate execution', () => {
   const create = (llmEgressDefault: 'direct' | 'gateway' = 'direct') => {
     const mintLlmGatewayJwt = vi

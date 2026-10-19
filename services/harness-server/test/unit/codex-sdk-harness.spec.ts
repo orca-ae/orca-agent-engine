@@ -11,6 +11,7 @@ import { stat } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import type { CodexCheckpoint, WorkerCommand, WorkerEvent } from '@orca/codex-harness';
 import { CodexSdkHarness, type CodexSdkHarnessOptions } from '../../src/harness/codex-sdk/index.js';
+import { SessionJwtLifetimeError } from '../../src/mcp/session-jwt-provider.js';
 import {
   GuardrailUsageUnavailableError,
   type AgentEvent,
@@ -147,6 +148,7 @@ function setup(opts: TestOptions = {}) {
     onCheckpoint,
     execute,
     start,
+    emit: (event: WorkerEvent) => emit(event),
     setRun: (fn: (send: typeof emit) => Promise<void>) => {
       run = () => fn(emit);
     },
@@ -160,7 +162,176 @@ function idle(events: AgentEvent[], type: string) {
   );
 }
 
+describe('DSH native thread host', () => {
+  it('orders declarations before managed tools, rejects wrong-thread approval, and targets only the child', async () => {
+    const child = 'subagents/11111111-1111-4111-8111-111111111111';
+    const h = setup({
+      harness: 'dsh_sdk',
+      dshGatewayUrl: 'http://gateway',
+      llmGatewayJwtProvider: {
+        getValidToken: async () => ({ token: 'scoped', expiresAt: 9999999999 }),
+        close: vi.fn(),
+      },
+    });
+    const released = deferred<void>();
+    const childResult = deferred<void>();
+    h.handle.mockImplementation(async (command: WorkerCommand) => {
+      if (command.type === 'submit') {
+        expect(command).toMatchObject({ sourceEventId: message.id });
+        await run();
+      } else if (command.type === 'tool_result') childResult.resolve();
+    });
+    const send = h.emit;
+    const run = async () => {
+      send({
+        type: 'canonical_event',
+        event: {
+          id: 'evt_child',
+          subpath: child,
+          kind: 'session.thread_created',
+          payload: { subpath: child, parent_subpath: '', turn_event_id: message.id },
+        },
+      });
+      send({
+        type: 'tool_call',
+        id: 'native_child',
+        name: 'bash',
+        arguments: { command: 'true' },
+        origin: { eventId: 'evt_child_tool', subpath: child, parentSubpath: '' },
+      });
+      await childResult.promise;
+      await released.promise;
+      send({
+        type: 'canonical_event',
+        event: {
+          id: 'evt_root_model',
+          subpath: '',
+          kind: 'span.model_request_start',
+          payload: { turn_event_id: message.id, model_observation_kind: 'turn_model_summary' },
+        },
+      });
+      send({
+        type: 'canonical_event',
+        event: {
+          id: 'evt_root_model_end',
+          subpath: '',
+          kind: 'span.model_request_end',
+          payload: {
+            turn_event_id: message.id,
+            model_observation_kind: 'turn_model_summary',
+            model_request_start_id: 'evt_root_model',
+            is_error: false,
+            model_usage: {
+              input_tokens: 3,
+              output_tokens: 1,
+              cache_read_input_tokens: 0,
+              cache_creation_input_tokens: 0,
+            },
+          },
+        },
+      });
+      send({
+        type: 'event',
+        event: {
+          type: 'turn.completed',
+          usage: { input_tokens: 3, cached_input_tokens: 0, output_tokens: 1 },
+        },
+      });
+    };
+    await h.start({
+      archivedThreadSubpaths: [],
+      agentSnapshot: {
+        model_provider: 'deepseek',
+        model_id: 'deepseek-v4-flash',
+        allowed_tool_names: ['bash'],
+        tool_permission_policies: { mcp__orca__bash: 'always_ask' },
+      },
+    });
+    await h.harness.submit(message);
+    expect(h.events.findIndex((event) => event.id === 'evt_child')).toBeLessThan(
+      h.events.findIndex((event) => event.id === 'evt_child_tool'),
+    );
+    await expect(
+      h.harness.submit({
+        id: 'evt_wrong',
+        kind: 'user.tool_confirmation',
+        payload: { tool_use_id: 'evt_child_tool', result: 'allow' },
+      }),
+    ).rejects.toThrow('No pending tool action');
+    await expect(
+      h.harness.submit({
+        id: 'evt_conflicting_thread',
+        kind: 'user.tool_confirmation',
+        subpath: child,
+        payload: {
+          subpath: 'subagents/22222222-2222-4222-8222-222222222222',
+          tool_use_id: 'evt_child_tool',
+          result: 'allow',
+        },
+      }),
+    ).rejects.toThrow('conflicts');
+    await expect(
+      h.harness.submit({
+        id: 'evt_unverified_thread',
+        kind: 'user.tool_confirmation',
+        payload: { subpath: child, tool_use_id: 'evt_child_tool', result: 'allow' },
+      }),
+    ).rejects.toThrow('validated session_thread_id');
+    expect(h.events.find((event) => event.id === 'evt_child_tool')?.payload).toMatchObject({
+      subpath: child,
+      parent_subpath: '',
+    });
+    expect(
+      h.events.find((event) => event.kind === 'agent.thread_message_received')?.payload,
+    ).toMatchObject({
+      subpath: child,
+      parent_subpath: '',
+    });
+    await h.harness.submit({
+      id: 'evt_interrupt_child',
+      kind: 'user.interrupt',
+      subpath: child,
+      payload: {},
+    });
+    expect(h.handle).toHaveBeenCalledWith({
+      type: 'interrupt',
+      threadId: child.slice('subagents/'.length),
+    });
+    expect(h.execute).not.toHaveBeenCalled();
+    released.resolve();
+    await vi.waitFor(() =>
+      expect(h.events.filter((event) => event.kind === 'agent.usage')).toHaveLength(1),
+    );
+    await vi.waitFor(() => expect(idle(h.events, 'retries_exhausted')).toBeDefined());
+    expect(h.events.filter((event) => event.kind === 'span.model_request_start')).toHaveLength(1);
+    expect(h.events.filter((event) => event.kind === 'span.model_request_end')).toHaveLength(1);
+    expect(h.events.find((event) => event.kind === 'agent.tool_result')?.subpath).toBe(child);
+    expect(h.events.find((event) => event.kind === 'agent.tool_result')?.payload).toMatchObject({
+      subpath: child,
+      parent_subpath: '',
+    });
+    expect(h.handle.mock.calls.filter(([command]) => command.type === 'interrupt')).toHaveLength(1);
+  });
+});
+
 describe('Codex SDK separate harness', () => {
+  it('preserves actionable lifetime errors on pre-turn credential refresh without submitting work', async () => {
+    const getValidToken = vi
+      .fn()
+      .mockResolvedValueOnce({ token: 'valid-startup-jwt' })
+      .mockRejectedValue(new SessionJwtLifetimeError(930_000));
+    const h = setup({
+      turnTimeoutMs: 900_000,
+      llmGatewayJwtProvider: { getValidToken, close: vi.fn() },
+    });
+    await h.start();
+    await expect(h.harness.submit(message)).rejects.toThrow('AI_GATEWAY_LLM_JWT_TTL_SECS');
+    expect(h.handle.mock.calls.some(([command]) => command.type === 'submit')).toBe(false);
+    expect(h.events.find((event) => event.kind === 'session.error')?.payload).toMatchObject({
+      error: { message: expect.stringContaining('AI_GATEWAY_LLM_JWT_TTL_SECS') },
+    });
+  });
+
   it('rejects a changed catalog before starting the worker or replacing native history', async () => {
     const h = setup({ checkpoint });
     await expect(

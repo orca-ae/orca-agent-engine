@@ -13,7 +13,8 @@ import { isPublicTranscriptEvent, type HttpEventInput } from './events.js';
 const PRIMARY_PROJECTION_NAMESPACE = 'cb278008-bd9d-4f6e-b655-b43f8f6331ea';
 const THREAD_PUBLIC_PROJECTION_NAMESPACE = 'd3d7a30e-90bd-4834-b167-7374690768ae';
 const LEGACY_AGENT_MESSAGE_TOOL_PROJECTION_NAMESPACE = '3114be80-4700-47d8-a6c7-d757b3932376';
-export const SESSION_THREAD_ID_NAMESPACE = 'ea82f5c2-b759-4717-9727-51b3ef079bef';
+export { stableSessionThreadId, SESSION_THREAD_ID_NAMESPACE } from '@orca/agent-event-contract';
+import { stableSessionThreadId } from '@orca/agent-event-contract';
 
 export interface IndexablePublicViewEvent {
   event: Event;
@@ -349,14 +350,6 @@ function projectedEventId(
 ): string {
   const source = `${event.workspaceId}:${event.sessionId}:${event.id}:${kind}`;
   return `evt_${uuidv5(discriminator ? `${source}:${discriminator}` : source, namespace)}`;
-}
-
-export function stableSessionThreadId(
-  workspaceId: string,
-  sessionId: string,
-  subpath: string,
-): string {
-  return `sth_${uuidv5(`${workspaceId}:${sessionId}:${subpath}`, SESSION_THREAD_ID_NAMESPACE)}`;
 }
 
 function readString(record: Record<string, unknown>, keys: string[]): string | undefined {

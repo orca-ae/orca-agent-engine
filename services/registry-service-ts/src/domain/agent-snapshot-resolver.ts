@@ -1,9 +1,14 @@
 // Copyright The Orca Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { piLlmRoute, validateHarnessDeployment, validateHarnessModel } from '@orca/harness-catalog';
+import {
+  DSH_LLM_ROUTE,
+  piLlmRoute,
+  validateHarnessDeployment,
+  validateHarnessModel,
+} from '@orca/harness-catalog';
 import type { SessionJwtLlmPolicy } from '../config.js';
-import { intersectLlmModels } from './llm-policy.js';
+import { dshLlmGrants, intersectLlmModels } from './llm-policy.js';
 import { normalizeModelForStorage } from '../contracts/model-wire.js';
 // The agent-snapshot RESOLVER — the impure orchestrator that turns a session id
 // into a credential-free {@link AgentSnapshot} ready to deliver over the tunnel.
@@ -619,7 +624,9 @@ export class AgentSnapshotResolver {
     // snapshot. The JWT carries the FULL session vault_ids allowlist (not just the
     // matched ones) — per-call X-Orca-Vault-Id headers narrow it at request time,
     // and the gateway only accepts a vault_id present in the JWT.
-    const nativeSdk = ['codex-sdk', 'pi-sdk'].includes(resolveAgentProvider(agent.metadata));
+    const nativeSdk = ['codex-sdk', 'pi-sdk', 'dsh-sdk'].includes(
+      resolveAgentProvider(agent.metadata),
+    );
     let sessionJwt = '';
     if (serverNames.length > 0) {
       const minted = await this.minter.mint(
@@ -659,9 +666,18 @@ export class AgentSnapshotResolver {
       // exact model/route claims. Deployment policy is an upper bound, as on
       // the internal mint-jwt endpoint; absence never grants model access.
       const nativeRoute =
-        resolveAgentProvider(agent.metadata) === 'pi-sdk'
-          ? piLlmRoute(agent.model.provider, agent.model.id)
-          : 'llm-responses';
+        resolveAgentProvider(agent.metadata) === 'dsh-sdk'
+          ? DSH_LLM_ROUTE
+          : resolveAgentProvider(agent.metadata) === 'pi-sdk'
+            ? piLlmRoute(agent.model.provider, agent.model.id)
+            : 'llm-responses';
+      if (
+        resolveAgentProvider(agent.metadata) === 'dsh-sdk' &&
+        !dshLlmGrants(this.llmPolicy, agent.model)
+      )
+        throw new Error(
+          'dsh_sdk requires its fixed Messages route/model in SESSION_JWT_LLM_ROUTES/MODELS',
+        );
       const models = nativeSdk
         ? intersectLlmModels(this.llmPolicy?.models ?? [], [agent.model.id])
         : [];

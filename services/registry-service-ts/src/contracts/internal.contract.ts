@@ -576,6 +576,7 @@ export const PreparedExecutionV2Schema = z.object({
    * preparation is what stops a cap being reset by forcing a runner restart.
    */
   guardrail_state: z.record(z.string(), z.unknown()).default({}),
+  archived_thread_subpaths: z.array(z.string()).optional(),
 });
 
 export type PreparedAgentSnapshot = z.infer<typeof PreparedAgentSnapshotSchema>;

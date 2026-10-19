@@ -62,6 +62,7 @@ _GVISOR_RUNTIME_CLASS = "gvisor"
 _OFFICIAL_IMAGES = (
     ("orca-opensandbox-code-interpreter", ("/opt/code-interpreter/code-interpreter.sh",)),
     ("sandbox-harness-claude-code", ("/usr/local/bin/orca-sandbox-harness",)),
+    ("sandbox-harness-dsh", ("/usr/local/bin/orca-sandbox-harness",)),
 )
 # Registry/namespace prefixes the official images are trusted under: the release
 # registry by default. Operators who mirror the images list their mirrors in

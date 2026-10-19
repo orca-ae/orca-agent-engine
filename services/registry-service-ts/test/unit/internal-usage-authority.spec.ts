@@ -23,6 +23,17 @@ function snapshot(metadata: Record<string, unknown>) {
 }
 
 describe('authoritative session usage caller', () => {
+  it('keeps DSH harness-authoritative with Gateway Registry usage enabled', () => {
+    expect(
+      authoritativeUsageCallerForSnapshot(
+        snapshot({ harness: 'dsh_sdk', mode: 'colocated' }),
+        true,
+      ),
+    ).toBe('harness');
+    expect(
+      registryOwnsCodexUsage(snapshot({ harness: 'dsh_sdk', mode: 'colocated' }), 'self_hosted'),
+    ).toBe(false);
+  });
   it('selects AI Gateway for colocated sessions only after its Registry sink is enabled', () => {
     expect(
       authoritativeUsageCallerForSnapshot(

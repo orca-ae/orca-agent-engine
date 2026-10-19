@@ -1,6 +1,8 @@
 // Copyright The Orca Authors
 // SPDX-License-Identifier: Apache-2.0
 
+import { DshSdkWorker } from '@orca/dsh-harness';
+import { validateSdkCheckpoint, validateHarnessModel } from '@orca/harness-catalog';
 import { PiSdkWorker } from '@orca/pi-harness';
 import type { SdkWorker } from '@orca/sdk-harness';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -14,6 +16,7 @@ const options = z.object({
   apiKey: z.string().min(1),
   baseUrl: z.string().url().optional(),
   piGatewayUrl: z.string().url().optional(),
+  dshGatewayUrl: z.string().url().optional(),
   system: z.string().optional(),
 });
 const commandSchema = z.discriminatedUnion('type', [
@@ -33,10 +36,11 @@ const commandSchema = z.discriminatedUnion('type', [
         })
         .passthrough(),
     ),
+    archivedThreadSubpaths: z.array(z.string()).optional(),
     checkpoint: z
       .object({
         version: z.literal(1),
-        format: z.literal('pi_sdk').optional(),
+        format: z.enum(['pi_sdk', 'dsh_sdk']).optional(),
         sdkVersion: z.string().optional(),
         threadId: z.string(),
         files: z.record(z.string(), z.string()),
@@ -45,29 +49,90 @@ const commandSchema = z.discriminatedUnion('type', [
       .optional(),
   }),
   options.extend({ type: z.literal('refresh') }),
-  z.object({ type: z.literal('submit'), text: z.string() }),
+  z.object({
+    type: z.literal('submit'),
+    text: z.string(),
+    sourceEventId: z.string().optional(),
+    threadId: z.string().uuid().optional(),
+  }),
   z.object({
     type: z.literal('tool_result'),
     id: z.string(),
     result: z.object({ content: z.array(z.unknown()) }).passthrough(),
   }),
-  z.object({ type: z.literal('interrupt') }),
+  z.object({
+    type: z.literal('interrupt'),
+    threadId: z.string().uuid().optional(),
+    archived: z.boolean().optional(),
+  }),
+  z.object({ type: z.literal('archive_fence'), threadId: z.string().uuid() }),
+  z.object({
+    type: z.literal('orchestration_result'),
+    id: z.string().min(1),
+    allowed: z.boolean(),
+    reason: z.string().optional(),
+  }),
   z.object({ type: z.literal('stop') }),
 ]);
 
 /** The host adapter owns policies, accounting and durable turn receipts in both topologies. */
 export class CodexSdkRuntime implements Runtime {
-  constructor(readonly model: 'codex-sdk' | 'pi-sdk' = 'codex-sdk') {}
+  constructor(readonly model: 'codex-sdk' | 'pi-sdk' | 'dsh-sdk' = 'codex-sdk') {}
   private worker: SdkWorker | undefined;
   private root: string | undefined;
 
   async handleSdkCommand(raw: unknown, emit: (event: unknown) => void): Promise<void> {
     const command = commandSchema.parse(raw);
+    if (
+      this.model !== 'dsh-sdk' &&
+      (command.type === 'archive_fence' ||
+        command.type === 'orchestration_result' ||
+        (command.type === 'interrupt' && (command.threadId || command.archived)))
+    )
+      throw new Error('Native thread commands are DSH-only');
+    if (this.model === 'dsh-sdk' && (command.type === 'start' || command.type === 'refresh')) {
+      if (command.baseUrl || command.piGatewayUrl)
+        throw new Error('DSH accepts only its scoped Gateway origin');
+      if (command.dshGatewayUrl) {
+        const origin = new URL(command.dshGatewayUrl);
+        if (
+          origin.username ||
+          origin.password ||
+          origin.pathname !== '/' ||
+          origin.search ||
+          origin.hash ||
+          !['http:', 'https:'].includes(origin.protocol)
+        )
+          throw new Error('DSH Gateway URL must be an origin');
+      }
+    }
     if (command.type === 'start') {
       if (this.worker) throw new Error('SDK already started');
       if (this.model === 'pi-sdk' && !command.piGatewayUrl)
         throw new Error('colocated Pi requires an explicit native Gateway URL');
-      this.worker = this.model === 'pi-sdk' ? new PiSdkWorker(emit) : new CodexSdkWorker(emit);
+      const harness =
+        this.model === 'dsh-sdk' ? 'dsh_sdk' : this.model === 'pi-sdk' ? 'pi_sdk' : 'codex_sdk';
+      if (command.checkpoint) validateSdkCheckpoint(command.checkpoint, harness);
+      if (this.model === 'dsh-sdk') {
+        if (!command.archivedThreadSubpaths)
+          throw new Error('DSH requires authoritative archive state');
+        if (!command.dshGatewayUrl) throw new Error('colocated DSH requires a Gateway origin');
+        const error = validateHarnessModel(
+          { harness },
+          {
+            provider: command.modelProvider ?? '',
+            id: command.model,
+            effort: command.effort,
+          },
+        );
+        if (error) throw new Error(error);
+      }
+      this.worker =
+        this.model === 'dsh-sdk'
+          ? new DshSdkWorker(emit)
+          : this.model === 'pi-sdk'
+            ? new PiSdkWorker(emit)
+            : new CodexSdkWorker(emit);
       // A host path must never become the SDK's cwd inside the sandbox. Keep
       // project configuration and ambient account credentials out of discovery.
       this.root = await mkdtemp(join(tmpdir(), 'orca-codex-work-'));
@@ -101,4 +166,11 @@ export const piSdkProvider: Provider = {
   harnessId: 'pi_sdk',
   displayName: 'Pi SDK',
   createRuntime: () => new CodexSdkRuntime('pi-sdk'),
+};
+
+export const dshSdkProvider: Provider = {
+  id: 'dsh-sdk',
+  harnessId: 'dsh_sdk',
+  displayName: 'DSH SDK',
+  createRuntime: () => new CodexSdkRuntime('dsh-sdk'),
 };

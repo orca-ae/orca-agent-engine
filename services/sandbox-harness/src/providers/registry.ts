@@ -21,7 +21,7 @@
 
 import type { Provider } from './types.js';
 import { claudeProvider } from './claude.js';
-import { codexSdkProvider, piSdkProvider } from './codex-sdk.js';
+import { codexSdkProvider, piSdkProvider, dshSdkProvider } from './codex-sdk.js';
 
 /**
  * Public-facing provider descriptor returned by {@link listProviderMetadata} and
@@ -45,7 +45,12 @@ export interface ProviderMetadata {
  * metadata is sorted by name). Add a provider here to register it everywhere; this
  * literal array is the single registration point.
  */
-const PROVIDERS: readonly Provider[] = [claudeProvider, codexSdkProvider, piSdkProvider];
+const PROVIDERS: readonly Provider[] = [
+  claudeProvider,
+  codexSdkProvider,
+  piSdkProvider,
+  dshSdkProvider,
+];
 
 /**
  * id + aliases -> provider, keyed lower-case for case-insensitive resolution.

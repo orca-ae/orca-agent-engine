@@ -16,6 +16,7 @@ COPY patches ./patches
 COPY packages/codex-harness/package.json ./packages/codex-harness/
 COPY packages/sdk-harness/package.json ./packages/sdk-harness/
 COPY packages/pi-harness/package.json ./packages/pi-harness/
+COPY packages/dsh-harness/package.json ./packages/dsh-harness/
 COPY services/registry-service-ts/package.json ./services/registry-service-ts/
 COPY services/harness-server/package.json ./services/harness-server/
 COPY packages/agent-event-contract/package.json ./packages/agent-event-contract/

@@ -10,7 +10,7 @@
     ".": "./dist/index.js"
   },
   "scripts": {
-    "build": "tsup src/index.ts src/subprocess-entry.ts --format esm --dts --target node22",
+    "build": "tsup src/index.ts src/subprocess-entry.ts --format esm --dts --target node22 --external @orca/dsh-harness",
     "test": "vitest run",
     "lint": "eslint 'src/**/*.ts' 'test/**/*.ts'"
   },
@@ -20,7 +20,8 @@
     "zod": "^4.0.0",
     "@orca/codex-harness": "workspace:*",
     "@orca/sdk-harness": "workspace:*",
-    "@orca/pi-harness": "workspace:*"
+    "@orca/pi-harness": "workspace:*",
+    "@orca/dsh-harness": "workspace:*"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

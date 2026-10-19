@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { assertSdkTerminalUsage as assertCodexTerminalUsage } from '@orca/sdk-harness';
+import { stableSessionThreadId, AgentThreadEventKind } from '@orca/agent-event-contract';
+import { DshEventProjection, nativeThreadId } from './dsh-events.js';
+import { assertDshCheckpointInstructions } from '@orca/dsh-harness';
 import { PiSdkWorker, assertPiCheckpointInstructions } from '@orca/pi-harness';
 import type { HarnessTurnAction, HarnessTurnReceipt } from '@orca/harness-catalog';
 import { recoverCodexTurn, receiptTerminalEvents, type CodexTurnStore } from './turn-receipt.js';
@@ -20,7 +23,7 @@ import {
   type CodexCheckpoint,
   type WorkerEvent,
 } from '@orca/codex-harness';
-import { validateHarnessGuardrails } from '@orca/harness-catalog';
+import { validateHarnessGuardrails, validateHarnessModel } from '@orca/harness-catalog';
 import {
   BUILTIN_EVALUATORS,
   compileGuardrailRule,
@@ -34,7 +37,10 @@ import {
   type Verdict,
 } from '@orca/guardrails';
 import type { ClaudeHarnessOptions } from '../claude/index.js';
-import type { SessionJwtProvider } from '../../mcp/session-jwt-provider.js';
+import {
+  SessionJwtLifetimeError,
+  type SessionJwtProvider,
+} from '../../mcp/session-jwt-provider.js';
 import {
   type AgentHarness,
   type AgentEvent,
@@ -63,10 +69,11 @@ const USAGE_PENDING_PREFIX = 'codex_sdk_usage_pending:';
 
 type Worker = import('@orca/sdk-harness').SdkWorker;
 export interface CodexSdkHarnessOptions {
-  harness?: 'codex_sdk' | 'pi_sdk';
+  harness?: 'codex_sdk' | 'pi_sdk' | 'dsh_sdk';
   apiKey: string;
   baseUrl?: string;
   piGatewayUrl?: string;
+  dshGatewayUrl?: string;
   checkpoint?: CodexCheckpoint;
   turns: CodexTurnStore;
   llmGatewayJwtProvider?: Pick<SessionJwtProvider, 'getValidToken' | 'close'>;
@@ -81,9 +88,10 @@ interface Binding {
   policyName: string;
   serverName?: string;
   custom?: boolean;
-  call(args: Record<string, unknown>): Promise<CallToolResult>;
+  call(args: Record<string, unknown>, options?: { signal?: AbortSignal }): Promise<CallToolResult>;
 }
 interface PendingAction {
+  subpath: string;
   kind: 'user.tool_confirmation' | 'user.custom_tool_result';
   resolve(payload: Record<string, unknown>): void;
 }
@@ -96,6 +104,17 @@ export class CodexSdkHarness implements AgentHarness {
   private clients: Client[] = [];
   private bindings = new Map<string, Binding>();
   private pending = new Map<AgentEvent['id'], PendingAction>();
+  private dshProjection: DshEventProjection | undefined;
+  private cancelledToolCalls = new Set<string>();
+  private cancelledSubpaths = new Set<string>();
+  private toolOrigins = new Map<string, string>();
+  private callControllers = new Map<string, AbortController>();
+  private archivedSubpaths = new Set<string>();
+  private orchestrationCalls = new Set<string>();
+  private nativeRootId: string | undefined;
+  private executingTools = new Set<string>();
+  private uncertainCancellations = new Set<string>();
+  private terminalUsageEvent: AgentEventInput | undefined;
   private guards: PreparedGuardrail[] = [];
   private guardrailStore = new InMemoryGuardrailStateStore();
   private guarded = false;
@@ -114,6 +133,7 @@ export class CodexSdkHarness implements AgentHarness {
   private abort: AbortController | undefined;
   private eventTail: Promise<void> = Promise.resolve();
   private toolCalls = new Set<Promise<void>>();
+  private inFlight = new Map<string, Promise<void>>();
   private idleWaiters = new Set<() => void>();
   private queue: AgentEvent[] = [];
   private readers: Array<(event: IteratorResult<AgentEvent>) => void> = [];
@@ -130,11 +150,40 @@ export class CodexSdkHarness implements AgentHarness {
 
   constructor(private readonly opts: CodexSdkHarnessOptions) {}
 
+  get supportsNativeThreadInterrupt(): boolean {
+    return this.opts.harness === 'dsh_sdk';
+  }
+
+  async applyArchivedThreadSubpaths(paths: string[]): Promise<void> {
+    if (!this.dshProjection) return;
+    const additions = paths.filter((path) => !this.archivedSubpaths.has(path));
+    for (const path of additions) nativeThreadId(path);
+    for (const path of additions) this.archivedSubpaths.add(path);
+    try {
+      for (const path of additions) {
+        // A rolled-back checkpoint may not contain a later archived conversation.
+        if (!this.dshProjection.subtree(path).includes(path)) continue;
+        const threadId = nativeThreadId(path);
+        if (!threadId) throw new Error('Root archive requires whole-tree retirement');
+        await this.worker!.handle({ type: 'archive_fence', threadId });
+      }
+    } catch (cause) {
+      await this.retireDshTree();
+      throw new DurableHarnessStateError('DSH archive refresh was not acknowledged; tree retired', {
+        cause,
+      });
+    }
+  }
+
   private get sdkName(): string {
-    return this.opts.harness === 'pi_sdk' ? 'Pi SDK' : 'Codex SDK';
+    return this.opts.harness === 'dsh_sdk'
+      ? 'DSH SDK'
+      : this.opts.harness === 'pi_sdk'
+        ? 'Pi SDK'
+        : 'Codex SDK';
   }
   private get harnessName(): string {
-    return this.opts.harness === 'pi_sdk' ? 'pi_sdk' : 'codex_sdk';
+    return this.opts.harness ?? 'codex_sdk';
   }
 
   async start(input: SessionStartInput): Promise<void> {
@@ -155,22 +204,79 @@ export class CodexSdkHarness implements AgentHarness {
   private async initialize(input: SessionStartInput): Promise<void> {
     if (this.input || this.stopped) throw new Error(`${this.sdkName} already started or stopped`);
     if (
-      (this.opts.harness !== 'pi_sdk' && input.agentSnapshot.model_provider !== 'openai') ||
+      (this.harnessName === 'codex_sdk' && input.agentSnapshot.model_provider !== 'openai') ||
       !input.agentSnapshot.model_provider ||
       !input.agentSnapshot.model_id
     )
       throw new Error(`${this.harnessName} requires a pinned supported model`);
+    if (this.opts.harness === 'dsh_sdk') {
+      if (!Array.isArray(input.archivedThreadSubpaths))
+        throw new Error('DSH requires authoritative archived thread state');
+      for (const subpath of input.archivedThreadSubpaths) {
+        nativeThreadId(subpath);
+        this.archivedSubpaths.add(subpath);
+      }
+      if (!this.opts.createWorker || !this.opts.dshGatewayUrl || !this.opts.llmGatewayJwtProvider)
+        throw new Error('dsh_sdk requires colocated execution and scoped Gateway credentials');
+      const error = validateHarnessModel(
+        { harness: 'dsh_sdk' },
+        {
+          provider: input.agentSnapshot.model_provider,
+          id: input.agentSnapshot.model_id,
+          effort: input.agentSnapshot.model_effort,
+        },
+      );
+      if (error) throw new Error(error);
+      if (input.agentSnapshot.custom_tools?.length)
+        throw new Error('dsh_sdk does not support custom client tools');
+      if (input.agentSnapshot.allowed_tool_names?.includes('web_fetch')) {
+        const policies = input.agentSnapshot.tool_permission_policies ?? {};
+        if (
+          (policies.mcp__orca__web_fetch ?? policies['mcp__orca__*'] ?? 'always_allow') !==
+          'always_deny'
+        )
+          throw new Error('dsh_sdk requires agent_toolset web_fetch permission_policy always_deny');
+      }
+      this.dshProjection = new DshEventProjection(input.workspaceId, input.sessionId, [
+        'spawn',
+        'fork',
+        'send_message',
+        'interrupt_agent',
+      ]);
+    }
     if (this.opts.checkpoint)
-      (this.opts.harness === 'pi_sdk'
-        ? assertPiCheckpointInstructions
-        : assertCodexCheckpointInstructions)(
+      (this.opts.harness === 'dsh_sdk'
+        ? assertDshCheckpointInstructions
+        : this.opts.harness === 'pi_sdk'
+          ? assertPiCheckpointInstructions
+          : assertCodexCheckpointInstructions)(
         this.opts.checkpoint,
         input.agentSnapshot.system ?? '',
       );
     if (input.agentSnapshot.multiagent || input.clientToolExecution)
       throw new Error(`${this.harnessName} does not support multiagent or client tool execution`);
     const resolved = (input.guardrails ?? []).map((g) => {
-      const rule = g.rule as PreparedGuardrail['guardrail']['rule'];
+      let rule = g.rule as PreparedGuardrail['guardrail']['rule'];
+      if (
+        this.opts.harness === 'dsh_sdk' &&
+        rule.kind === 'builtin' &&
+        rule.builtin === 'spawn_bounds'
+      ) {
+        const tools = rule.params?.dispatch_tools;
+        if (
+          Array.isArray(tools) &&
+          tools.length &&
+          tools.some((name) => name !== 'spawn' && name !== 'fork')
+        )
+          throw new Error('DSH spawn_bounds dispatch_tools must explicitly select spawn/fork');
+        rule = {
+          ...rule,
+          params: {
+            ...rule.params,
+            dispatch_tools: Array.isArray(tools) && tools.length ? tools : ['spawn', 'fork'],
+          },
+        };
+      }
       const scope = g.tier === 'organization' || g.tier === 'workspace' ? g.tier : 'explicit';
       const compiled = compileGuardrailRule(rule, scope);
       if (!compiled.ok)
@@ -192,11 +298,14 @@ export class CodexSdkHarness implements AgentHarness {
       return { ...g, stateful: compiled.stateful, stateScope: compiled.stateScope, rule };
     });
     const guardrailError = validateHarnessGuardrails(
-      { harness: this.opts.harness ?? 'codex_sdk', mode: 'separate' },
+      {
+        harness: this.opts.harness ?? 'codex_sdk',
+        mode: this.opts.harness === 'dsh_sdk' ? 'colocated' : 'separate',
+      },
       resolved,
     );
     if (guardrailError) throw new Error(guardrailError);
-    this.guarded = resolved.some((g) => g.stateful);
+    this.guarded = resolved.some((g) => g.stateful && g.stateScope !== 'turn');
     if (this.guarded && (!this.opts.onGuardrailState || !this.opts.onUsage))
       throw new Error(
         `${this.harnessName} stateful request rules require durable guardrail state and usage callbacks`,
@@ -224,9 +333,11 @@ export class CodexSdkHarness implements AgentHarness {
     this.receipt = restored.receipt;
     this.checkpoint = restored.state ? (restored.state as CodexCheckpoint) : undefined;
     if (this.checkpoint)
-      (this.opts.harness === 'pi_sdk'
-        ? assertPiCheckpointInstructions
-        : assertCodexCheckpointInstructions)(this.checkpoint, input.agentSnapshot.system ?? '');
+      (this.opts.harness === 'dsh_sdk'
+        ? assertDshCheckpointInstructions
+        : this.opts.harness === 'pi_sdk'
+          ? assertPiCheckpointInstructions
+          : assertCodexCheckpointInstructions)(this.checkpoint, input.agentSnapshot.system ?? '');
     this.input = input;
     this.guardrailStore = new InMemoryGuardrailStateStore();
     this.applyGuardrailUsageState(restored.guardrailState ?? input.guardrailState ?? {});
@@ -265,8 +376,8 @@ export class CodexSdkHarness implements AgentHarness {
           inputSchema: tool.input_schema as Tool['inputSchema'],
         },
         policyName: `mcp__orca__${tool.name}`,
-        call: async (args) => {
-          const result = await tool.execute(args);
+        call: async (args, options) => {
+          const result = await (options ? tool.execute(args, options) : tool.execute(args));
           return {
             content: [
               {
@@ -325,11 +436,11 @@ export class CodexSdkHarness implements AgentHarness {
             tool: { ...tool, name },
             policyName: name,
             serverName,
-            call: async (args) =>
+            call: async (args, options) =>
               (await client.callTool(
                 { name: tool.name, arguments: args },
                 undefined,
-                this.abort ? { signal: this.abort.signal } : {},
+                options ?? (this.abort ? { signal: this.abort.signal } : {}),
               )) as CallToolResult,
           });
         }
@@ -354,18 +465,105 @@ export class CodexSdkHarness implements AgentHarness {
       system: input.agentSnapshot.system ?? '',
       apiKey,
       ...(this.opts.baseUrl ? { baseUrl: this.opts.baseUrl } : {}),
+      ...(this.opts.dshGatewayUrl ? { dshGatewayUrl: this.opts.dshGatewayUrl } : {}),
       ...(this.opts.harness === 'pi_sdk' && this.opts.piGatewayUrl
         ? { piGatewayUrl: this.opts.piGatewayUrl }
         : {}),
       ...(input.agentSnapshot.model_effort ? { effort: input.agentSnapshot.model_effort } : {}),
       ...(this.checkpoint ? { checkpoint: this.checkpoint } : {}),
-      tools: [...this.bindings.values()].map((binding) => binding.tool),
+      tools: [...this.bindings.values()]
+        .filter((binding) => this.opts.harness !== 'dsh_sdk' || binding.tool.name !== 'web_fetch')
+        .map((binding) => binding.tool),
+      ...(this.dshProjection ? { archivedThreadSubpaths: [...this.archivedSubpaths] } : {}),
     });
+    // Restored private lineage must be admitted before targeted controls or tools.
+    if (this.dshProjection) await this.eventTail;
   }
 
   async submit(event: UserEvent, hooks?: SubmitHooks): Promise<UserEventSubmitResult> {
     if (this.stopped || !this.worker) throw new Error(`${this.sdkName} is unavailable`);
+    let subpath = event.subpath ?? '';
+    const payloadSubpath = object(event.payload).subpath;
+    if (this.dshProjection && payloadSubpath !== undefined) {
+      if (typeof payloadSubpath !== 'string' || (subpath && subpath !== payloadSubpath))
+        throw new UnappliedUserEventError(
+          event.kind,
+          'Payload subpath conflicts with persisted thread address.',
+        );
+      if (!subpath && payloadSubpath) {
+        if (
+          !['user.tool_confirmation', 'user.custom_tool_result'].includes(event.kind) ||
+          typeof object(event.payload).session_thread_id !== 'string'
+        )
+          throw new UnappliedUserEventError(
+            event.kind,
+            'Primary child reply requires a validated session_thread_id.',
+          );
+        subpath = payloadSubpath;
+      }
+    }
+    const threadId =
+      this.opts.harness === 'dsh_sdk'
+        ? (nativeThreadId(subpath) ??
+          (object(event.payload).stop_reason === 'archived' ? this.nativeRootId : undefined))
+        : undefined;
+    const publicThreadId = object(event.payload).session_thread_id;
+    if (
+      this.opts.harness === 'dsh_sdk' &&
+      publicThreadId !== undefined &&
+      publicThreadId !==
+        stableSessionThreadId(this.input!.workspaceId, this.input!.sessionId, subpath)
+    )
+      throw new UnappliedUserEventError(
+        event.kind,
+        'Session thread address does not match the persisted subpath.',
+      );
     if (event.kind === 'user.interrupt') {
+      if (this.dshProjection && object(event.payload).stop_reason === 'archived' && !threadId) {
+        this.archivedSubpaths.add(subpath);
+        await this.retireDshTree();
+        throw new DurableHarnessStateError(
+          'DSH root archive fence requires native root identity; tree retired',
+        );
+      }
+      if (threadId) {
+        this.dshProjection!.parentSubpath(subpath);
+        const archived = object(event.payload).stop_reason === 'archived';
+        if (archived) {
+          this.archivedSubpaths.add(subpath);
+          try {
+            await this.worker.handle({ type: 'archive_fence', threadId });
+          } catch (error) {
+            await this.retireDshTree();
+            throw new DurableHarnessStateError(
+              'DSH archive fence was not acknowledged; tree retired',
+              { cause: error },
+            );
+          }
+        }
+        if (this.receipt?.phase === 'pending') await this.acceptSource(event);
+        await hooks?.onAccepted();
+        try {
+          await this.cancelThreadTools(subpath);
+          await this.worker.handle({
+            type: 'interrupt',
+            threadId,
+            ...(archived ? { archived: true } : {}),
+          });
+        } catch (error) {
+          throw new UnappliedUserEventError(
+            event.kind,
+            error instanceof Error ? error.message : 'Targeted cancellation could not be confirmed',
+          );
+        }
+        if (this.receipt?.phase !== 'pending' && event.id)
+          await this.emitPersisted({
+            kind: SessionEventKind.statusIdle,
+            payload: sessionIdlePayload('end_turn'),
+            completionPolicy: { sourceIds: [event.id] },
+          });
+        return 'submitted';
+      }
       if (this.receipt?.phase !== 'pending') {
         await this.active;
         await hooks?.onAccepted();
@@ -391,7 +589,11 @@ export class CodexSdkHarness implements AgentHarness {
         event.kind === 'user.custom_tool_result' ? payload.custom_tool_use_id : payload.tool_use_id
       ) as AgentEvent['id'];
       const pending = this.pending.get(id);
-      if (!pending || pending.kind !== event.kind)
+      if (
+        !pending ||
+        pending.kind !== event.kind ||
+        (this.opts.harness === 'dsh_sdk' && pending.subpath !== subpath)
+      )
         throw new UnappliedUserEventError(event.kind, 'No pending tool action matches this event.');
       if (event.systemMessage)
         throw new UnappliedUserEventError(
@@ -426,6 +628,8 @@ export class CodexSdkHarness implements AgentHarness {
         event.kind,
         `${event.kind} is not supported by ${this.harnessName}.`,
       );
+    if (this.isArchived(subpath))
+      throw new UnappliedUserEventError(event.kind, 'Archived thread cannot be activated.');
     // Claim the lane before acceptance, refresh, or any other asynchronous
     // preflight. Required-action replies and interrupts bypass this lane.
     const submit = this.submitTail.then(() => this.submitMessage(event, hooks));
@@ -541,7 +745,13 @@ export class CodexSdkHarness implements AgentHarness {
       cache_read_input_tokens: 0,
       cache_creation_input_tokens: 0,
     };
-    this.active = this.run(text).finally(() => {
+    this.terminalUsageEvent = undefined;
+    this.dshProjection?.beginTurn();
+    this.cancelledToolCalls.clear();
+    this.cancelledSubpaths.clear();
+    this.orchestrationCalls.clear();
+    this.uncertainCancellations.clear();
+    this.active = this.run(text, event.subpath ?? '').finally(() => {
       this.active = undefined;
       this.wakeIdle();
     });
@@ -554,15 +764,18 @@ export class CodexSdkHarness implements AgentHarness {
     return this.pending.size > 0;
   }
 
-  private async run(text: string): Promise<void> {
+  private async run(text: string, subpath: string): Promise<void> {
     this.emit({ kind: SessionEventKind.statusRunning, payload: {} });
-    const start = this.emit({
-      kind: SpanEventKind.modelRequestStart,
-      payload: turnModelSummaryStartPayload({
-        provider: this.input!.agentSnapshot.model_provider!,
-        model: this.input!.agentSnapshot.model_id!,
-      }),
-    });
+    const start =
+      this.opts.harness === 'dsh_sdk'
+        ? undefined
+        : this.emit({
+            kind: SpanEventKind.modelRequestStart,
+            payload: turnModelSummaryStartPayload({
+              provider: this.input!.agentSnapshot.model_provider!,
+              model: this.input!.agentSnapshot.model_id!,
+            }),
+          });
     const timer = setTimeout(() => {
       this.turnFailure = `${this.sdkName} turn timed out`;
       void this.interrupt();
@@ -571,18 +784,32 @@ export class CodexSdkHarness implements AgentHarness {
       await this.worker!.refreshOptions({
         apiKey: await this.apiKey(),
         ...(this.opts.baseUrl ? { baseUrl: this.opts.baseUrl } : {}),
+        ...(this.opts.dshGatewayUrl ? { dshGatewayUrl: this.opts.dshGatewayUrl } : {}),
         ...(this.opts.harness === 'pi_sdk' && this.opts.piGatewayUrl
           ? { piGatewayUrl: this.opts.piGatewayUrl }
           : {}),
       });
-      if (!this.abort?.signal.aborted) await this.worker!.handle({ type: 'submit', text });
+      if (!this.abort?.signal.aborted)
+        await this.worker!.handle({
+          type: 'submit',
+          text,
+          ...(this.opts.harness === 'dsh_sdk'
+            ? {
+                sourceEventId: this.turnId!,
+                ...(nativeThreadId(subpath) ? { threadId: nativeThreadId(subpath)! } : {}),
+              }
+            : {}),
+        });
       await Promise.all(this.toolCalls);
       await this.eventTail;
       if (this.guarded && !this.usageAcknowledged)
         this.turnFailure ??= `${this.sdkName} terminal usage was not acknowledged`;
-    } catch {
+    } catch (error) {
       this.failed = true;
-      this.turnFailure ??= `${this.sdkName} execution or durable usage failed`;
+      this.turnFailure ??=
+        error instanceof SessionJwtLifetimeError
+          ? error.message
+          : `${this.sdkName} execution or durable usage failed`;
     } finally {
       clearTimeout(timer);
       this.abort?.abort();
@@ -591,31 +818,66 @@ export class CodexSdkHarness implements AgentHarness {
     if (this.stopped) return;
     // FIFO acknowledgment proves every preceding response event is durable before
     // native history may advance. A rejected fence leaves the receipt pending.
-    await this.emitPersisted({
-      kind: SpanEventKind.modelRequestEnd,
-      payload: turnModelSummaryEndPayload({
-        modelRequestStartId: start.id,
-        provider: this.input!.agentSnapshot.model_provider!,
-        model: this.input!.agentSnapshot.model_id!,
-        modelUsage: this.usage,
-        isError: Boolean(this.turnFailure),
-      }),
-    });
-    const committed = this.checkpoint
-      ? await this.updateTurn({
-          type: 'commit',
-          turnId: this.turnId!,
-          state: this.checkpoint,
-          responsePersisted: true,
-          error: this.turnFailure?.slice(0, 4096) ?? null,
-        })
-      : await this.updateTurn({
+    if (this.opts.harness === 'dsh_sdk') {
+      // Usage is the FIFO fence, not another aggregate model observation.
+      if (!this.terminalUsageEvent) {
+        this.turnFailure ??= 'DSH terminal usage is unavailable; spend remains unknown';
+        this.checkpoint = undefined;
+      } else {
+        try {
+          await this.emitPersisted(this.terminalUsageEvent);
+        } catch (error) {
+          await this.retireDshTree();
+          throw error;
+        }
+      }
+      if (this.turnFailure || !this.checkpoint) {
+        this.turnFailure ??= 'DSH native checkpoint was unavailable; tree retired without replay';
+        this.checkpoint = undefined;
+        await this.retireDshTree();
+      }
+    } else
+      await this.emitPersisted({
+        kind: SpanEventKind.modelRequestEnd,
+        payload: turnModelSummaryEndPayload({
+          modelRequestStartId: start!.id,
+          provider: this.input!.agentSnapshot.model_provider!,
+          model: this.input!.agentSnapshot.model_id!,
+          modelUsage: this.usage,
+          isError: Boolean(this.turnFailure),
+        }),
+      });
+    let committed;
+    try {
+      committed = this.checkpoint
+        ? await this.updateTurn({
+            type: 'commit',
+            turnId: this.turnId!,
+            state: this.checkpoint,
+            responsePersisted: true,
+            error: this.turnFailure?.slice(0, 4096) ?? null,
+          })
+        : await this.updateTurn({
+            type: 'abandon',
+            turnId: this.turnId!,
+            error:
+              this.turnFailure?.slice(0, 4096) ??
+              `${this.sdkName} native checkpoint was unavailable; the unfinished turn was abandoned without replay.`,
+          });
+    } catch (error) {
+      if (this.opts.harness !== 'dsh_sdk') throw error;
+      await this.retireDshTree();
+      // ACK loss is not proof of rollback: inspect the authoritative receipt before abandoning.
+      if (!this.opts.turns.inspect) throw error;
+      committed = await this.opts.turns.inspect();
+      if (committed.receipt?.turnId !== this.turnId) throw error;
+      if (committed.receipt!.phase === 'pending')
+        committed = await this.updateTurn({
           type: 'abandon',
           turnId: this.turnId!,
-          error:
-            this.turnFailure?.slice(0, 4096) ??
-            `${this.sdkName} native checkpoint was unavailable; the unfinished turn was abandoned without replay.`,
+          error: 'DSH checkpoint commit was not confirmed; tree retired without replay',
         });
+    }
     for (const event of receiptTerminalEvents(committed.receipt!)) await this.emitPersisted(event);
     await this.updateTurn({ type: 'settle', turnId: this.turnId! });
     if (this.guarded && !committed.receipt!.error) {
@@ -628,6 +890,29 @@ export class CodexSdkHarness implements AgentHarness {
     // boundary, so the dispatcher retires the runner before the next message.
     if (this.failed)
       throw new SettledHarnessFailureError(this.turnFailure ?? `${this.sdkName} worker failed`);
+  }
+
+  private async retireDshTree(): Promise<void> {
+    this.failed = true;
+    this.abort?.abort();
+    this.cancelActions();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        Promise.all([this.worker?.close(), Promise.allSettled([...this.toolCalls])]),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error('DSH tree retirement cleanup timed out')),
+            15000,
+          );
+        }),
+      ]);
+    } catch (error) {
+      // Failure settlement must not depend on known usage or successful cleanup. Admission stays blocked.
+      this.turnFailure = `${this.turnFailure ?? 'DSH turn failed'}; retirement unconfirmed: ${error instanceof Error ? error.message : 'cleanup failed'}`;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   private async updateTurn(action: Exclude<HarnessTurnAction, { type: 'inspect' | 'claim' }>) {
@@ -688,29 +973,55 @@ export class CodexSdkHarness implements AgentHarness {
   private receive(event: WorkerEvent): void {
     // Retirement cannot advance native history without the response/receipt fence.
     if (this.stopped) return;
-    if (event.type === 'tool_call') {
-      const call = this.callTool(event)
+    if (event.type === 'tool_call' || event.type === 'orchestration_request') {
+      // Canonical declarations must finish validation before a managed tool runs.
+      const call = (this.dshProjection ? this.eventTail : Promise.resolve())
+        .then(() =>
+          event.type === 'orchestration_request'
+            ? this.authorizeOrchestration(event)
+            : this.callTool(event),
+        )
         .catch(() => {
           this.turnFailure = `${this.sdkName} tool relay failed`;
           return this.interrupt();
         })
-        .finally(() => this.toolCalls.delete(call));
+        .finally(() => {
+          this.toolCalls.delete(call);
+          this.inFlight.delete(event.id);
+        });
       this.toolCalls.add(call);
+      this.inFlight.set(event.id, call);
     } else {
       this.eventTail = this.eventTail.then(async () => {
-        if (event.type === 'checkpoint') {
+        if (event.type === 'thread_tree') {
+          if (!this.dshProjection || this.turnId)
+            throw new Error('DSH lineage restore requires startup');
+          this.dshProjection.restoreTree(event.threads);
+        } else if (event.type === 'canonical_event') {
+          if (!this.dshProjection || !this.turnId || this.receipt?.phase !== 'pending')
+            throw new Error('Canonical worker events are DSH-only and require an active turn');
+          this.emit(this.dshProjection.validate(event.event, this.turnId));
+        } else if (event.type === 'checkpoint') {
           this.checkpoint = event.checkpoint;
         } else if (event.type === 'failure') {
           this.turnFailure ??= event.message;
           if (event.fatal) this.failed = true;
         } else if (event.type === 'event') {
           const sdk = event.event;
-          if (sdk.type === 'item.completed' && sdk.item.type === 'agent_message')
+          if (sdk.type === 'thread.started') this.nativeRootId = sdk.thread_id;
+          else if (sdk.type === 'item.completed' && sdk.item.type === 'agent_message') {
+            const origin = this.dshProjection?.assertOrigin(event.origin);
             this.emit({
+              ...(origin ? { id: origin.eventId, subpath: origin.subpath } : {}),
               kind: AgentEventKind.message,
-              payload: { content: [{ type: 'text', text: sdk.item.text }] },
+              payload: {
+                content: [{ type: 'text', text: sdk.item.text }],
+                ...(origin ? { turn_event_id: this.turnId } : {}),
+              },
             });
-          else if (sdk.type === 'turn.completed') {
+          } else if (sdk.type === 'turn.completed') {
+            if (this.opts.harness === 'dsh_sdk' && this.terminalUsageEvent)
+              throw new Error('DSH emitted duplicate tree usage');
             assertCodexTerminalUsage(sdk.usage);
             const usage = {
               input_tokens: sdk.usage.input_tokens - sdk.usage.cached_input_tokens,
@@ -740,7 +1051,7 @@ export class CodexSdkHarness implements AgentHarness {
               this.applyGuardrailUsageState(state);
               this.usageAcknowledged = true;
             }
-            this.emit({
+            const usageEvent: AgentEventInput = {
               ...(this.usageEventId ? { id: this.usageEventId } : {}),
               kind: AgentEventKind.usage,
               payload: {
@@ -749,7 +1060,9 @@ export class CodexSdkHarness implements AgentHarness {
                 model: this.input!.agentSnapshot.model_id,
                 ...(this.turnId ? { turn_event_id: this.turnId } : {}),
               },
-            });
+            };
+            if (this.opts.harness === 'dsh_sdk') this.terminalUsageEvent = usageEvent;
+            else this.emit(usageEvent);
           } else if (
             (sdk.type === 'turn.failed' || sdk.type === 'error') &&
             !this.abort?.signal.aborted
@@ -774,9 +1087,19 @@ export class CodexSdkHarness implements AgentHarness {
   }
 
   private async callTool(event: Extract<WorkerEvent, { type: 'tool_call' }>): Promise<void> {
+    const origin = this.dshProjection?.assertOrigin(event.origin);
+    const subpath = origin?.subpath ?? '';
+    if (this.cancelledSubpaths.has(subpath)) this.cancelledToolCalls.add(event.id);
+    this.toolOrigins.set(event.id, subpath);
+    const controller = new AbortController();
+    this.callControllers.set(event.id, controller);
+    const signal = this.abort
+      ? AbortSignal.any([this.abort.signal, controller.signal])
+      : controller.signal;
     const binding = this.bindings.get(event.name);
     let result: CallToolResult;
     const toolEvent = withCanonicalAgentEventEnvelope({
+      ...(origin ? { id: origin.eventId, subpath } : {}),
       kind: binding?.custom
         ? AgentEventKind.customToolUse
         : binding?.serverName
@@ -791,11 +1114,29 @@ export class CodexSdkHarness implements AgentHarness {
       id: toolEvent.id,
       name,
       input: event.arguments,
+      ...(origin
+        ? {
+            turn_event_id: this.turnId,
+            subpath,
+            parent_subpath: this.dshProjection!.parentSubpath(subpath),
+            session_thread_id: stableSessionThreadId(
+              this.input!.workspaceId,
+              this.input!.sessionId,
+              subpath,
+            ),
+          }
+        : {}),
       ...(binding?.serverName ? { mcp_server_name: binding.serverName } : {}),
     };
     this.emit({ ...toolEvent, payload });
     try {
-      if (!binding || this.abort?.signal.aborted)
+      if (
+        !binding ||
+        this.abort?.signal.aborted ||
+        this.cancelledToolCalls.has(event.id) ||
+        this.isArchived(subpath) ||
+        (this.opts.harness === 'dsh_sdk' && event.name === 'web_fetch')
+      )
         throw new Error('Tool unavailable or turn interrupted');
       const policy = this.permission(binding);
       const verdict = this.evaluate(
@@ -807,7 +1148,11 @@ export class CodexSdkHarness implements AgentHarness {
       if (binding.custom && verdict.verdict === 'ask')
         throw new Error('Custom tool denied: guardrail requires explicit tool approval');
       if (verdict.verdict === 'ask') {
-        const confirmation = await this.requestAction(toolEvent.id, 'user.tool_confirmation');
+        const confirmation = await this.requestAction(
+          toolEvent.id,
+          'user.tool_confirmation',
+          subpath,
+        );
         if (confirmation.result !== 'allow')
           throw new Error(
             typeof confirmation.deny_message === 'string'
@@ -815,11 +1160,27 @@ export class CodexSdkHarness implements AgentHarness {
               : 'Tool denied by user',
           );
       }
-      if (this.abort?.signal.aborted) throw new Error('Turn interrupted');
+      if (this.abort?.signal.aborted || this.cancelledToolCalls.has(event.id))
+        throw new Error('Turn interrupted');
       if (binding.custom) {
         const reply = await this.requestAction(toolEvent.id, 'user.custom_tool_result');
         result = customToolResultToMcp(reply);
-      } else result = await binding.call(event.arguments);
+      } else {
+        // TODO: Codex/Pi workers still need native call cancellation and a shell-termination regression.
+        const sandboxExecutable =
+          !binding.serverName && ['bash', 'glob', 'grep'].includes(event.name);
+        if (this.dshProjection && sandboxExecutable && !this.input?.supportsPerCallCancellation)
+          throw new Error('DSH executable tools require a sandbox with per-call cancellation');
+        if (sandboxExecutable) this.executingTools.add(event.id);
+        result = await binding.call(
+          event.arguments,
+          this.dshProjection && (!sandboxExecutable || this.input?.supportsPerCallCancellation)
+            ? { signal }
+            : undefined,
+        );
+        this.executingTools.delete(event.id);
+      }
+      if (this.cancelledToolCalls.has(event.id)) throw new Error('Thread interrupted');
       const outputVerdict = this.evaluate({
         phase: 'tool_result',
         tool: { name: binding.policyName, input: event.arguments },
@@ -827,6 +1188,14 @@ export class CodexSdkHarness implements AgentHarness {
       });
       if (outputVerdict.verdict !== 'allow') throw new Error('Tool output suppressed by policy');
     } catch (error) {
+      if (
+        this.executingTools.has(event.id) &&
+        signal.aborted &&
+        error instanceof Error &&
+        error.name !== 'AbortError' &&
+        ['bash', 'glob', 'grep'].includes(event.name)
+      )
+        this.uncertainCancellations.add(event.id);
       if (error instanceof CustomToolResultConversionError) {
         this.turnFailure = error.message;
         await this.interrupt();
@@ -839,16 +1208,186 @@ export class CodexSdkHarness implements AgentHarness {
     if (!this.stopped) {
       if (!binding?.custom)
         this.emit({
+          subpath,
           kind: binding?.serverName ? AgentEventKind.mcpToolResult : AgentEventKind.toolResult,
           payload: {
             tool_use_id: toolEvent.id,
             content: result.content,
             is_error: result.isError ?? false,
+            ...(origin
+              ? {
+                  turn_event_id: this.turnId,
+                  subpath,
+                  parent_subpath: this.dshProjection!.parentSubpath(subpath),
+                }
+              : {}),
             ...(binding?.serverName ? { mcp_server_name: binding.serverName } : {}),
           },
         });
       await this.worker!.handle({ type: 'tool_result', id: event.id, result });
     }
+    this.toolOrigins.delete(event.id);
+    this.executingTools.delete(event.id);
+    this.callControllers.delete(event.id);
+    this.cancelledToolCalls.delete(event.id);
+  }
+
+  private async authorizeOrchestration(
+    event: Extract<WorkerEvent, { type: 'orchestration_request' }>,
+  ): Promise<void> {
+    let reason: string | undefined;
+    const subpath = event.origin.subpath;
+    this.toolOrigins.set(event.id, subpath);
+    try {
+      if (
+        !this.dshProjection ||
+        !this.turnId ||
+        this.receipt?.phase !== 'pending' ||
+        typeof event.id !== 'string' ||
+        !event.id ||
+        event.id.length > 256 ||
+        this.orchestrationCalls.has(event.id)
+      )
+        throw new Error('Orchestration requires a unique active DSH call');
+      this.orchestrationCalls.add(event.id);
+      this.dshProjection.authorize(event);
+      const args = { ...event.arguments };
+      const dispatch = event.name === 'spawn' || event.name === 'fork';
+      const fields = dispatch
+        ? ['description', 'prompt']
+        : event.name === 'send_message'
+          ? ['agent_id', 'message']
+          : ['agent_id'];
+      if (
+        !args ||
+        typeof args !== 'object' ||
+        Array.isArray(args) ||
+        Object.keys(args).some((key) => !fields.includes(key)) ||
+        fields.some((key) => typeof args[key] !== 'string' || !String(args[key]).trim()) ||
+        Buffer.byteLength(JSON.stringify(args)) > 1024 * 1024
+      )
+        throw new Error('Unsupported DSH orchestration arguments');
+      const target = dispatch
+        ? undefined
+        : args.agent_id === this.nativeRootId
+          ? ''
+          : `subagents/${String(args.agent_id)}`;
+      if (target !== undefined) {
+        nativeThreadId(target);
+        if (target === subpath) throw new Error('DSH control cannot target the originating thread');
+        const parent = this.dshProjection.parentSubpath(target);
+        if (
+          event.name === 'send_message'
+            ? parent !== subpath && this.dshProjection.parentSubpath(subpath) !== target
+            : !this.dshProjection.subtree(subpath).includes(target) || target === subpath
+        )
+          throw new Error('DSH control target is outside source authority');
+      }
+      const checkLive = () => {
+        if (
+          this.abort?.signal.aborted ||
+          this.cancelledToolCalls.has(event.id) ||
+          this.cancelledSubpaths.has(subpath) ||
+          this.isArchived(subpath) ||
+          (target !== undefined && this.isArchived(target)) ||
+          this.receipt?.phase !== 'pending'
+        )
+          throw new Error('DSH call interrupted or thread archived');
+      };
+      checkLive();
+      const binding: Binding = {
+        tool: { name: event.name, inputSchema: { type: 'object' } },
+        policyName: event.name,
+        call: async () => {
+          throw new Error('Native operation');
+        },
+      };
+      const tool = { phase: 'tool_call' as const, tool: { name: event.name, input: args } };
+      let verdict = this.evaluate(tool, this.permission(binding));
+      if (verdict.verdict === 'deny')
+        throw new Error(verdict.reasons.join(' ') || 'Tool denied by policy');
+      if (verdict.verdict === 'ask') {
+        const reply = await this.requestAction(
+          event.origin.eventId as AgentEvent['id'],
+          'user.tool_confirmation',
+          subpath,
+        );
+        if (reply.result !== 'allow') throw new Error('Tool denied by user');
+        checkLive();
+        verdict = this.evaluate(tool);
+        if (verdict.verdict === 'deny')
+          throw new Error(verdict.reasons.join(' ') || 'Tool denied by policy');
+      }
+      checkLive();
+      // No await between the last check and reservation: concurrent calls cannot consume the last slot twice.
+      this.guardrailStore.apply(
+        verdict.verdict === 'ask' ? verdict.intendedStateUpdates : verdict.stateUpdates,
+      );
+      if (event.name === 'interrupt_agent' && target) {
+        await this.cancelThreadTools(target, event.id);
+        checkLive();
+      }
+    } catch (error) {
+      reason = error instanceof Error ? error.message : 'Orchestration denied';
+    } finally {
+      this.toolOrigins.delete(event.id);
+    }
+    if (!this.stopped)
+      await this.worker!.handle({
+        type: 'orchestration_result',
+        id: event.id,
+        allowed: !reason,
+        ...(reason ? { reason } : {}),
+      });
+  }
+
+  private async cancelThreadTools(subpath: string, excluding?: string): Promise<void> {
+    const targets = new Set(this.dshProjection!.subtree(subpath));
+    const calls: Promise<void>[] = [];
+    const ids: string[] = [];
+    if (
+      !this.input?.supportsPerCallCancellation &&
+      [...this.toolOrigins].some(
+        ([id, origin]) =>
+          targets.has(origin) && this.executingTools.has(id) && this.callControllers.has(id),
+      )
+    )
+      throw new Error('Selected sandbox backend cannot confirm targeted tool cancellation');
+    for (const target of targets) {
+      this.cancelledSubpaths.add(target);
+      this.cancelActions(target);
+    }
+    for (const [id, origin] of this.toolOrigins) {
+      if (id === excluding || !targets.has(origin)) continue;
+      this.cancelledToolCalls.add(id);
+      this.callControllers.get(id)?.abort();
+      ids.push(id);
+      const call = this.inFlight.get(id);
+      if (call) calls.push(call);
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        Promise.all(calls),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () =>
+              reject(new Error('Thread tool cancellation cleanup timed out; termination unknown')),
+            15000,
+          );
+        }),
+      ]);
+      if (ids.some((id) => this.uncertainCancellations.has(id)))
+        throw new Error('Targeted tool termination could not be confirmed');
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  private isArchived(subpath: string): boolean {
+    return [...this.archivedSubpaths].some(
+      (archived) => archived === subpath || this.dshProjection?.subtree(archived).includes(subpath),
+    );
   }
 
   private permission(binding: Binding): Verdict {
@@ -905,13 +1444,32 @@ export class CodexSdkHarness implements AgentHarness {
   private requestAction(
     id: AgentEvent['id'],
     kind: PendingAction['kind'],
+    subpath = '',
   ): Promise<Record<string, unknown>> {
     return new Promise((resolve) => {
       if (this.abort?.signal.aborted) {
         resolve({ result: 'deny', content: [], is_error: true });
         return;
       }
-      this.pending.set(id, { kind, resolve });
+      this.pending.set(id, { kind, resolve, subpath });
+      if (this.dshProjection && subpath)
+        this.emit({
+          kind: AgentThreadEventKind.messageReceived,
+          payload: {
+            session_thread_id: stableSessionThreadId(
+              this.input!.workspaceId,
+              this.input!.sessionId,
+              subpath,
+            ),
+            source_subpath: subpath,
+            subpath,
+            parent_subpath: this.dshProjection.parentSubpath(subpath),
+            source_event_id: id,
+            tool_use_id: id,
+            content: [{ type: 'text', text: 'Child tool action requires confirmation.' }],
+            turn_event_id: this.turnId,
+          },
+        });
       this.emit({
         kind: SessionEventKind.statusIdle,
         completionPolicy: 'pending',
@@ -923,10 +1481,12 @@ export class CodexSdkHarness implements AgentHarness {
       this.wakeIdle();
     });
   }
-  private cancelActions(): void {
-    for (const action of this.pending.values())
+  private cancelActions(subpath?: string): void {
+    for (const [id, action] of this.pending) {
+      if (subpath !== undefined && action.subpath !== subpath) continue;
       action.resolve({ result: 'deny', content: [], is_error: true });
-    this.pending.clear();
+      this.pending.delete(id);
+    }
   }
   private async interrupt(): Promise<void> {
     this.interruptVersion += 1;

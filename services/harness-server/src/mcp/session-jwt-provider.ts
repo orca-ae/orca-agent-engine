@@ -10,6 +10,17 @@ export interface SessionJwt {
 const REFRESH_AHEAD_MS = 30_000;
 const REFRESH_TIMEOUT_MS = 10_000;
 
+/** Safe operator diagnostic: no token, issuer response or native error details. */
+export class SessionJwtLifetimeError extends Error {
+  constructor(minimumValidityMs: number) {
+    super(
+      `Session JWT lifetime is shorter than the required execution window (${minimumValidityMs}ms); ` +
+        'increase Registry AI_GATEWAY_LLM_JWT_TTL_SECS for SDK LLM turns or reduce HARNESS_TURN_TIMEOUT_MS / HARNESS_TURN_TIMEOUT_OVERRIDES_MS',
+    );
+    this.name = 'SessionJwtLifetimeError';
+  }
+}
+
 /** Demand-driven, single-flight refresh. Caller AbortError never cancels the shared mint. */
 export class SessionJwtProvider {
   private cache: SessionJwt | undefined;
@@ -90,7 +101,7 @@ export class SessionJwtProvider {
         const now = Date.now();
         if (!isValidJwt(jwt, now)) throw new Error('Session JWT refresh failed');
         if (now + this.minimumValidityMs >= jwt.expiresAt * 1000)
-          throw new Error('Session JWT lifetime is shorter than the required execution window');
+          throw new SessionJwtLifetimeError(this.minimumValidityMs);
         return this.install(jwt, now);
       })
       .finally(() => {

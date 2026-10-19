@@ -76,7 +76,7 @@ describe('resolveHarnessAnnotation', () => {
     const r = resolveHarnessAnnotation({ harness: 'gpt5_cli', mode: 'colocated' });
     expect(r).toEqual({
       error:
-        'metadata.harness must be one of: claude_agent_sdk, claude_agent_sdk_persistent, claude_code, pi_sdk, codex_sdk, codex, cursor, pi, custom, mock',
+        'metadata.harness must be one of: claude_agent_sdk, claude_agent_sdk_persistent, claude_code, pi_sdk, dsh_sdk, codex_sdk, codex, cursor, pi, custom, mock',
     });
   });
 

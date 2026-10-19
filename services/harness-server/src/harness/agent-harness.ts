@@ -86,6 +86,8 @@ export interface SessionGuardrail {
 export interface SessionStartInput {
   workspaceId: string;
   sessionId: string;
+  archivedThreadSubpaths?: string[];
+  supportsPerCallCancellation?: boolean;
   /**
    * Execute the built-in agent toolset through public user.tool_result events.
    * Only enabled for self-hosted sessions using the separated Claude SDK
@@ -173,6 +175,8 @@ export function runtimeAgentToolNameUnion(snapshot: SessionStartInput['agentSnap
 }
 
 export interface UserEvent {
+  /** Persisted thread address; public sth_ IDs are never native worker IDs. */
+  subpath?: string;
   /** Stable transcript event id, used to resolve Registry-authenticated turn context. */
   id?: string;
   /** Event kind on the wire. Each harness validates its supported `user.*` subset. */
@@ -279,6 +283,8 @@ export type TerminationReason =
   | 'error';
 
 export interface AgentHarness {
+  /** Opt-in routing for Registry's native-thread interrupt intent. */
+  readonly supportsNativeThreadInterrupt?: boolean;
   /** Capture the session boot context (workspace, session id, agent snapshot). */
   start(input: SessionStartInput): Promise<void>;
   /** Forward a single user event into the underlying SDK. */
@@ -292,6 +298,8 @@ export interface AgentHarness {
   hasPendingGuardrailUsage?(): boolean;
   /** Replace usage-backed shared guardrail facts with Registry's acknowledged totals. */
   applyGuardrailUsageState?(state: Readonly<Record<string, unknown>>): void;
+  /** Install Registry's monotonic archive fences before later native activation. */
+  applyArchivedThreadSubpaths?(paths: string[]): Promise<void>;
   /** Stop the harness, abort any in-flight SDK call, and drain consumers. */
   stop(reason: TerminationReason): Promise<void>;
   /** Async iterable of harness-emitted agent events. */

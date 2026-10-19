@@ -37,7 +37,7 @@ import {
 } from './registry-client.js';
 import { TRACE_SAMPLING_VERSION } from './sampling.js';
 import type { OtlpDeliveryOutcome, PinnedDeliveryContext } from './types.js';
-import { PROJECTED_TRACE_SCHEMA_VERSION } from './types.js';
+import { PROJECTED_TRACE_SCHEMA_VERSION, TREE_PROJECTED_TRACE_SCHEMA_VERSION } from './types.js';
 
 const LEASE_COMPLETION_MARGIN_MS = 5_000;
 
@@ -289,7 +289,8 @@ export class KafkaObservabilityExporterRuntime {
     try {
       // The SQL runtime deliberately remains metadata-only, including restored outbox rows.
       if (
-        item.trace.schemaVersion !== PROJECTED_TRACE_SCHEMA_VERSION ||
+        (item.trace.schemaVersion !== PROJECTED_TRACE_SCHEMA_VERSION &&
+          item.trace.schemaVersion !== TREE_PROJECTED_TRACE_SCHEMA_VERSION) ||
         item.deliveryContext.captureMode !== 'metadata_only'
       ) {
         await this.repository.markOutboxSuppressed(item, 'capture_mode_mismatch');

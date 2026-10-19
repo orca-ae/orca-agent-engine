@@ -153,6 +153,7 @@ jobs:
           - orca-registry-service-ts
           - orca-harness-server
           - sandbox-harness-claude-code
+          - sandbox-harness-dsh
         platform:
           - name: linux/amd64
             pair: linux-amd64
@@ -174,6 +175,9 @@ jobs:
           - image: sandbox-harness-claude-code
             dockerfile: services/sandbox-harness/Dockerfile
             build_args: DEFAULT_AGENT=claude-code
+          - image: sandbox-harness-dsh
+            dockerfile: services/sandbox-harness/Dockerfile
+            build_args: DEFAULT_AGENT=dsh-sdk
     steps:
       - uses: actions/checkout@v4
 
@@ -417,6 +421,7 @@ jobs:
     # Chart pinning must use the merged index, never a platform image digest.
     outputs:
       sandbox_harness_digest: ${{ steps.inspect.outputs['digest_sandbox-harness-claude-code'] }}
+      sandbox_harness_dsh_digest: ${{ steps.inspect.outputs['digest_sandbox-harness-dsh'] }}
     strategy:
       fail-fast: false
       matrix:
@@ -425,6 +430,7 @@ jobs:
           - orca-registry-service-ts
           - orca-harness-server
           - sandbox-harness-claude-code
+          - sandbox-harness-dsh
           - orca-opensandbox-code-interpreter
     steps:
       - name: Download platform digests
@@ -698,6 +704,7 @@ jobs:
         env:
           PUBLISH: ${{ needs.release-metadata.outputs.publish }}
           SANDBOX_HARNESS_DIGEST: ${{ needs.merge-images.outputs.sandbox_harness_digest }}
+          SANDBOX_HARNESS_DSH_DIGEST: ${{ needs.merge-images.outputs.sandbox_harness_dsh_digest }}
         shell: bash
         run: |
           set -euo pipefail
@@ -706,6 +713,7 @@ jobs:
           harness_repository="${IMAGE_REGISTRY}/orca-harness-server"
           exporter_repository="${IMAGE_REGISTRY}/orca-observability-exporter"
           sandbox_harness_repository="${IMAGE_REGISTRY}/sandbox-harness-claude-code"
+          sandbox_harness_dsh_repository="${IMAGE_REGISTRY}/sandbox-harness-dsh"
 
           # A published release must pin the sandbox-harness default by the
           # digest the build job actually pushed for reproducible deployment.
@@ -714,12 +722,18 @@ jobs:
           # Without publication there is no pullable digest, so dry runs keep
           # the digest empty and the chart falls back to the tag form.
           sandbox_harness_digest=''
+          sandbox_harness_dsh_digest=''
           if [[ "${PUBLISH}" == 'true' ]]; then
             if [[ ! "${SANDBOX_HARNESS_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
               echo "::error::sandbox-harness-claude-code build did not report a valid pushed digest: ${SANDBOX_HARNESS_DIGEST:-<empty>}"
               exit 1
             fi
             sandbox_harness_digest="${SANDBOX_HARNESS_DIGEST}"
+            if [[ ! "${SANDBOX_HARNESS_DSH_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "::error::sandbox-harness-dsh build did not report a valid pushed digest"
+              exit 1
+            fi
+            sandbox_harness_dsh_digest="${SANDBOX_HARNESS_DSH_DIGEST}"
           fi
 
           {
@@ -728,6 +742,8 @@ jobs:
             echo "exporter_repository=${exporter_repository}"
             echo "sandbox_harness_repository=${sandbox_harness_repository}"
             echo "sandbox_harness_digest=${sandbox_harness_digest}"
+            echo "sandbox_harness_dsh_repository=${sandbox_harness_dsh_repository}"
+            echo "sandbox_harness_dsh_digest=${sandbox_harness_dsh_digest}"
           } >> "${GITHUB_OUTPUT}"
 
       - name: Point chart image defaults at this release
@@ -737,6 +753,8 @@ jobs:
           EXPORTER_REPOSITORY: ${{ steps.chart-images.outputs.exporter_repository }}
           SANDBOX_HARNESS_REPOSITORY: ${{ steps.chart-images.outputs.sandbox_harness_repository }}
           SANDBOX_HARNESS_DIGEST: ${{ steps.chart-images.outputs.sandbox_harness_digest }}
+          SANDBOX_HARNESS_DSH_REPOSITORY: ${{ steps.chart-images.outputs.sandbox_harness_dsh_repository }}
+          SANDBOX_HARNESS_DSH_DIGEST: ${{ steps.chart-images.outputs.sandbox_harness_dsh_digest }}
         shell: bash
         run: |
           set -euo pipefail
@@ -748,7 +766,9 @@ jobs:
             .images.harness.repository = strenv(HARNESS_REPOSITORY) |
             .images.observabilityExporter.repository = strenv(EXPORTER_REPOSITORY) |
             .images.sandboxHarness.claudeCode.repository = strenv(SANDBOX_HARNESS_REPOSITORY) |
-            .images.sandboxHarness.claudeCode.digest = strenv(SANDBOX_HARNESS_DIGEST)
+            .images.sandboxHarness.claudeCode.digest = strenv(SANDBOX_HARNESS_DIGEST) |
+            .images.sandboxHarness.dsh.repository = strenv(SANDBOX_HARNESS_DSH_REPOSITORY) |
+            .images.sandboxHarness.dsh.digest = strenv(SANDBOX_HARNESS_DSH_DIGEST)
           ' charts/orca-managed-agents/values.yaml
 
       - name: Package chart with release version
@@ -784,6 +804,8 @@ jobs:
           EXPORTER_REPOSITORY: ${{ steps.chart-images.outputs.exporter_repository }}
           SANDBOX_HARNESS_REPOSITORY: ${{ steps.chart-images.outputs.sandbox_harness_repository }}
           SANDBOX_HARNESS_DIGEST: ${{ steps.chart-images.outputs.sandbox_harness_digest }}
+          SANDBOX_HARNESS_DSH_REPOSITORY: ${{ steps.chart-images.outputs.sandbox_harness_dsh_repository }}
+          SANDBOX_HARNESS_DSH_DIGEST: ${{ steps.chart-images.outputs.sandbox_harness_dsh_digest }}
         run: |
           set -euo pipefail
           rendered="$(
@@ -818,11 +840,20 @@ jobs:
           else
             grep -Fq "SANDBOX_HARNESS_CLAUDE_CODE_IMAGE: \"${SANDBOX_HARNESS_REPOSITORY}:${VERSION}\"" <<< "${rendered}"
           fi
+          if [[ "${PUBLISH}" == 'true' && -z "${SANDBOX_HARNESS_DSH_DIGEST}" ]]; then
+            echo '::error::Publishing requires a pushed DSH digest to pin the chart.'
+            exit 1
+          fi
+          if [[ -n "${SANDBOX_HARNESS_DSH_DIGEST}" ]]; then
+            grep -Fq "SANDBOX_HARNESS_DSH_IMAGE: \"${SANDBOX_HARNESS_DSH_REPOSITORY}@${SANDBOX_HARNESS_DSH_DIGEST}\"" <<< "${rendered}"
+          else
+            grep -Fq "SANDBOX_HARNESS_DSH_IMAGE: \"${SANDBOX_HARNESS_DSH_REPOSITORY}:${VERSION}\"" <<< "${rendered}"
+          fi
           if grep -E 'image: .*:latest"' <<< "${rendered}"; then
             echo '::error::Packaged chart renders a floating :latest image reference.'
             exit 1
           fi
-          if grep -E 'SANDBOX_HARNESS_CLAUDE_CODE_IMAGE: .*:latest"' <<< "${rendered}"; then
+          if grep -E 'SANDBOX_HARNESS_(CLAUDE_CODE|DSH)_IMAGE: .*:latest"' <<< "${rendered}"; then
             echo '::error::Packaged chart renders a floating :latest sandbox-harness image reference.'
             exit 1
           fi
@@ -905,6 +936,7 @@ jobs:
           - orca-registry-service-ts
           - orca-harness-server
           - sandbox-harness-claude-code
+          - sandbox-harness-dsh
           - orca-opensandbox-code-interpreter
     steps:
       - uses: docker/setup-buildx-action@v3

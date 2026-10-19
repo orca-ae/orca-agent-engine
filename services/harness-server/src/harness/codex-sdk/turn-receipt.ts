@@ -16,6 +16,7 @@ import {
 
 export interface CodexTurnStore {
   claim(): Promise<HarnessTurnSnapshot>;
+  inspect?(): Promise<HarnessTurnSnapshot>;
   update(
     action: Exclude<HarnessTurnAction, { type: 'inspect' | 'claim' }>,
   ): Promise<HarnessTurnSnapshot>;

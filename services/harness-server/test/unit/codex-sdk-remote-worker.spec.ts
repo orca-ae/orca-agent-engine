@@ -61,6 +61,20 @@ const start: StartCommand = {
 };
 
 describe('remote SDK acknowledgement boundary', () => {
+  it('archive fence ACK does not wait for the unfinished turn SSE barrier', async () => {
+    const f = fixture();
+    await f.worker.handle(start);
+    f.sdkCommand.mockResolvedValue(3);
+    const turn = f.worker.handle({ type: 'submit', text: 'hello' });
+    const rejected = expect(turn).rejects.toThrow('SDK event delivery aborted');
+    await f.worker.handle({
+      type: 'archive_fence',
+      threadId: '11111111-1111-4111-8111-111111111111',
+    });
+    expect(f.events).toEqual([]);
+    await f.worker.close();
+    await rejected;
+  });
   it('waits for delayed SSE usage and checkpoint after HTTP completion and ignores old replays', async () => {
     const f = fixture();
     await f.worker.handle(start);

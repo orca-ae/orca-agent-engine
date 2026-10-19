@@ -3,7 +3,11 @@
 
 import { randomUUID } from 'node:crypto';
 import { composeSkillsCatalog } from '@orca/sandbox-runtime';
-import type { LlmEgress } from '../config.js';
+import {
+  DEFAULT_HARNESS_TURN_TIMEOUT_MS,
+  type HarnessTurnTimeoutOverrides,
+  type LlmEgress,
+} from '../config.js';
 import type { Consumer, EachMessagePayload, Kafka } from 'kafkajs';
 import type { S3Client } from '@aws-sdk/client-s3';
 import { v5 as uuidv5, v7 as uuidv7 } from 'uuid';
@@ -372,6 +376,7 @@ interface KafkaSourceSettlement {
 }
 
 interface UserEventSource {
+  subpath?: string;
   userEventId?: string;
   seq?: number;
   producedAt?: string;
@@ -384,6 +389,7 @@ interface StatusRunningLatencyEvent {
 const GUARDRAIL_STATE_WRITE_TIMEOUT_MS = 5_000;
 
 interface DeferredUserMessage {
+  subpath?: string;
   userEventId: string;
   payload: unknown;
 }
@@ -586,6 +592,8 @@ export interface DispatcherOptions {
    * destroyed, and the registry session is marked idle. Defaults to 60000.
    */
   sessionIdleTimeoutMs?: number;
+  harnessTurnTimeoutMs?: number;
+  harnessTurnTimeoutOverridesMs?: HarnessTurnTimeoutOverrides;
   /**
    * Delay before retrying a deferred message whose acceptance marker could
    * not be persisted. Defaults to 1000ms. Tests may use a shorter delay.
@@ -718,6 +726,12 @@ export class Dispatcher {
           this.buildCodexHarness(workspaceId, sessionId, session, selection?.mode === 'colocated'),
       },
       {
+        id: 'dsh_sdk',
+        modes: ['colocated'],
+        build: ({ workspaceId, sessionId, session, modelProvider }) =>
+          this.buildCodexHarness(workspaceId, sessionId, session, true, 'dsh_sdk', modelProvider),
+      },
+      {
         id: 'pi_sdk',
         modes: ['separate', 'colocated'],
         build: ({ workspaceId, sessionId, session, selection, modelProvider }) =>
@@ -820,12 +834,14 @@ export class Dispatcher {
     sessionId: string,
     session?: SessionRecord | null,
     colocated = false,
-    harness: 'codex_sdk' | 'pi_sdk' = 'codex_sdk',
+    harness: 'codex_sdk' | 'pi_sdk' | 'dsh_sdk' = 'codex_sdk',
     modelProvider = 'openai',
   ): AgentHarness {
     const registry = this.opts.registry;
     if (!registry || !session?.runtime_revision)
       throw new Error('codex_sdk requires prepared Registry state');
+    if (harness === 'dsh_sdk' && !colocated)
+      throw new Error('dsh_sdk supports only cloud/colocated execution');
     const egress = this.resolveLlmEgress(session, colocated);
     if (egress === 'gateway' && !this.opts.gatewayLlmUrl)
       throw new Error('gateway LLM egress requires LLM_GATEWAY_URL');
@@ -847,8 +863,13 @@ export class Dispatcher {
           ? this.opts.anthropicBaseURL
           : undefined);
     if (session.harness_state) validateSdkCheckpoint(session.harness_state, harness);
+    const turnTimeoutMs =
+      this.opts.harnessTurnTimeoutOverridesMs?.[harness] ??
+      this.opts.harnessTurnTimeoutMs ??
+      DEFAULT_HARNESS_TURN_TIMEOUT_MS;
     return new CodexSdkHarness({
       harness,
+      turnTimeoutMs,
       ...(colocated
         ? {
             createWorker: (emit, input) =>
@@ -856,7 +877,7 @@ export class Dispatcher {
                 emit,
                 input,
                 undefined,
-                harness === 'pi_sdk' ? 'pi-sdk' : 'codex-sdk',
+                harness === 'dsh_sdk' ? 'dsh-sdk' : harness === 'pi_sdk' ? 'pi-sdk' : 'codex-sdk',
               ),
           }
         : {}),
@@ -864,13 +885,18 @@ export class Dispatcher {
       ...(egress === 'gateway'
         ? {
             // The Responses SDK appends /responses; retain the gateway's /v1 prefix.
+            ...(harness === 'dsh_sdk'
+              ? { dshGatewayUrl: new URL(this.opts.gatewayLlmUrl!).origin }
+              : {}),
             ...(harness === 'pi_sdk'
               ? { piGatewayUrl: this.opts.gatewayLlmUrl! }
-              : { baseUrl: this.opts.gatewayLlmUrl!.replace(/\/+$/, '') }),
+              : harness === 'dsh_sdk'
+                ? {}
+                : { baseUrl: this.opts.gatewayLlmUrl!.replace(/\/+$/, '') }),
             llmGatewayJwtProvider: new SessionJwtProvider(
               (signal) => registry.mintLlmGatewayJwt(workspaceId, sessionId, signal),
-              // One SDK bearer spans the ten-minute turn, including client waits.
-              630_000,
+              // Refresh between turns, with headroom for waits and cleanup; never mid-turn.
+              turnTimeoutMs + 30_000,
             ),
           }
         : directUrl
@@ -926,6 +952,7 @@ export class Dispatcher {
       });
     return {
       claim: () => request({ type: 'claim', expectedOwnershipRevision }),
+      inspect: () => request({ type: 'inspect' }),
       update: request,
       recover: (receipt) =>
         this.withHarnessTurnRecovery(() =>
@@ -2062,6 +2089,27 @@ export class Dispatcher {
       ignore();
       return;
     }
+    if (event.producedBy === 'registry' && event.kind === 'session.thread_status_terminated') {
+      const control = JSON.parse(Buffer.from(event.payload).toString('utf8')) as Record<
+        string,
+        unknown
+      >;
+      if (
+        ['interrupted', 'archived'].includes(String(control.stop_reason)) &&
+        this.runners.get(runnerKeyFor(ids.workspaceId, ids.sessionId))
+          ?.supportsNativeThreadInterrupt
+      )
+        await this.handleUserEvent(
+          ids.workspaceId,
+          ids.sessionId,
+          'user.interrupt',
+          control,
+          { userEventId: event.id, subpath: event.subpath },
+          lifecycleGeneration,
+        );
+      ignore();
+      return;
+    }
     if (event.producedBy !== 'client') {
       ignore();
       return;
@@ -2086,6 +2134,7 @@ export class Dispatcher {
       payload,
       {
         userEventId: sourceEventId,
+        subpath: event.subpath,
         seq: Number(message.offset),
         producedAt: event.producedAt,
       },
@@ -2098,6 +2147,26 @@ export class Dispatcher {
     this.assertLifecycleCurrent(lifecycleGeneration);
     if (event.kind === 'session.archived' || event.kind === 'session.deleted') {
       await this.stopArchivedRunner(event.workspaceId, event.sessionId);
+      return;
+    }
+    if (event.producedBy === 'registry' && event.kind === 'session.thread_status_terminated') {
+      const control = JSON.parse(Buffer.from(event.payload).toString('utf8')) as Record<
+        string,
+        unknown
+      >;
+      if (
+        ['interrupted', 'archived'].includes(String(control.stop_reason)) &&
+        this.runners.get(runnerKeyFor(event.workspaceId, event.sessionId))
+          ?.supportsNativeThreadInterrupt
+      )
+        await this.handleUserEvent(
+          event.workspaceId,
+          event.sessionId,
+          'user.interrupt',
+          control,
+          { userEventId: event.id, subpath: event.subpath },
+          lifecycleGeneration,
+        );
       return;
     }
     if (event.producedBy !== 'client') return;
@@ -2117,6 +2186,7 @@ export class Dispatcher {
       payload,
       {
         userEventId: event.id,
+        subpath: event.subpath,
         seq: event.seq,
         producedAt: event.producedAt,
       },
@@ -2302,8 +2372,18 @@ export class Dispatcher {
         this.stopStaleRunner(runner);
         throw new DispatcherStoppingError();
       }
+      if (runner.supportsNativeThreadInterrupt && this.runners.get(runnerKey) !== runner) {
+        await runner.stop('error');
+        throw new RetryableSessionEventError('DSH startup generation retired before input');
+      }
       this.runners.set(runnerKey, runner);
     } else {
+      if (kind === 'user.message') {
+        await runner.waitForAdmission();
+        this.assertLifecycleCurrent(lifecycleGeneration);
+        if (this.runners.get(runnerKey) !== runner)
+          throw new RetryableSessionEventError('Runner generation changed during admission');
+      }
       const refreshed = await this.respawnRunnerIfSessionConfigChanged(
         workspaceId,
         sessionId,
@@ -2378,9 +2458,16 @@ export class Dispatcher {
     harnessEventSubmitTotal.inc({ workspace_id: workspaceId, kind });
     try {
       this.assertLifecycleCurrent(lifecycleGeneration);
+      if (kind === 'user.message') {
+        await runner.waitForAdmission();
+        this.assertLifecycleCurrent(lifecycleGeneration);
+        if (this.runners.get(runnerKey) !== runner)
+          throw new RetryableSessionEventError('Runner generation changed before input execution');
+      }
       const submitResult = await runner.submit(
         {
           ...(source?.userEventId ? { id: source.userEventId } : {}),
+          ...(source?.subpath ? { subpath: source.subpath } : {}),
           kind,
           payload: harnessPayload,
           ...(companionSystemMessage === undefined
@@ -2405,6 +2492,7 @@ export class Dispatcher {
           source?.userEventId,
           payload,
           lifecycleGeneration,
+          source?.subpath,
         );
         this.assertLifecycleCurrent(lifecycleGeneration);
         await this.markSessionIdle(workspaceId, sessionId, runner.sandboxId).catch((stateErr) => {
@@ -2543,7 +2631,7 @@ export class Dispatcher {
         // is permanent that produced an infinite redelivery loop — one session.error
         // appended per cycle — and the periodic consumer-rediscover teardown racing a
         // pending nack redelivery timer crashed the native pulsar client (SIGSEGV).
-        await this.emitUnappliedUserEvent(workspaceId, sessionId, kind, e);
+        await this.emitUnappliedUserEvent(workspaceId, sessionId, kind, e, source?.userEventId);
         this.assertLifecycleCurrent(lifecycleGeneration);
         if (!runner.hasPendingRequiredAction()) {
           this.scheduleIdleTimer(runnerKey, workspaceId, sessionId, runner);
@@ -2673,6 +2761,7 @@ export class Dispatcher {
     const systemMessages = new Map<string, { seq: number; text: string }>();
     const processed = new Set<string>();
     const userMessages = new Map<string, unknown>();
+    const userSubpaths = new Map<string, string>();
     const deferred: Array<{ seq: number; userEventId: string }> = [];
     const submitted = new Set<string>();
     for await (const event of this.opts.store.read(workspaceId, sessionId, {
@@ -2693,6 +2782,7 @@ export class Dispatcher {
           const text = systemMessageText(parseJsonPayload(event.payload));
           if (text) systemMessages.set(event.id, { seq: event.seq, text });
         } else if (event.kind === 'user.message') {
+          userSubpaths.set(event.id, event.subpath);
           const payload = parseJsonPayload(event.payload);
           if (payload !== null) userMessages.set(event.id, payload);
         }
@@ -2729,7 +2819,11 @@ export class Dispatcher {
       deferredUserMessages: deferred
         .sort((a, b) => a.seq - b.seq)
         .filter((message) => !submitted.has(message.userEventId))
-        .map(({ userEventId }) => ({ userEventId, payload: userMessages.get(userEventId) })),
+        .map(({ userEventId }) => ({
+          userEventId,
+          payload: userMessages.get(userEventId),
+          subpath: userSubpaths.get(userEventId) ?? '',
+        })),
     };
   }
 
@@ -2796,14 +2890,20 @@ export class Dispatcher {
       this.assertLifecycleCurrent(lifecycleGeneration);
       if (prepared) {
         prepared = validatePreparedExecution(workspaceId, sessionId, prepared);
+        await runner.applyArchivedThreadSubpaths(prepared.archived_thread_subpaths);
+        this.assertLifecycleCurrent(lifecycleGeneration);
+        if (this.runners.get(runnerKey) !== runner)
+          throw new RetryableSessionEventError('Runner generation changed during control refresh');
       }
     } catch (e) {
       if (!this.isLifecycleCurrent(lifecycleGeneration) || e instanceof DispatcherStoppingError) {
         throw new DispatcherStoppingError({ cause: e });
       }
       console.error(`dispatcher: refresh prepareExecution ${workspaceId}/${sessionId} failed`, e);
-      this.runners.delete(runnerKey);
-      this.runnerSessionConfigKeys.delete(runnerKey);
+      if (this.runners.get(runnerKey) === runner) {
+        this.runners.delete(runnerKey);
+        this.runnerSessionConfigKeys.delete(runnerKey);
+      }
       this.clearDeferredUserMessages(runnerKey);
       this.cancelIdleTimer(runnerKey);
       await runner.stop('session.updated').catch((stopErr) => {
@@ -2880,6 +2980,10 @@ export class Dispatcher {
     try {
       const fresh = await this.spawnRunnerWithMetrics(workspaceId, sessionId, prepared);
       this.assertLifecycleCurrent(lifecycleGeneration);
+      if (fresh.supportsNativeThreadInterrupt && this.runners.get(runnerKey) !== fresh) {
+        await fresh.stop('error');
+        throw new RetryableSessionEventError('DSH refreshed generation retired before input');
+      }
       this.runners.set(runnerKey, fresh);
       return fresh;
     } catch (e) {
@@ -2976,6 +3080,7 @@ export class Dispatcher {
     userEventId: string | undefined,
     payload: unknown,
     lifecycleGeneration: number,
+    subpath?: string,
   ): Promise<void> {
     const deferredUserEventId =
       userEventId && userEventId.length > 0 ? userEventId : `evt_${uuidv7()}`;
@@ -2996,7 +3101,11 @@ export class Dispatcher {
     bySession.set(deferredUserEventId, payload);
     const queue =
       this.deferredUserMessageQueues.get(runnerKey) ?? this.createDeferredQueue(runnerKey, true);
-    queue.items.push({ userEventId: deferredUserEventId, payload });
+    queue.items.push({
+      userEventId: deferredUserEventId,
+      payload,
+      ...(subpath ? { subpath } : {}),
+    });
   }
 
   private async drainDeferredUserMessages(
@@ -3051,6 +3160,7 @@ export class Dispatcher {
           submitResult = await runner.submit(
             {
               id: next.userEventId,
+              ...(next.subpath ? { subpath: next.subpath } : {}),
               kind: 'user.message',
               payload: withoutCompanionSystemCorrelation(next.payload),
               ...(companionSystemMessage === undefined
@@ -3154,6 +3264,8 @@ export class Dispatcher {
       }
       const validated = validatePreparedExecution(workspaceId, sessionId, prepared);
       runner.applyGuardrailUsageState(validated.guardrail_state ?? {});
+      await runner.applyArchivedThreadSubpaths(validated.archived_thread_subpaths);
+      this.assertLifecycleCurrent(lifecycleGeneration);
       return true;
     } catch (cause) {
       if (
@@ -3166,6 +3278,12 @@ export class Dispatcher {
         `dispatcher: deferred usage refresh failed for ${workspaceId}/${sessionId}; leaving user message queued`,
         cause,
       );
+      const runnerKey = runnerKeyFor(workspaceId, sessionId);
+      if (runner.supportsNativeThreadInterrupt && this.runners.get(runnerKey) === runner) {
+        this.runners.delete(runnerKey);
+        this.runnerSessionConfigKeys.delete(runnerKey);
+        await runner.stop('error');
+      }
       return false;
     }
   }
@@ -3230,12 +3348,13 @@ export class Dispatcher {
       const queue = this.createDeferredQueue(runnerKey, true);
       for (const message of recovered.deferredUserMessages) {
         const payload = memoryPayloads?.get(message.userEventId) ?? message.payload;
-        if (payload !== undefined) queue.items.push({ userEventId: message.userEventId, payload });
+        if (payload !== undefined) queue.items.push({ ...message, payload });
       }
       return queue;
     }
 
     const userMessages = new Map<string, unknown>();
+    const userSubpaths = new Map<string, string>();
     const deferred: Array<{ seq: number; userEventId: string }> = [];
     const submitted = new Set<string>();
 
@@ -3245,6 +3364,7 @@ export class Dispatcher {
       subpath: '*',
     })) {
       if (event.producedBy === 'client' && event.kind === 'user.message') {
+        userSubpaths.set(event.id, event.subpath);
         const payload = parseJsonPayload(event.payload);
         if (payload !== null) userMessages.set(event.id, payload);
         continue;
@@ -3280,7 +3400,12 @@ export class Dispatcher {
     for (const item of deferred) {
       if (submitted.has(item.userEventId)) continue;
       const payload = memoryPayloads?.get(item.userEventId) ?? userMessages.get(item.userEventId);
-      if (payload !== undefined) queue.items.push({ userEventId: item.userEventId, payload });
+      if (payload !== undefined)
+        queue.items.push({
+          userEventId: item.userEventId,
+          payload,
+          subpath: userSubpaths.get(item.userEventId) ?? '',
+        });
     }
     return queue;
   }
@@ -3751,6 +3876,7 @@ export class Dispatcher {
     sessionId: string,
     kind: string,
     error: UnappliedUserEventError,
+    sourceEventId?: string,
   ): Promise<void> {
     await this.appendInternalEvent(
       workspaceId,
@@ -3760,7 +3886,10 @@ export class Dispatcher {
         type: 'unapplied_event',
         message: error.message,
         willRetry: false,
-        extra: { user_event_kind: kind },
+        extra: {
+          user_event_kind: kind,
+          ...(sourceEventId ? { source_event_id: sourceEventId } : {}),
+        },
       }),
     ).catch((appendErr) => {
       console.error(
@@ -5306,6 +5435,12 @@ export class Dispatcher {
         appliedSystemMessages,
       );
       await runner.start({
+        ...(this.opts.sandboxRuntime?.capabilities.supportsPerCallCancellation
+          ? { supportsPerCallCancellation: true }
+          : {}),
+        ...(prepared?.archived_thread_subpaths
+          ? { archivedThreadSubpaths: prepared.archived_thread_subpaths }
+          : {}),
         agentSnapshot:
           replayedSystemPrompt === baseAgentSnapshot.system
             ? baseAgentSnapshot
@@ -5319,6 +5454,15 @@ export class Dispatcher {
         ...(prepared?.guardrail_state ? { guardrailState: prepared.guardrail_state } : {}),
       });
       this.assertLifecycleCurrent(lifecycleGeneration);
+      if (selection.harness === 'dsh_sdk') {
+        const admitted = await this.admitDshRunner(
+          workspaceId,
+          sessionId,
+          runner,
+          lifecycleGeneration,
+        );
+        if (admitted !== runner) return admitted;
+      }
       await this.markSessionRunning(workspaceId, sessionId, runner.sandboxId).catch((stateErr) => {
         console.error(`dispatcher: failed to mark ${sessionId} running`, stateErr);
       });
@@ -5339,6 +5483,7 @@ export class Dispatcher {
           cause: e,
         });
       }
+      if (e instanceof RetryableSessionEventError) throw e;
       if (selection.mode !== 'colocated') throw e;
       console.error(`dispatcher: colocated setup failed for ${sessionId}`, e);
       try {
@@ -5358,6 +5503,59 @@ export class Dispatcher {
       prepared ? preparedExecutionRuntimeConfigKey(prepared) : sessionRuntimeConfigKey(session),
     );
     return runner;
+  }
+
+  private async admitDshRunner(
+    workspaceId: string,
+    sessionId: string,
+    runner: SessionRunner,
+    generation: number,
+  ): Promise<SessionRunner> {
+    const key = runnerKeyFor(workspaceId, sessionId);
+    const existing = this.runners.get(key);
+    if (existing && existing !== runner) {
+      await runner.stop('session.updated');
+      await existing.waitForAdmission();
+      this.assertLifecycleCurrent(generation);
+      if (this.runners.get(key) !== existing)
+        throw new RetryableSessionEventError('DSH startup owner changed before admission');
+      return existing;
+    }
+    let allow!: () => void;
+    let deny!: (error: unknown) => void;
+    runner.deferAdmissionUntil(
+      new Promise<void>((resolve, reject) => {
+        allow = resolve;
+        deny = reject;
+      }),
+    );
+    // Register synchronously before the authoritative re-read: live controls bypass input admission.
+    this.runners.set(key, runner);
+    try {
+      if (!this.opts.registry) throw new Error('DSH archive refresh requires Registry');
+      const prepared = await this.opts.registry.prepareExecution({ workspaceId, sessionId });
+      this.assertLifecycleCurrent(generation);
+      if (!prepared || this.runners.get(key) !== runner)
+        throw new Error('DSH startup generation or Session is no longer current');
+      const validated = validatePreparedExecution(workspaceId, sessionId, prepared);
+      await runner.applyArchivedThreadSubpaths(validated.archived_thread_subpaths);
+      this.assertLifecycleCurrent(generation);
+      if (this.runners.get(key) !== runner)
+        throw new Error('DSH startup generation changed during archive refresh');
+      allow();
+      return runner;
+    } catch (cause) {
+      const error = new RetryableSessionEventError('DSH startup archive admission failed', {
+        cause,
+      });
+      deny(error);
+      if (this.runners.get(key) === runner) {
+        this.runners.delete(key);
+        this.runnerSessionConfigKeys.delete(key);
+      }
+      await runner.stop('error').catch(() => {});
+      throw error;
+    }
   }
 
   private buildRuntimeAgentSnapshot(

@@ -21,6 +21,7 @@ const imageNames = [
   'orca-registry-service-ts',
   'orca-harness-server',
   'sandbox-harness-claude-code',
+  'sandbox-harness-dsh',
 ];
 
 test('both architectures build natively without weakening validation or attestations', () => {
@@ -68,6 +69,20 @@ test('digest artifacts are isolated by image and platform', () => {
     'release-digest-orca-opensandbox-code-interpreter-${{ matrix.platform_pair }}',
   );
   const merge = jobs['merge-images'];
+  assert.equal(
+    merge.outputs.sandbox_harness_dsh_digest,
+    "${{ steps.inspect.outputs['digest_sandbox-harness-dsh'] }}",
+  );
+  assert.deepEqual(
+    jobs['build-images'].strategy.matrix.include.find(
+      (entry) => entry.image === 'sandbox-harness-dsh',
+    ),
+    {
+      image: 'sandbox-harness-dsh',
+      dockerfile: 'services/sandbox-harness/Dockerfile',
+      build_args: 'DEFAULT_AGENT=dsh-sdk',
+    },
+  );
   assert.deepEqual(merge.strategy.matrix.image, [
     ...imageNames,
     'orca-opensandbox-code-interpreter',
@@ -149,6 +164,10 @@ test('chart uses the merged sandbox manifest, with build-only mode still support
   assert.equal(inspect.env.IMAGE_KEY, '${{ matrix.image }}');
   assert.ok(inspect.run.includes('digest_${IMAGE_KEY}=${digest}'));
   const chart = jobs['release-chart'];
+  assert.equal(
+    chart.steps.find((step) => step.id === 'chart-images').env.SANDBOX_HARNESS_DSH_DIGEST,
+    '${{ needs.merge-images.outputs.sandbox_harness_dsh_digest }}',
+  );
   for (const job of ['validate', 'build-images', 'build-opensandbox-platforms', 'merge-images']) {
     assert.ok(chart.needs.includes(job));
   }
@@ -157,6 +176,47 @@ test('chart uses the merged sandbox manifest, with build-only mode still support
     chart.steps.find((step) => step.id === 'chart-images').env.SANDBOX_HARNESS_DIGEST,
     '${{ needs.merge-images.outputs.sandbox_harness_digest }}',
   );
+});
+
+test('chart image resolution requires a valid DSH publication digest but supports dry runs', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'orca-dsh-release-test-'));
+  try {
+    const digest = 'sha256:' + 'a'.repeat(64);
+    const step = jobs['release-chart'].steps.find((entry) => entry.id === 'chart-images');
+    for (const [publish, dshDigest, succeeds] of [
+      ['false', '', true],
+      ['true', '', false],
+      ['true', 'sha256:bad', false],
+      ['true', digest, true],
+    ]) {
+      const output = join(directory, 'output');
+      writeFileSync(output, '');
+      const result = spawnSync('bash', ['-c', step.run], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          IMAGE_REGISTRY: 'registry.example/orca',
+          GITHUB_OUTPUT: output,
+          PUBLISH: publish,
+          SANDBOX_HARNESS_DIGEST: digest,
+          SANDBOX_HARNESS_DSH_DIGEST: dshDigest,
+        },
+      });
+      assert.equal(result.status === 0, succeeds, result.stdout + result.stderr);
+      if (succeeds) {
+        assert.ok(
+          readFileSync(output, 'utf8').includes(
+            'sandbox_harness_dsh_repository=registry.example/orca/sandbox-harness-dsh',
+          ),
+        );
+        assert.ok(
+          readFileSync(output, 'utf8').includes('sandbox_harness_dsh_digest=' + dshDigest + '\n'),
+        );
+      }
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 // Run the workflow's real shell scripts; only registry access and retry delays

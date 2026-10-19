@@ -1,6 +1,8 @@
 // Copyright The Orca Authors
 // SPDX-License-Identifier: Apache-2.0
 
+import { rejectUnsupportedCancellation, type SandboxCallOptions } from '@orca/sandbox-runtime';
+
 import { spawn } from 'node:child_process';
 import {
   chmodSync,
@@ -134,7 +136,8 @@ class InMemorySandboxHandle implements SandboxHandle {
     this.files = new InMemoryFiles(root);
   }
 
-  async run(call: ToolCall): Promise<ToolResult> {
+  async run(call: ToolCall, options?: SandboxCallOptions): Promise<ToolResult> {
+    rejectUnsupportedCancellation(options);
     if (this.destroyed) throw new Error(`sandbox ${this.id} destroyed`);
 
     if (call.tool === 'bash') {
@@ -175,7 +178,12 @@ class InMemorySandboxHandle implements SandboxHandle {
     // isolation boundary and must not pretend shell parsing is sufficient.
   }
 
-  async runWithWritePolicy(call: ToolCall, _policy: SandboxWritePolicy): Promise<ToolResult> {
+  async runWithWritePolicy(
+    call: ToolCall,
+    _policy: SandboxWritePolicy,
+    options?: SandboxCallOptions,
+  ): Promise<ToolResult> {
+    rejectUnsupportedCancellation(options);
     if (call.tool === 'bash') {
       return {
         exit_code: 126,

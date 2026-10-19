@@ -16,6 +16,7 @@ COPY patches ./patches
 COPY packages/codex-harness/package.json ./packages/codex-harness/
 COPY packages/sdk-harness/package.json ./packages/sdk-harness/
 COPY packages/pi-harness/package.json ./packages/pi-harness/
+COPY packages/dsh-harness/package.json ./packages/dsh-harness/
 COPY services/harness-server/package.json ./services/harness-server/
 COPY services/observability-exporter/package.json ./services/observability-exporter/
 COPY services/registry-service-ts/package.json ./services/registry-service-ts/
@@ -55,6 +56,9 @@ COPY packages/sdk-harness/tsconfig.json ./packages/sdk-harness/
 COPY packages/sdk-harness/src ./packages/sdk-harness/src
 COPY packages/pi-harness/tsconfig.json ./packages/pi-harness/
 COPY packages/pi-harness/src ./packages/pi-harness/src
+COPY packages/dsh-harness/tsconfig.json ./packages/dsh-harness/
+COPY packages/dsh-harness/src ./packages/dsh-harness/src
+COPY packages/dsh-harness/profile ./packages/dsh-harness/profile
 COPY packages/guardrails/tsconfig.json ./packages/guardrails/
 COPY packages/guardrails/src ./packages/guardrails/src
 COPY packages/sandbox-runtime/tsconfig.json ./packages/sandbox-runtime/
@@ -65,6 +69,7 @@ COPY services/harness-server/src ./services/harness-server/src
 RUN pnpm -F @orca/sdk-harness build && \
     pnpm -F @orca/harness-catalog build && \
     pnpm -F @orca/pi-harness build && \
+    pnpm -F @orca/dsh-harness build && \
     pnpm -F @orca/codex-harness build && \
     pnpm -F @orca/agent-event-contract build && \
     pnpm -F @orca/transcript-store-types build && \

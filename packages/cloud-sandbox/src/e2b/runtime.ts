@@ -1,6 +1,8 @@
 // Copyright The Orca Authors
 // SPDX-License-Identifier: Apache-2.0
 
+import { rejectUnsupportedCancellation, type SandboxCallOptions } from '@orca/sandbox-runtime';
+
 import { randomUUID } from 'node:crypto';
 import { posix as posixPath } from 'node:path';
 import type {
@@ -365,7 +367,8 @@ class E2BSandboxHandle implements SandboxHandle {
     this.files = new E2BFiles(sb);
   }
 
-  async run(call: ToolCall): Promise<ToolResult> {
+  async run(call: ToolCall, options?: SandboxCallOptions): Promise<ToolResult> {
+    rejectUnsupportedCancellation(options);
     if (this.destroyed) throw new Error(`sandbox ${this.id} destroyed`);
     const parsed = parseToolCall(call);
     if (parsed.tool === 'invalid') {
@@ -452,7 +455,9 @@ class E2BSandboxHandle implements SandboxHandle {
   async runWithWritePolicy(
     call: ToolCall,
     policy: ValidatedSandboxWritePolicy,
+    options?: SandboxCallOptions,
   ): Promise<ToolResult> {
+    rejectUnsupportedCancellation(options);
     const parsed = parseToolCall(call);
     if (parsed.tool === 'invalid') {
       return { exit_code: 2, stderr: parsed.error };

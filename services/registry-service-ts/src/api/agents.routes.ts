@@ -434,6 +434,7 @@ export function registerAgentsRoutes(
       if (updatedMultiagent && 'error' in updatedMultiagent)
         return reply.code(400).send({ error: updatedMultiagent.error });
       const featureError = validateHarnessFeatures(updatedMetadata, {
+        tools: normalizedTools,
         skills: updatedSkills,
         multiagent: updatedMultiagent,
       });
@@ -1028,7 +1029,9 @@ async function resolveMultiagentForStorage(
     );
     if (
       !('error' in memberHarness) &&
-      (memberHarness.harness === 'codex_sdk' || memberHarness.harness === 'pi_sdk')
+      (memberHarness.harness === 'codex_sdk' ||
+        memberHarness.harness === 'pi_sdk' ||
+        memberHarness.harness === 'dsh_sdk')
     ) {
       return { error: 'codex_sdk agents cannot be multiagent roster members' };
     }
