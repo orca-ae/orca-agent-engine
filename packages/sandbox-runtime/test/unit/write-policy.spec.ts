@@ -37,6 +37,21 @@ function asWritePolicyCapable(handle: SandboxHandle): WritePolicyCapableHandle {
 }
 
 describe('sandbox write policy', () => {
+  it('propagates per-call cancellation through the policy wrapper', async () => {
+    const raw = asWritePolicyCapable(await new InMemorySandboxRuntime().acquire({}));
+    const policy = buildSandboxWritePolicy([]);
+    const execute = vi.spyOn(raw, 'runWithWritePolicy').mockResolvedValue({ exit_code: 0 });
+    try {
+      const sandbox = await createPolicyEnforcedSandbox(raw, policy);
+      const call = { tool: 'bash', args: { command: 'true' } };
+      const options = { signal: new AbortController().signal };
+      await sandbox.run(call, options);
+      expect(execute).toHaveBeenCalledWith(call, policy, options);
+    } finally {
+      await raw.destroy();
+    }
+  });
+
   it('maps only the private tool root and runtime bindings while retaining SRT network proxies', () => {
     const policy = buildSandboxWritePolicy(
       [

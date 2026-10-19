@@ -1,6 +1,6 @@
 # harness-server
 
-> Internal-only service that hosts the agent loop. Runs Claude Agent SDK, Codex SDK and Pi SDK. Has
+> Internal-only service that hosts the agent loop. Runs Claude Agent SDK, Codex SDK, Pi SDK and colocated DSH. Has
 > no public listener and no auth chain for client traffic. State and bytes flow
 > through the imported store libraries (`@orca/transcript-store`,
 > `@orca/file-store`, `@orca/memory-store`, and `@orca/skill-store`); MCP
@@ -14,7 +14,7 @@ transcript backend; Postgres and Apache Pulsar can be selected with
 ## Execution ownership
 
 `harness-server` owns cloud `separate` Sessions and cloud `claude_code` /
-`codex_sdk` / `pi_sdk` `colocated` Sessions. Self-hosted Sessions and other cloud colocated
+`codex_sdk` / `pi_sdk` / `dsh_sdk` `colocated` Sessions. Self-hosted Sessions and other cloud colocated
 harnesses belong to Registry and
 `session-runner`. Both services use `resolveExecutionOwner` from
 `@orca/harness-catalog`; Registry resolves the harness and mode from the Session-pinned
@@ -31,6 +31,34 @@ harness identity and supported mode. The registered separate implementations are
 an unregistered identity fails setup rather than using Claude implicitly. The
 HTTP/SSE adapters serve the cloud Claude, Codex, and Pi `colocated` paths, including shared resource
 mounts, Skills, output capture, stateful budget enforcement and, for Claude, native subagents. See [harness modes](../harness-modes.md).
+
+## SDK turn deadlines
+
+`HARNESS_TURN_TIMEOUT_MS` sets the whole-turn deadline for cloud `codex_sdk`,
+`pi_sdk` and `dsh_sdk` execution owned by harness-server (separate or colocated,
+where supported). The default remains `600000` milliseconds (600 seconds).
+`HARNESS_TURN_TIMEOUT_OVERRIDES_MS` is an optional JSON object keyed by those
+three SDK harness IDs, for example `{"dsh_sdk":900000}`. A matching override
+wins over the global setting, which defaults to 600000. These are operator
+settings, not Agent metadata; Claude and session-runner execution are unaffected.
+
+Both settings accept integer milliseconds from 1 through 2147483647 (Node's
+timer limit). Invalid values, malformed JSON, non-object override maps and
+unsupported harness IDs fail configuration loading. Helm renders them from
+`harness.turnTimeoutMs` and `harness.turnTimeoutOverridesMs`; override-map
+values are numbers, not strings. Tool-confirmation waits, managed tools and
+DSH native children share the same turn deadline.
+
+For Gateway egress, each turn requires a JWT with more than the effective timeout
+plus 30 seconds remaining. Credentials refresh between turns, not mid-turn;
+an insufficient minted lifetime fails turn startup explicitly. Registry's
+`AI_GATEWAY_LLM_JWT_TTL_SECS` controls the LLM JWT lifetime, with an existing
+660-second minimum for these SDKs. Longer turns require the operator to raise
+that setting beyond `(effective timeout + 30000) / 1000`, allowing issuance and
+transport margin. `SESSION_JWT_TTL_SECS` controls other Session JWT audiences and
+does not extend the LLM token. Coordinate Gateway route/request deadlines too;
+the native proxy's default route timeout is 600 seconds. A larger harness timeout
+alone does not extend Gateway authorization or request deadlines.
 
 ## Pi SDK execution
 
@@ -141,8 +169,10 @@ Sessions inherit `LLM_EGRESS_DEFAULT` (`direct` when unset), and
 `metadata.orca_llm_egress` overrides that default. With Gateway egress, the SDK
 uses `LLM_GATEWAY_URL`, a scoped Session JWT refreshed before each turn, and
 `X-Orca-Session-Id`. Registry gives
-Codex Gateway tokens a 660-second lifetime; the harness requires at least 630 seconds
-remaining before reuse, covering the ten-minute turn timeout and client tool waits.
+SDK Gateway tokens at least a 660-second lifetime; with the default deadline the
+harness requires more than 630 seconds remaining before reuse, covering the
+ten-minute turn and client tool waits. The configured deadline determines the
+required validity as described in [SDK turn deadlines](#sdk-turn-deadlines).
 A shorter minted credential fails before SDK execution. The URL retains
 its `/v1` prefix: the SDK appends `/responses`. The Gateway must implement native
 Responses and authorize `llm-responses` plus the selected model. Model provider
@@ -743,6 +773,8 @@ against an earlier runner's artifact.
 | `S3_ACCESS_KEY_ID`        | _unset_           | Optional static access-key for host-side S3 and STS clients. When the pair is absent, both use AWS default credential chain (including IRSA). Used directly by the sandbox dev fallback only when explicitly enabled. |
 | `S3_SECRET_ACCESS_KEY`    | _unset_           | Pair to `S3_ACCESS_KEY_ID`.                                                                                                                                                                                           |
 | `E2B_TEMPLATE_ID`         | _unset_           | Custom E2B template id (from `e2b template build`). When set, `E2BSandboxRuntime` uses it; otherwise the SDK default is used.                                                                                         |
+| `HARNESS_TURN_TIMEOUT_MS` | `600000` | Whole-turn deadline for the shared SDK host; see [SDK turn deadlines](#sdk-turn-deadlines). |
+| `HARNESS_TURN_TIMEOUT_OVERRIDES_MS` | `{}` | Optional JSON map of SDK harness IDs to integer millisecond overrides, taking precedence over the global deadline. |
 | `SESSION_IDLE_TIMEOUT_MS` | `60000`           | Warm-runner retention timeout after a completed turn. The session is already `idle`; when it fires, the dispatcher stops the runner, destroys the sandbox, and clears `sandbox_handle_id`.                            |
 
 The custom E2B template `orca-default` bakes in `s3fs-fuse + fuse3`, removes

@@ -15,7 +15,7 @@ export interface ToolDefinition {
   name: string;
   description: string;
   input_schema: Record<string, unknown>;
-  execute: (input: unknown) => Promise<ToolExecutionResult>;
+  execute: (input: unknown, options?: { signal?: AbortSignal }) => Promise<ToolExecutionResult>;
 }
 
 export interface ToolExecutionResult {
@@ -53,9 +53,12 @@ export function buildAgentToolset(sandbox: SandboxHandle): ToolDefinition[] {
         required: ['command'],
         additionalProperties: false,
       },
-      execute: async (input) => {
+      execute: async (input, options) => {
+        options?.signal?.throwIfAborted();
         const args = input as { command: string; timeout_ms?: number };
-        const result = await sandbox.run({ tool: 'bash', args });
+        const result = await (options
+          ? sandbox.run({ tool: 'bash', args }, options)
+          : sandbox.run({ tool: 'bash', args }));
         const out = `${result.stdout ?? ''}${result.stderr ? `\n[stderr]\n${result.stderr}` : ''}`;
         if (result.exit_code !== 0) {
           return { content: truncate(out), error: `exit code ${result.exit_code}` };
@@ -87,7 +90,8 @@ export function buildAgentToolset(sandbox: SandboxHandle): ToolDefinition[] {
         required: ['path'],
         additionalProperties: false,
       },
-      execute: async (input) => {
+      execute: async (input, options) => {
+        options?.signal?.throwIfAborted();
         const args = input as { path: string; offset?: number; limit?: number };
         try {
           return await readAgentPage(sandbox.files, args.path, args, (page) => ({
@@ -111,7 +115,8 @@ export function buildAgentToolset(sandbox: SandboxHandle): ToolDefinition[] {
         required: ['path', 'content'],
         additionalProperties: false,
       },
-      execute: async (input) => {
+      execute: async (input, options) => {
+        options?.signal?.throwIfAborted();
         const args = input as { path: string; content: string };
         try {
           await sandbox.files.write(args.path, Buffer.from(args.content, 'utf8'));
@@ -134,7 +139,8 @@ export function buildAgentToolset(sandbox: SandboxHandle): ToolDefinition[] {
         required: ['path', 'find', 'replace'],
         additionalProperties: false,
       },
-      execute: async (input) => {
+      execute: async (input, options) => {
+        options?.signal?.throwIfAborted();
         const args = input as { path: string; find: string; replace: string };
         try {
           const page = await sandbox.files.readUtf8Page(args.path, {});
@@ -144,6 +150,7 @@ export function buildAgentToolset(sandbox: SandboxHandle): ToolDefinition[] {
             };
           }
           const original = page.content;
+          options?.signal?.throwIfAborted();
           const updated = original.split(args.find).join(args.replace);
           if (updated === original) {
             return { content: `no occurrences of pattern in ${args.path}` };
@@ -168,9 +175,12 @@ export function buildAgentToolset(sandbox: SandboxHandle): ToolDefinition[] {
         required: ['pattern'],
         additionalProperties: false,
       },
-      execute: async (input) => {
+      execute: async (input, options) => {
+        options?.signal?.throwIfAborted();
         const args = input as { pattern: string; root?: string };
-        const result = await sandbox.run({ tool: 'glob', args });
+        const result = await (options
+          ? sandbox.run({ tool: 'glob', args }, options)
+          : sandbox.run({ tool: 'glob', args }));
         return { output: result.output, content: JSON.stringify(result.output ?? []) };
       },
     },
@@ -186,9 +196,12 @@ export function buildAgentToolset(sandbox: SandboxHandle): ToolDefinition[] {
         required: ['pattern'],
         additionalProperties: false,
       },
-      execute: async (input) => {
+      execute: async (input, options) => {
+        options?.signal?.throwIfAborted();
         const args = input as { pattern: string; root?: string };
-        const result = await sandbox.run({ tool: 'grep', args });
+        const result = await (options
+          ? sandbox.run({ tool: 'grep', args }, options)
+          : sandbox.run({ tool: 'grep', args }));
         return { content: truncate((result.output as string) ?? '') };
       },
     },
@@ -205,7 +218,8 @@ export function buildAgentToolset(sandbox: SandboxHandle): ToolDefinition[] {
           required: ['path'],
           additionalProperties: false,
         },
-        execute: async (input) => {
+        execute: async (input, options) => {
+          options?.signal?.throwIfAborted();
           const { path } = input as { path: string };
           try {
             if (name === 'list')
@@ -232,12 +246,14 @@ export function buildAgentToolset(sandbox: SandboxHandle): ToolDefinition[] {
         required: ['url'],
         additionalProperties: false,
       },
-      execute: async (input) => {
+      execute: async (input, options) => {
+        options?.signal?.throwIfAborted();
         const args = input as { url: string; method?: string; headers?: Record<string, string> };
         try {
           const resp = await fetch(args.url, {
             method: args.method ?? 'GET',
             headers: args.headers,
+            ...(options?.signal ? { signal: options.signal } : {}),
           });
           const body = await resp.text();
           if (!resp.ok) {

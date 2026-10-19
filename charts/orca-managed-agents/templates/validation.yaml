@@ -1,3 +1,20 @@
+{{- /* SDK deadlines must fit Node's signed 32-bit timer and cannot disable the bound. */ -}}
+{{- $turnTimeout := .Values.harness.turnTimeoutMs -}}
+{{- if or (and (kindIs "string" $turnTimeout) (not (regexMatch "^[0-9]+$" $turnTimeout))) (ne (float64 $turnTimeout) (floor (float64 $turnTimeout))) (lt (float64 $turnTimeout) 1.0) (gt (float64 $turnTimeout) 2147483647.0) -}}
+{{- fail "harness.turnTimeoutMs must be an integer between 1 and 2147483647 milliseconds" -}}
+{{- end -}}
+{{- $turnOverrides := .Values.harness.turnTimeoutOverridesMs -}}
+{{- if not (kindIs "map" $turnOverrides) -}}
+{{- fail "harness.turnTimeoutOverridesMs must be a map" -}}
+{{- end -}}
+{{- range $id, $timeout := $turnOverrides -}}
+{{- if not (has $id (list "codex_sdk" "pi_sdk" "dsh_sdk")) -}}
+{{- fail (printf "harness.turnTimeoutOverridesMs.%s is not a supported SDK harness ID" $id) -}}
+{{- end -}}
+{{- if or (kindIs "string" $timeout) (ne (float64 $timeout) (floor (float64 $timeout))) (lt (float64 $timeout) 1.0) (gt (float64 $timeout) 2147483647.0) -}}
+{{- fail (printf "harness.turnTimeoutOverridesMs.%s must be an integer between 1 and 2147483647 milliseconds" $id) -}}
+{{- end -}}
+{{- end -}}
 {{- $images := default (dict) .Values.images -}}
 {{- $observabilityExporter := default (dict) .Values.observabilityExporter -}}
 {{- $observabilityExporterServiceAccount := default (dict) (dig "serviceAccount" (dict) $observabilityExporter) -}}
@@ -93,6 +110,11 @@
 {{- with .Values.images.sandboxHarness.claudeCode.digest -}}
 {{- if not (regexMatch "^sha256:[0-9a-f]{64}$" .) -}}
 {{- fail "images.sandboxHarness.claudeCode.digest must be a full sha256:<64-hex-digit> manifest digest" -}}
+{{- end -}}
+{{- end -}}
+{{- with .Values.images.sandboxHarness.dsh.digest -}}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" .) -}}
+{{- fail "images.sandboxHarness.dsh.digest must be a full sha256:<64-hex-digit> manifest digest" -}}
 {{- end -}}
 {{- end -}}
 {{- with .Values.images.toolset.digest -}}

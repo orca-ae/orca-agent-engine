@@ -126,6 +126,7 @@ const repoFilesUnder = (dir) =>
  * documented nowhere, while this gate reported "env docs in sync".
  */
 const CONFIG_SOURCES = [
+  'packages/dsh-harness/src/plugin.ts',
   'packages/sdk-harness/src/credentials.ts',
   'packages/pi-harness/src/credentials.ts',
   'services/harness-server/src/config.ts',
@@ -358,6 +359,10 @@ for (const rel of CONFIG_SOURCES) {
  */
 const EXCUSED_SOURCES = new Map([
   [
+    'packages/dsh-harness/src/worker.ts',
+    'forwards only PATH to the private DSH process; its home and system prompt are generated worker inputs, not ambient operator configuration',
+  ],
+  [
     'packages/codex-harness/src/worker.ts',
     'forwards only PATH to the SDK subprocess; credentials are explicit worker input, not ambient environment settings',
   ],
@@ -578,6 +583,7 @@ const declared = collectDeclared(sources);
  * single global one.
  */
 const SOURCE_FLOORS = {
+  'packages/dsh-harness/src/plugin.ts': 1,
   'packages/sdk-harness/src/credentials.ts': 6,
   'packages/pi-harness/src/credentials.ts': 5,
   'services/harness-server/src/config.ts': 76,

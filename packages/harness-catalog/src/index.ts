@@ -12,3 +12,4 @@ export * from './execution-owner.js';
 export * from './capabilities.js';
 export * from './harness-turn.js';
 export * from './pi-checkpoint.js';
+export * from './dsh-checkpoint.js';

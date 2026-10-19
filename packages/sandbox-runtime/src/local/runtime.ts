@@ -1,6 +1,11 @@
 // Copyright The Orca Authors
 // SPDX-License-Identifier: Apache-2.0
 
+import {
+  rejectUnsupportedCancellation,
+  type SandboxCallOptions,
+} from '../opensandbox-cancellation.js';
+
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import {
@@ -903,7 +908,8 @@ class LocalSandboxHandle implements SandboxHandle {
     });
   }
 
-  async run(call: ToolCall): Promise<ToolResult> {
+  async run(call: ToolCall, options?: SandboxCallOptions): Promise<ToolResult> {
+    rejectUnsupportedCancellation(options);
     if (this.destroyed) throw new Error(`sandbox ${this.id} destroyed`);
     const parsed = parseToolCall(call);
     if (parsed.tool === 'invalid') {
@@ -1067,7 +1073,12 @@ rm -- "$probe_file"`;
     }
   }
 
-  async runWithWritePolicy(call: ToolCall, policy: SandboxWritePolicy): Promise<ToolResult> {
+  async runWithWritePolicy(
+    call: ToolCall,
+    policy: SandboxWritePolicy,
+    options?: SandboxCallOptions,
+  ): Promise<ToolResult> {
+    rejectUnsupportedCancellation(options);
     const parsed = parseToolCall(call);
     if (parsed.tool === 'invalid') {
       return { exit_code: 2, stderr: parsed.error };

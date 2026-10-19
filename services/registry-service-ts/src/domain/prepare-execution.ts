@@ -6,11 +6,13 @@ import {
   resolveHarnessAnnotation,
   validateHarnessDeployment,
   validateHarnessGuardrails,
+  validateHarnessFeatures,
   validateHarnessModel,
+  type AgentToolEntry,
 } from '@orca/harness-catalog';
 import type { FileStore } from '@orca/file-store';
 import type { MemoryStore } from '@orca/memory-store';
-import { and, eq, inArray, isNull, or } from 'drizzle-orm';
+import { and, eq, inArray, isNull, isNotNull, or } from 'drizzle-orm';
 import {
   PreparedAgentSnapshotSchema,
   type PreparedAgentSnapshot,
@@ -32,6 +34,7 @@ import {
   guardrailState,
   sessionResources,
   sessionSkillBindings,
+  sessionThreads,
   sessions,
   skills,
   skillVersions,
@@ -366,12 +369,30 @@ async function buildPreparedExecution(input: {
   if ('error' in selection) throw new InvalidRuntimeBindingError('harness', selection.error);
   const deploymentError = validateHarnessDeployment(environment?.target ?? 'cloud', selection);
   if (deploymentError) throw new InvalidRuntimeBindingError('harness', deploymentError);
+  const featureError =
+    selection.harness === 'dsh_sdk'
+      ? validateHarnessFeatures(primaryLoaded.snapshot.metadata, {
+          ...primaryLoaded.snapshot,
+          tools: primaryLoaded.snapshot.tools.filter(
+            (tool): tool is AgentToolEntry =>
+              typeof tool === 'object' &&
+              tool !== null &&
+              !Array.isArray(tool) &&
+              typeof (tool as Record<string, unknown>).type === 'string',
+          ),
+        })
+      : null;
+  if (featureError) throw new InvalidRuntimeBindingError('harness', featureError);
   const guardrailError = validateHarnessGuardrails(selection, guardrailPayload.guardrails);
   if (guardrailError) throw new InvalidRuntimeBindingError('guardrail', guardrailError);
   let checkpointRevision: string | null = null;
   let harnessState: unknown = null;
   let ownershipRevision = 0;
-  if (selection.harness === 'codex_sdk' || selection.harness === 'pi_sdk') {
+  if (
+    selection.harness === 'codex_sdk' ||
+    selection.harness === 'pi_sdk' ||
+    selection.harness === 'dsh_sdk'
+  ) {
     try {
       const stored = await loadHarnessTurnState(db, workspaceId, sessionId);
       harnessState = stored.state;
@@ -399,7 +420,8 @@ async function buildPreparedExecution(input: {
       metadata: asRecord(session.metadata),
       usage_writer: usageWriter,
       ...(primaryLoaded.snapshot.metadata.harness === 'codex_sdk' ||
-      primaryLoaded.snapshot.metadata.harness === 'pi_sdk'
+      primaryLoaded.snapshot.metadata.harness === 'pi_sdk' ||
+      primaryLoaded.snapshot.metadata.harness === 'dsh_sdk'
         ? {
             harness_state: harnessState,
             harness_ownership_revision: ownershipRevision,
@@ -414,7 +436,27 @@ async function buildPreparedExecution(input: {
     resources,
     guardrails: guardrailPayload.guardrails,
     guardrail_state: guardrailPayload.state,
+    archived_thread_subpaths: await loadArchivedThreadSubpaths(db, workspaceId, session.id),
   };
+}
+
+export async function loadArchivedThreadSubpaths(
+  db: DbClient,
+  workspaceId: string,
+  sessionId: string,
+): Promise<string[]> {
+  return (
+    await db
+      .select({ subpath: sessionThreads.subpath })
+      .from(sessionThreads)
+      .where(
+        and(
+          eq(sessionThreads.workspaceId, workspaceId),
+          eq(sessionThreads.sessionId, sessionId),
+          isNotNull(sessionThreads.archivedAt),
+        ),
+      )
+  ).map((row) => row.subpath);
 }
 
 /**

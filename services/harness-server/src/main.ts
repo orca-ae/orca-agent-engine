@@ -70,6 +70,7 @@ async function buildTranscriptBackend(cfg: ServiceConfig): Promise<{
       return {
         store: new PostgresTranscriptStore({ pool, closePool: false }),
         eventSource: new PostgresSessionEventSource({
+          includeAllEvents: true,
           pool,
           groupId: cfg.consumerGroupId,
           pollIntervalMs: cfg.postgresEventPollIntervalMs,
@@ -82,6 +83,7 @@ async function buildTranscriptBackend(cfg: ServiceConfig): Promise<{
     }
     case 'pulsar': {
       const eventSourceOptions: ConstructorParameters<typeof PulsarSessionEventSource>[0] = {
+        includeAllEvents: true,
         serviceUrl: cfg.pulsarServiceUrl,
         tenant: cfg.pulsarTenant,
         namespace: cfg.pulsarNamespace,
@@ -370,6 +372,8 @@ const dispatcherOpts: DispatcherOptions = {
   gitWorker,
   workDir,
   sessionIdleTimeoutMs: config.sessionIdleTimeoutMs,
+  harnessTurnTimeoutMs: config.harnessTurnTimeoutMs,
+  harnessTurnTimeoutOverridesMs: config.harnessTurnTimeoutOverridesMs,
 };
 if (kafka !== undefined) {
   dispatcherOpts.kafka = kafka;
@@ -393,6 +397,12 @@ if (config.sandboxHarnessClaudeCodeImage !== undefined) {
     claude_code: config.sandboxHarnessClaudeCodeImage,
     codex_sdk: config.sandboxHarnessClaudeCodeImage,
     pi_sdk: config.sandboxHarnessClaudeCodeImage,
+  };
+}
+if (config.sandboxHarnessDshImage !== undefined) {
+  dispatcherOpts.defaultImageOverrides = {
+    ...dispatcherOpts.defaultImageOverrides,
+    dsh_sdk: config.sandboxHarnessDshImage,
   };
 }
 const dispatcher = new Dispatcher(dispatcherOpts);

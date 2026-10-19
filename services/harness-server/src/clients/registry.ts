@@ -195,6 +195,7 @@ export interface EnvironmentRecord {
  */
 export interface PreparedExecutionV2 {
   schema_version: 2;
+  archived_thread_subpaths?: string[];
   workspace_id: string;
   session: SessionRecord;
   primary_agent: AgentRecord;
@@ -296,6 +297,9 @@ export class RegistryClient {
     }
     return {
       schema_version: 2,
+      ...(wire.archived_thread_subpaths
+        ? { archived_thread_subpaths: wire.archived_thread_subpaths }
+        : {}),
       workspace_id: wire.workspace_id,
       session: {
         ...wire.session,

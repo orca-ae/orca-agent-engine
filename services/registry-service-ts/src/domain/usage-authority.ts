@@ -24,7 +24,8 @@ export function authoritativeUsageCallerForSnapshot(
   return gatewayRegistryUsageEnabled &&
     harness.mode === 'colocated' &&
     harness.harness !== 'codex_sdk' &&
-    harness.harness !== 'pi_sdk'
+    harness.harness !== 'pi_sdk' &&
+    harness.harness !== 'dsh_sdk'
     ? 'ai-gateway'
     : 'harness';
 }

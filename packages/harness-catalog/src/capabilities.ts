@@ -8,6 +8,11 @@ import {
   type ResolvedHarness,
 } from './catalog.js';
 import { HARNESS_MODEL_POLICIES, type HarnessModelPolicy } from './harness-models.js';
+import {
+  canonicalAgentToolNames,
+  toolsetPermissionPolicies,
+  type AgentToolEntry,
+} from './snapshot-composition.js';
 
 export interface HarnessCapabilities {
   supportedTargets: readonly ('cloud' | 'self_hosted')[];
@@ -110,6 +115,22 @@ export const HARNESS_CAPABILITIES: Readonly<Record<HarnessType, HarnessCapabilit
       subagents: false,
     },
   },
+  dsh_sdk: {
+    ...runnerCapabilities,
+    supportedTargets: ['cloud'],
+    cloudExecutionOwner: 'harness-server',
+    models: HARNESS_MODEL_POLICIES.dsh_sdk!,
+    managedFeatures: { skills: false, multiagent: false },
+    nativeResume: true,
+    needsSandboxToolset: true,
+    needsMcpRewrite: true,
+    guardrails: {
+      phases: ['request', 'tool_call'],
+      stateful: true,
+      statefulPhases: ['request', 'tool_call'],
+      subagents: false,
+    },
+  },
   codex: runnerCapabilities,
   cursor: runnerCapabilities,
   pi: runnerCapabilities,
@@ -203,6 +224,17 @@ export function validateHarnessGuardrails(
       guardrail.phases.length > 0 &&
       guardrail.phases.every((phase) => phase === 'tool_call');
     const reasons = [
+      ...(selection.harness === 'dsh_sdk' &&
+      guardrail.stateful &&
+      guardrail.phases.some((phase) => phase !== 'request') &&
+      !(rule?.kind === 'builtin' && rule.builtin === 'spawn_bounds')
+        ? ['stateful tool phases require an implemented DSH rule adapter']
+        : []),
+      ...(selection.harness === 'dsh_sdk' &&
+      rule?.kind === 'builtin' &&
+      rule.builtin === 'headless_subagent_purpose_guard'
+        ? ['rule has no equivalent DSH orchestration adapter']
+        : []),
       ...(guardrail.stateful && !policy.stateful ? ['stateful rules are not supported'] : []),
       ...(guardrail.stateful && policy.statefulPhases
         ? guardrail.phases
@@ -228,10 +260,29 @@ export function validateHarnessGuardrails(
 
 export function validateHarnessFeatures(
   metadata: Record<string, unknown> | null | undefined,
-  config: { skills?: readonly unknown[] | null | undefined; multiagent?: unknown },
+  config: {
+    skills?: readonly unknown[] | null | undefined;
+    multiagent?: unknown;
+    tools?: AgentToolEntry[] | null;
+  },
 ): string | null {
   const selection = resolveHarnessAnnotation(metadata);
   if ('error' in selection) return selection.error;
+  if (
+    selection.harness === 'dsh_sdk' &&
+    canonicalAgentToolNames(config.tools ?? []).includes('agent_toolset')
+  ) {
+    const policies = toolsetPermissionPolicies(
+      config.tools ?? [],
+      'orca',
+      (tool) => tool.type === 'agent_toolset' || tool.type === 'agent_toolset_20260401',
+    );
+    if (
+      (policies.mcp__orca__web_fetch ?? policies['mcp__orca__*'] ?? 'always_allow') !==
+      'always_deny'
+    )
+      return 'dsh_sdk requires agent_toolset web_fetch permission_policy always_deny (set configs.web_fetch or default_config)';
+  }
   const features = resolveHarnessCapabilities(selection).managedFeatures;
   if (!features) return null;
   if (!features.skills && config.skills?.length)

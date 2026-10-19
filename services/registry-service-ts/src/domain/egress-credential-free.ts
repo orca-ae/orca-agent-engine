@@ -338,7 +338,9 @@ function assertSnapshotCredentialFreeAt(snapshot: AgentSnapshot, path: PathStep)
   if (snapshot.request_guardrails_owner !== undefined) {
     if (
       snapshot.request_guardrails_owner !== 'registry' ||
-      (snapshot.provider !== 'codex-sdk' && snapshot.provider !== 'pi-sdk') ||
+      (snapshot.provider !== 'codex-sdk' &&
+        snapshot.provider !== 'pi-sdk' &&
+        snapshot.provider !== 'dsh-sdk') ||
       snapshot.managed_resources === undefined ||
       snapshot.multiagent !== undefined
     )
@@ -367,13 +369,29 @@ function assertSnapshotCredentialFreeAt(snapshot: AgentSnapshot, path: PathStep)
     }
   }
   if (snapshot.harness_state !== undefined) {
-    if (snapshot.provider !== 'codex-sdk' && snapshot.provider !== 'pi-sdk')
+    if (
+      snapshot.provider !== 'codex-sdk' &&
+      snapshot.provider !== 'pi-sdk' &&
+      snapshot.provider !== 'dsh-sdk'
+    )
       throw new EgressNotCredentialFreeError('native checkpoint belongs to another harness');
     validateSdkCheckpoint(
       snapshot.harness_state,
-      snapshot.provider === 'pi-sdk' ? 'pi_sdk' : 'codex_sdk',
+      snapshot.provider === 'dsh-sdk'
+        ? 'dsh_sdk'
+        : snapshot.provider === 'pi-sdk'
+          ? 'pi_sdk'
+          : 'codex_sdk',
     );
   }
+  if (
+    snapshot.provider === 'dsh-sdk' &&
+    (snapshot.multiagent !== undefined ||
+      (Array.isArray(snapshot.custom_tools) && snapshot.custom_tools.length > 0))
+  )
+    throw new EgressNotCredentialFreeError(
+      'DSH does not support multiagent or custom client tools',
+    );
   const multiagent = (snapshot as { multiagent?: unknown }).multiagent;
   if (multiagent !== undefined) {
     assertMultiagent(multiagent, `${path}.multiagent`);

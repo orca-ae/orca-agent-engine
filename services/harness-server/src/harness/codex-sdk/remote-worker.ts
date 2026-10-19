@@ -21,7 +21,7 @@ export class RemoteCodexSdkWorker {
     private readonly emit: (event: WorkerEvent) => void,
     private readonly input: SessionStartInput,
     private readonly transport?: HarnessTransport,
-    private readonly provider: 'codex-sdk' | 'pi-sdk' = 'codex-sdk',
+    private readonly provider: 'codex-sdk' | 'pi-sdk' | 'dsh-sdk' = 'codex-sdk',
   ) {}
 
   async handle(command: WorkerCommand): Promise<void> {
@@ -67,6 +67,8 @@ export class RemoteCodexSdkWorker {
     // cleanup; this barrier proves all native usage/history events reached the
     // adapter before its response-persistence fence can commit native history.
     if (this.abort.signal.aborted) throw new Error('SDK event delivery aborted');
+    // A fence ACK proves only admission fencing; it must not join the still-active turn.
+    if ((command as { type?: string }).type === 'archive_fence') return;
     if (this.sequence >= sequence) return;
     await new Promise<void>((resolve, reject) => {
       const signal = AbortSignal.any([this.abort.signal, AbortSignal.timeout(660_000)]);

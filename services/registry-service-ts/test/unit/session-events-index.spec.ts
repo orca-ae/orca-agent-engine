@@ -16,10 +16,102 @@ import {
   legacyAgentMessageToolProjectionEvents,
   primaryThreadProjectionEvents,
   streamableEventsForSubpath,
+  stableSessionThreadId,
 } from '../../src/domain/thread-projection.js';
-import { sessionEventsIndex } from '../../src/persistence/postgres/schema.js';
+import { sessionEventsIndex, sessionThreads } from '../../src/persistence/postgres/schema.js';
 
 describe('session events index', () => {
+  it('updates explicit lifecycle names without erasing an existing name when omitted', async () => {
+    const { db, threadRows, threadUpdates } = fakeDb(true);
+    const subpath = 'subagents/11111111-1111-4111-8111-111111111111';
+    await indexTranscriptEvents(db, [
+      makeEvent({
+        id: 'evt_named',
+        producedBy: 'harness',
+        subpath,
+        kind: 'session.thread_created',
+        payload: { subpath, parent_subpath: '', agent_name: 'reviewer' },
+      }),
+      makeEvent({
+        id: 'evt_idle',
+        producedBy: 'harness',
+        subpath,
+        kind: 'session.thread_status_idle',
+        payload: { subpath, parent_subpath: '', stop_reason: 'interrupted' },
+      }),
+      makeEvent({
+        id: 'evt_renamed',
+        producedBy: 'harness',
+        subpath,
+        kind: 'session.thread_status_running',
+        payload: { subpath, parent_subpath: '', agent_name: 'renamed reviewer' },
+      }),
+    ]);
+    expect(threadRows[0]).toMatchObject({ agentName: 'reviewer' });
+    expect(threadUpdates[0]).toMatchObject({ agentName: 'reviewer' });
+    expect(threadUpdates[1]).not.toHaveProperty('agentName');
+    expect(threadUpdates[1]).toMatchObject({ status: 'idle', stopReason: 'interrupted' });
+    expect(threadUpdates[2]).toMatchObject({ agentName: 'renamed reviewer' });
+  });
+
+  it('indexes settlement notices once without synthesizing sent or primary duplicates', async () => {
+    const { db, insertedRows } = fakeDb();
+    const event = makeEvent({
+      id: 'evt_notice',
+      producedBy: 'harness',
+      kind: 'agent.thread_message_received',
+      payload: {
+        message_origin: 'runtime_settlement',
+        native_message_id: 'notice-1',
+        sender_subpath: 'subagents/11111111-1111-4111-8111-111111111111',
+        recipient_subpath: '',
+        content: [{ type: 'text', text: 'Child settled.' }],
+      },
+    });
+    expect(primaryThreadProjectionEvents(event)).toEqual([]);
+    expect(primaryThreadProjectionEvents({ ...event, subpath: 'subagents/parent' })).toEqual([]);
+    await indexTranscriptEvents(db, [event]);
+    expect(insertedRows).toHaveLength(1);
+    expect(insertedRows[0]).toMatchObject({
+      kind: 'agent.thread_message_received',
+      payload: { message_origin: 'runtime_settlement' },
+    });
+  });
+
+  it('inserts nested native parents first and does not reparent later status events to root', async () => {
+    const { db, threadRows, threadUpdates } = fakeDb(true);
+    const parent = 'subagents/11111111-1111-4111-8111-111111111111';
+    const child = 'subagents/22222222-2222-4222-8222-222222222222';
+    await indexTranscriptEvents(db, [
+      makeEvent({
+        id: 'evt_child',
+        producedBy: 'harness',
+        subpath: child,
+        kind: 'session.thread_created',
+        payload: { subpath: child, parent_subpath: parent },
+      }),
+      makeEvent({
+        id: 'evt_parent',
+        producedBy: 'harness',
+        subpath: parent,
+        kind: 'session.thread_created',
+        payload: { subpath: parent, parent_subpath: '' },
+      }),
+      makeEvent({
+        id: 'evt_status',
+        producedBy: 'registry',
+        subpath: child,
+        kind: 'session.thread_status_terminated',
+        payload: { stop_reason: 'interrupted' },
+      }),
+    ]);
+    expect(threadRows[0]).toMatchObject({ subpath: parent });
+    expect(threadRows[1]).toMatchObject({
+      subpath: child,
+      parentThreadId: stableSessionThreadId('ws_index', 'ses_index', parent),
+    });
+    expect(threadUpdates[2]).not.toHaveProperty('parentThreadId');
+  });
   it('stores the authenticated guardrail subject only on client user events', async () => {
     const { db, insertedRows } = fakeDb();
     await indexTranscriptEvents(
@@ -750,18 +842,29 @@ describe('session events index', () => {
   });
 });
 
-function fakeDb(): { db: DbClient; insertedRows: unknown[]; updatedRows: unknown[] } {
+function fakeDb(withAgent = false): {
+  db: DbClient;
+  insertedRows: unknown[];
+  updatedRows: unknown[];
+  threadRows: unknown[];
+  threadUpdates: unknown[];
+} {
   const insertedRows: unknown[] = [];
   const updatedRows: unknown[] = [];
+  const threadRows: unknown[] = [];
+  const threadUpdates: unknown[] = [];
   const db = {
     insert: (table: unknown) => ({
       values: (rows: unknown[] | unknown) => {
         if (table === sessionEventsIndex) {
           insertedRows.push(...(Array.isArray(rows) ? rows : [rows]));
         }
+        if (table === sessionThreads) threadRows.push(rows);
         return {
           onConflictDoNothing: async () => undefined,
-          onConflictDoUpdate: async () => undefined,
+          onConflictDoUpdate: async (options: { set: unknown }) => {
+            if (table === sessionThreads) threadUpdates.push(options.set);
+          },
         };
       },
     }),
@@ -778,7 +881,9 @@ function fakeDb(): { db: DbClient; insertedRows: unknown[]; updatedRows: unknown
     select: () => ({
       from: () => ({
         where: () => {
-          const limited = { limit: async () => [] };
+          const limited = {
+            limit: async () => (withAgent ? [{ agentId: 'agt_native', agentVersion: 1 }] : []),
+          };
           return {
             ...limited,
             orderBy: () => limited,
@@ -787,7 +892,7 @@ function fakeDb(): { db: DbClient; insertedRows: unknown[]; updatedRows: unknown
       }),
     }),
   };
-  return { db: db as unknown as DbClient, insertedRows, updatedRows };
+  return { db: db as unknown as DbClient, insertedRows, updatedRows, threadRows, threadUpdates };
 }
 
 function makeEvents(count: number): Event[] {

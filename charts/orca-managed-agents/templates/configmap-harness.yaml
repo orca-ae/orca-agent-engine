@@ -68,6 +68,12 @@ data:
   {{- else }}
   SANDBOX_HARNESS_CLAUDE_CODE_IMAGE: {{ printf "%s:%s" $sandboxHarness.repository ($sandboxHarness.tag | default .Chart.AppVersion) | quote }}
   {{- end }}
+  {{- $dsh := .Values.images.sandboxHarness.dsh }}
+  {{- if $dsh.digest }}
+  SANDBOX_HARNESS_DSH_IMAGE: {{ printf "%s@%s" $dsh.repository $dsh.digest | quote }}
+  {{- else }}
+  SANDBOX_HARNESS_DSH_IMAGE: {{ printf "%s:%s" $dsh.repository ($dsh.tag | default .Chart.AppVersion) | quote }}
+  {{- end }}
   S3_ENDPOINT: {{ .Values.objectStorage.endpoint | quote }}
   S3_FORCE_PATH_STYLE: {{ .Values.objectStorage.forcePathStyle | quote }}
   S3_STS_ENDPOINT: {{ .Values.objectStorage.stsEndpoint | quote }}
@@ -116,3 +122,5 @@ data:
   HARNESS_WORK_DIR: {{ .Values.harness.workDir | quote }}
   GIT_CREDS_PUBLIC_URL: {{ include "orca-managed-agents.gitCredsPublicUrl" . | quote }}
   SESSION_IDLE_TIMEOUT_MS: {{ .Values.harness.sessionIdleTimeoutMs | quote }}
+  HARNESS_TURN_TIMEOUT_MS: {{ .Values.harness.turnTimeoutMs | quote }}
+  HARNESS_TURN_TIMEOUT_OVERRIDES_MS: {{ .Values.harness.turnTimeoutOverridesMs | toJson | quote }}

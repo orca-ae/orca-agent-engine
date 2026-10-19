@@ -163,7 +163,7 @@ export function validateModelControlsForStorage(
   harness?: string,
 ): StoredModel | { error: string } {
   // Pi owns its effort catalog and omitted-effort default, even for Claude models.
-  if (harness === 'pi_sdk') {
+  if (harness === 'pi_sdk' || harness === 'dsh_sdk') {
     const error = validateHarnessModel({ harness }, model);
     return error ? { error } : model;
   }

@@ -28,6 +28,45 @@ and its row in the proposals index together.
 
 Each item is proposed as an OIP pull request; the design is reviewed there before the code lands.
 
+- **DSH SDK colocated rollout.**
+  Target-platform image validation, real-provider managed Session execution and sandbox
+  replacement validation remain prerequisites to enabling it in a deployment. Self-hosted
+  execution, external child runtimes and plugin management wait for a concrete caller; workspace backup or native-state blob
+  offload waits for recovery or size requirements beyond the bounded native checkpoint.
+  Native in-process children and flat thread observations are implemented, but nested cold
+  follow-up with a dormant direct parent is rejected: the pinned DSH public API requires a live
+  parent Activation. Resume this work when DSH exposes side-effect-free ancestor materialization;
+  do not inject synthetic prompts or bypass its activation ownership. Per-call OpenSandbox
+  cancellation, native orchestration gates, monotonic archive fencing and failed-tree retirement
+  are implemented with local fixtures. Live execd process-group termination and a complete
+  Registry-to-sandbox HTTP control round trip remain deployment acceptance gates. Other harness
+  callers and sandbox backends need explicit cancellation adoption when their workloads require
+  it. Primary-thread archive currently fails closed by retiring the DSH tree rather than providing
+  native root archive acknowledgement; complete that path before claiming full thread-control
+  parity. File writes and remote MCP business effects are not transactionally rolled back.
+- **DSH explicit provider/model selection.** Trigger: the isolated official-plugin Claude probe
+  establishes a concrete second-provider use case. Preserve the
+  existing DeepSeek path for compatibility and support the provider/model/protocol capabilities
+  of the pinned official `dsh-llm-pi-ai` plugin without an Orca provider-name whitelist.
+  Derive admission and route selection from that plugin's catalog and trusted configured models,
+  not from the set with live-test evidence or a potentially different Orca Pi catalog version.
+  Reuse Agent model fields, worker commands and native Gateway bindings;
+  no new provider framework, model discovery, Gateway mapping or Helm key is needed.
+  Complete catalog admission, provider-specific JWT grants/refresh, managed transport and raw
+  usage attribution. Bind provider/model in checkpoint validation, preserving old DeepSeek
+  restore only where compatible and rejecting cross-model restore; use the existing profile
+  version mechanism if formats cannot safely coexist. First pass the parameterized existing
+  DSH smoke through actual Registry token issuance, managed bash, File API and persisted usage
+  with Claude. Then verify credential refresh, cold restore, child inheritance and control.
+  The isolated live probe covers neither these production seams nor full native-tree recovery.
+  Claude is the first live milestone, not the supported-provider boundary. Inventory installed
+  catalog protocols separately from the plugin's three custom-route protocols; reuse existing
+  protocol-specific transport/usage validation and close remaining integration gaps. Missing
+  Gateway bindings, credentials or ACLs are deployment readiness failures, not unsupported
+  provider names. Keep upstream auth in Gateway, including provider-specific requirements.
+  Track fixture/live evidence independently; do not claim parity until all supported paths are
+  integrated. Do not migrate the existing DeepSeek path or add an adapter-version registry merely
+  to introduce another provider.
 - **ACP harness provider.** Run any agent that speaks the Agent Client Protocol over stdio as a
   session-runner provider, with Orca's tools exposed to it over MCP and its permission requests
   routed through the tool-confirmation gate. OIP pending.
@@ -557,7 +596,7 @@ Decided against for now, each with the condition that would reopen it.
 | **Output indexing via S3 event notifications**       | The `OutputIndexer` re-scans the execution prefix after each local tool result and once at shutdown.                                                                                                                                                                                                           | `harness_output_index_lag_seconds` p95 above 5 s for more than 24 h. Swapping to SQS / EventBridge / MinIO bucket notifications fits behind the same `OutputIndexer` interface.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | **`mountpoint-s3` FUSE driver**                      | `s3fs-fuse` for output and memory mounts.                                                                                                                                                                                                                                                                      | Read latency dominates the session-boot profile. AWS's driver is faster for read-heavy workloads but lacks the write-back semantics output capture needs, so it cannot be a drop-in.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | **Staging-prefix garbage collection**                | Runner-generation S3 prefixes are staging storage, separate from the registry-managed File blob; a generation's prefix is not deleted after its final scan.                                                                                                                                                    | Before large-scale production use.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| **Additional harnesses**                             | `claude_agent_sdk` (`separate`), `claude_code` (`colocated`), and `codex_sdk` and `pi_sdk` (cloud `separate` by default, cloud `colocated` through the shared sandbox-harness image; self-hosted through session-runner) ship.                                                                                              | Demand. **Codex `colocated`** has a catalog entry and an image placeholder; the `codex` provider in `@orca/sandbox-harness` and its Docker image are the remaining work. **OpenAI Agents SDK** (`separate`) exposes an official `Session` protocol in Python and JS — roughly 150 lines mapping `add_items` / `get_items` / `pop_item` / `clear_session` onto `transcript-store` Append/Read/Archive. **Deep Agents (LangGraph)** (`separate`) exposes `BaseCheckpointSaver`: `put` / `put_writes` / `get_tuple` / `list` / `delete_thread`, with LangGraph's checkpoint blob as the native payload, shipping as a Python package since Deep Agents is Python. **OpenAI Codex CLI** (`separate`) hardcodes `RolloutRecorder` and exposes no plug point, so it would need either an upstream change or a brittle JSONL shim; the `colocated` path is preferred and this is deferred until a customer asks. |
+| **Additional harnesses**                             | `claude_agent_sdk` (`separate`), `claude_code` (`colocated`), and `codex_sdk` and `pi_sdk` (cloud `separate` by default, cloud `colocated` through the shared sandbox-harness image; self-hosted through session-runner) ship.                                                                                 | Demand. **Codex `colocated`** has a catalog entry and an image placeholder; the `codex` provider in `@orca/sandbox-harness` and its Docker image are the remaining work. **OpenAI Agents SDK** (`separate`) exposes an official `Session` protocol in Python and JS — roughly 150 lines mapping `add_items` / `get_items` / `pop_item` / `clear_session` onto `transcript-store` Append/Read/Archive. **Deep Agents (LangGraph)** (`separate`) exposes `BaseCheckpointSaver`: `put` / `put_writes` / `get_tuple` / `list` / `delete_thread`, with LangGraph's checkpoint blob as the native payload, shipping as a Python package since Deep Agents is Python. **OpenAI Codex CLI** (`separate`) hardcodes `RolloutRecorder` and exposes no plug point, so it would need either an upstream change or a brittle JSONL shim; the `colocated` path is preferred and this is deferred until a customer asks. |
 
 - **Pulsar seek cursors.** Reads and resumed tails scan from earliest and filter by the numeric
   cursor. Trigger: high-volume Pulsar deployments where replaying earlier messages becomes costly.

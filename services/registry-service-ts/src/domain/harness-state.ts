@@ -31,7 +31,7 @@ type CodexCheckpoint = {
   threadId: string;
   files: Record<string, string>;
   instructionsSha256?: string;
-  format?: 'pi_sdk';
+  format?: 'pi_sdk' | 'dsh_sdk';
   sdkVersion?: string;
 };
 
@@ -135,7 +135,9 @@ export async function saveHarnessState(input: {
         session.agentVersion,
       );
       if (
-        (selection.harness !== 'codex_sdk' && selection.harness !== 'pi_sdk') ||
+        (selection.harness !== 'codex_sdk' &&
+          selection.harness !== 'pi_sdk' &&
+          selection.harness !== 'dsh_sdk') ||
         resolveExecutionOwner(target ?? 'cloud', selection) !== 'harness-server'
       ) {
         throw new Error('not a harness-server managed SDK session');
@@ -397,7 +399,9 @@ export async function transitionHarnessTurn(input: {
         session.agentVersion,
       );
       if (
-        (selection.harness !== 'codex_sdk' && selection.harness !== 'pi_sdk') ||
+        (selection.harness !== 'codex_sdk' &&
+          selection.harness !== 'pi_sdk' &&
+          selection.harness !== 'dsh_sdk') ||
         resolveExecutionOwner(target ?? 'cloud', selection) !== 'harness-server'
       )
         throw new SessionHarnessBindingError('wrong harness');

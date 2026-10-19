@@ -3556,6 +3556,9 @@ async function resolveThreadTargetedEvents(
     if (!thread) {
       return { statusCode: 404, error: `session thread ${threadId} not found` };
     }
+    if (thread.archivedAt !== null || thread.status === 'archived') {
+      return { statusCode: 400, error: 'archived session thread cannot receive events' };
+    }
     if (typeof input.subpath === 'string' && input.subpath !== thread.subpath) {
       return { statusCode: 400, error: 'subpath does not match session_thread_id' };
     }

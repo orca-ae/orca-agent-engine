@@ -14,6 +14,8 @@ export { CanonicalProjectionError, projectCanonicalTurns } from './projector.js'
 export {
   PROJECTED_TRACE_SCHEMA_VERSION,
   IO_PROJECTED_TRACE_SCHEMA_VERSION,
+  TREE_PROJECTED_TRACE_SCHEMA_VERSION,
+  TREE_IO_PROJECTED_TRACE_SCHEMA_VERSION,
   IO_VERSION,
 } from './types.js';
 export type { OtlpAnyValue, OtlpAttribute, OtlpExportRequest, OtlpSpan } from './otlp-json.js';

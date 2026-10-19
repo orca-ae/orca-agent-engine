@@ -36,6 +36,9 @@ export type SandboxRuntimeKind = 'local' | 'e2b' | 'in-memory' | 'opensandbox' |
 
 export type TranscriptStoreBackend = 'kafka' | 'postgres' | 'pulsar';
 export type LlmEgress = 'direct' | 'gateway';
+export type SdkHarnessId = 'codex_sdk' | 'pi_sdk' | 'dsh_sdk';
+export const DEFAULT_HARNESS_TURN_TIMEOUT_MS = 600_000;
+export type HarnessTurnTimeoutOverrides = Partial<Record<SdkHarnessId, number>>;
 export type KafkaConnectionMode =
   | 'plaintext'
   | 'sasl-plain-token-tls'
@@ -176,6 +179,7 @@ export interface ServiceConfig {
    * provider ships.
    */
   sandboxHarnessClaudeCodeImage: string | undefined;
+  sandboxHarnessDshImage: string | undefined;
   /** Optional comma-separated entrypoint command for the sandbox. */
   openSandboxEntrypoint: string[] | undefined;
   /** Sandbox lifetime in seconds. */
@@ -235,6 +239,8 @@ export interface ServiceConfig {
    * the dispatcher marks the session idle and releases its sandbox.
    */
   sessionIdleTimeoutMs: number;
+  harnessTurnTimeoutMs: number;
+  harnessTurnTimeoutOverridesMs: HarnessTurnTimeoutOverrides;
 }
 
 /** Parsed/validated value of the `SANDBOX_RUNTIME` env var. */
@@ -608,6 +614,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServiceConfig 
     openSandboxApiKey: env['OPEN_SANDBOX_API_KEY'],
     openSandboxImage: env['OPEN_SANDBOX_IMAGE'],
     sandboxHarnessClaudeCodeImage: optionalEnv(env, 'SANDBOX_HARNESS_CLAUDE_CODE_IMAGE'),
+    sandboxHarnessDshImage: optionalEnv(env, 'SANDBOX_HARNESS_DSH_IMAGE'),
     openSandboxEntrypoint: parseCsv(env['OPEN_SANDBOX_ENTRYPOINT']),
     openSandboxTimeoutSeconds: parsePositiveInt(env['OPEN_SANDBOX_TIMEOUT_SECONDS'], 1800),
     openSandboxUseServerProxy: parseBoolean(env['OPEN_SANDBOX_USE_SERVER_PROXY'], true),
@@ -629,6 +636,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServiceConfig 
     gitCredsPublicUrl: env['GIT_CREDS_PUBLIC_URL'],
     kafkaTopicRediscoverIntervalMs,
     sessionIdleTimeoutMs: parseSessionIdleTimeout(env['SESSION_IDLE_TIMEOUT_MS']),
+    harnessTurnTimeoutMs: parseHarnessTurnTimeout(env['HARNESS_TURN_TIMEOUT_MS']),
+    harnessTurnTimeoutOverridesMs: parseHarnessTurnTimeoutOverrides(
+      env['HARNESS_TURN_TIMEOUT_OVERRIDES_MS'],
+    ),
   };
 }
 
@@ -681,6 +692,53 @@ function parseKafkaTopicRediscoverInterval(raw: string | undefined): number {
     );
   }
   return n;
+}
+
+function validateHarnessTurnTimeout(value: unknown, name: string, supplied = value): number {
+  // Node timers overflow above the signed 32-bit limit and fire almost immediately.
+  if (
+    typeof value !== 'number' ||
+    !Number.isInteger(value) ||
+    value <= 0 ||
+    value > 2_147_483_647
+  ) {
+    throw new Error(
+      `${name}=${JSON.stringify(supplied)} must be an integer between 1 and 2147483647 milliseconds`,
+    );
+  }
+  return value;
+}
+
+function parseHarnessTurnTimeout(raw: string | undefined): number {
+  if (raw === undefined) return DEFAULT_HARNESS_TURN_TIMEOUT_MS;
+  return validateHarnessTurnTimeout(Number(raw), 'HARNESS_TURN_TIMEOUT_MS', raw);
+}
+
+function parseHarnessTurnTimeoutOverrides(raw: string | undefined): HarnessTurnTimeoutOverrides {
+  if (raw === undefined) return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(
+      `HARNESS_TURN_TIMEOUT_OVERRIDES_MS=${JSON.stringify(raw)} must be a JSON object`,
+    );
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error(
+      `HARNESS_TURN_TIMEOUT_OVERRIDES_MS=${JSON.stringify(raw)} must be a JSON object`,
+    );
+  }
+  const overrides: HarnessTurnTimeoutOverrides = {};
+  for (const [key, value] of Object.entries(parsed)) {
+    if (key !== 'codex_sdk' && key !== 'pi_sdk' && key !== 'dsh_sdk') {
+      throw new Error(
+        `HARNESS_TURN_TIMEOUT_OVERRIDES_MS.${key}=${JSON.stringify(value)} is not a supported SDK harness ID`,
+      );
+    }
+    overrides[key] = validateHarnessTurnTimeout(value, `HARNESS_TURN_TIMEOUT_OVERRIDES_MS.${key}`);
+  }
+  return overrides;
 }
 
 function parseSessionIdleTimeout(raw: string | undefined): number {

@@ -26,7 +26,8 @@ describe('harness execution contract', () => {
         expect(resolveExecutionOwner('cloud', { harness, mode })).toBe(
           ['claude_agent_sdk', 'claude_agent_sdk_persistent', 'claude_code'].includes(harness) ||
             harness === 'codex_sdk' ||
-            harness === 'pi_sdk'
+            harness === 'pi_sdk' ||
+            harness === 'dsh_sdk'
             ? 'harness-server'
             : 'registry',
         );

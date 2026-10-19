@@ -1,0 +1,54 @@
+{
+  "name": "@orca/dsh-harness",
+  "version": "0.0.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js",
+    "./plugin": "./dist/plugin.js",
+    "./profile/*": "./profile/*"
+  },
+  "files": [
+    "dist",
+    "profile"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts src/plugin.ts --format esm --dts --target node22",
+    "test": "vitest run",
+    "lint": "eslint 'src/**/*.ts' 'test/**/*.ts'"
+  },
+  "dependencies": {
+    "@orca/sdk-harness": "workspace:*",
+    "@deepseek-ai/dsh-subagent": "0.2.1-alpha.2",
+    "@deepseek-ai/dsh-subagent-spawn-in-process": "0.2.1-alpha.2",
+    "@deepseek-ai/dsh-subagent-fork-in-process": "0.2.1-alpha.2",
+    "@deepseek-ai/dsh-tool-subagent": "0.2.1-alpha.2",
+    "@deepseek-ai/dsh-tool-subagent-control": "0.2.1-alpha.2",
+    "@deepseek-ai/dsh-working-directory": "0.2.1-alpha.2",
+    "@deepseek-ai/dsh-fs-local": "0.2.1-alpha.2",
+    "@deepseek-ai/dsh-session-query": "0.2.1-alpha.2",
+    "@deepseek-ai/dsh-session-format-catalog": "0.2.1-alpha.2",
+    "@deepseek-ai/dsh": "0.2.1-alpha.2",
+    "@deepseek-ai/cordis": "4.0.5-alpha.1",
+    "@deepseek-ai/dsh-sdk-protocol": "0.2.1-alpha.2",
+    "@deepseek-ai/dsh-agent": "0.2.1-alpha.2",
+    "@deepseek-ai/dsh-agent-loop": "0.2.1-alpha.2",
+    "@deepseek-ai/dsh-llm-deepseek": "0.2.1-alpha.2",
+    "@deepseek-ai/dsh-llm": "0.2.1-alpha.2",
+    "@deepseek-ai/dsh-session": "0.2.1-alpha.2",
+    "@deepseek-ai/dsh-session-projection": "0.2.1-alpha.2",
+    "@deepseek-ai/dsh-session-persistence-jsonl": "0.2.1-alpha.2",
+    "@deepseek-ai/dsh-system-prompt": "0.2.1-alpha.2",
+    "@deepseek-ai/dsh-tools": "0.2.1-alpha.2",
+    "@deepseek-ai/cordis-plugin-timer": "1.1.7-alpha.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
+  }
+}

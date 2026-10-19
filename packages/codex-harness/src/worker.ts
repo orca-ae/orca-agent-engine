@@ -74,6 +74,7 @@ export class CodexSdkWorker {
         this.starting = undefined;
       }
     } else {
+      if (command.type !== 'submit') throw new Error(`Codex SDK does not support ${command.type}`);
       if (!this.thread || this.active || this.closing || this.fatal)
         throw new Error('Codex SDK is not ready for a turn');
       this.active = this.run(command.text).finally(() => {

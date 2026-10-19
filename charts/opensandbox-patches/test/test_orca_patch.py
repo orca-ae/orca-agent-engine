@@ -30,6 +30,7 @@ DEFAULT_PREFIXES = ["ghcr.io/orca-ae"]
 OFFICIAL_WORKLOADS = [
     ("orca-opensandbox-code-interpreter", ["/opt/code-interpreter/code-interpreter.sh"]),
     ("sandbox-harness-claude-code", ["/usr/local/bin/orca-sandbox-harness"]),
+    ("sandbox-harness-dsh", ["/usr/local/bin/orca-sandbox-harness"]),
 ]
 MIRROR_PREFIXES = ["registry.example.com:5000/mirror/orca", "docker.io/orca-mirror"]
 

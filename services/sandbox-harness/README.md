@@ -14,11 +14,17 @@ docker build \
   .
 ```
 
-The image registers `claude` (including the `claude-code` alias) and `codex-sdk`.
+The image registers `claude` (including the `claude-code` alias), `codex-sdk`, `pi-sdk` and `dsh-sdk`.
 The cloud catalog selects the same image, entrypoint and port for both. Codex
 uses private SDK commands over HTTP and native events over SSE; the host adapter
 owns tool policy, usage and durable native history. The distinct `codex` CLI
 provider runs in session-runner.
+
+Build the DSH variant with the same Dockerfile and
+`--build-arg DEFAULT_AGENT=dsh-sdk -t ghcr.io/orca-ae/sandbox-harness-dsh:latest`.
+It retains `@orca/dsh-harness` as an external package with its pinned DSH dependencies and
+`profile/orca-managed` assets. DSH runs headless with Orca-managed tools and native context
+checkpoints; see [DSH SDK execution](../../docs/managed-agents/harness-modes.md#dsh-sdk-colocated-execution).
 
 ## Session-resource runtime dependencies
 

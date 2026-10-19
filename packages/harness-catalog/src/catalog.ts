@@ -40,6 +40,7 @@ export type HarnessType =
   | 'claude_code'
   | 'codex_sdk'
   | 'pi_sdk'
+  | 'dsh_sdk'
   | 'codex'
   | 'cursor'
   | 'pi'
@@ -104,6 +105,7 @@ export type HarnessProvider =
   | 'claude-sdk-persistent'
   | 'codex-sdk'
   | 'pi-sdk'
+  | 'dsh-sdk'
   | 'codex'
   | 'cursor'
   | 'pi'
@@ -180,6 +182,13 @@ export const HARNESS_CATALOG: Record<HarnessType, HarnessCatalogEntry> = {
     entrypoint: ['/usr/local/bin/orca-sandbox-harness'],
     port: 4096,
     provider: 'pi-sdk',
+  },
+  dsh_sdk: {
+    supportedModes: ['colocated'],
+    defaultImage: 'ghcr.io/orca-ae/sandbox-harness-dsh:latest',
+    entrypoint: ['/usr/local/bin/orca-sandbox-harness'],
+    port: 4096,
+    provider: 'dsh-sdk',
   },
   codex_sdk: {
     // Managed SDKs default to running separate from the tool sandbox.

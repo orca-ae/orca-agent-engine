@@ -14,6 +14,7 @@
  * impl.
  */
 
+import type { SandboxCallOptions } from './opensandbox-cancellation.js';
 import type { ReadPage, ReadPageInput } from './read-page.js';
 
 export interface ToolCall {
@@ -214,7 +215,7 @@ export interface SandboxHandle {
   /** Stable id; surfaces in audit + logs. */
   id: string;
   /** Run a tool call (bash, glob, grep, …). */
-  run(call: ToolCall): Promise<ToolResult>;
+  run(call: ToolCall, options?: SandboxCallOptions): Promise<ToolResult>;
   /**
    * Spawn a long-lived command inside the sandbox, returning live stdio
    * streams. Used by transports that need to keep a process attached (drive
@@ -243,7 +244,11 @@ export interface SandboxHandle {
    */
   prepareWritePolicy?(policy: ValidatedSandboxWritePolicy): Promise<void>;
   /** Execute an agent tool call through the installed filesystem boundary. */
-  runWithWritePolicy?(call: ToolCall, policy: ValidatedSandboxWritePolicy): Promise<ToolResult>;
+  runWithWritePolicy?(
+    call: ToolCall,
+    policy: ValidatedSandboxWritePolicy,
+    options?: SandboxCallOptions,
+  ): Promise<ToolResult>;
   /** Resolve symlinks and missing suffixes to a canonical sandbox-visible path. */
   canonicalizePathForPolicy?(path: string): Promise<string>;
   /** Filesystem operations — used by mount strategies + agent_toolset's read/write/edit/list/delete. */
@@ -287,7 +292,11 @@ export interface SandboxHandle {
  */
 export interface WritePolicyCapableHandle extends SandboxHandle {
   prepareWritePolicy(policy: ValidatedSandboxWritePolicy): Promise<void>;
-  runWithWritePolicy(call: ToolCall, policy: ValidatedSandboxWritePolicy): Promise<ToolResult>;
+  runWithWritePolicy(
+    call: ToolCall,
+    policy: ValidatedSandboxWritePolicy,
+    options?: SandboxCallOptions,
+  ): Promise<ToolResult>;
   canonicalizePathForPolicy(path: string): Promise<string>;
 }
 
@@ -309,6 +318,8 @@ export function hasWritePolicyEnforcement(
  * between an S3 FUSE mount and a sandbox-local directory.
  */
 export interface SandboxCapabilities {
+  /** Confirmed execd kill-and-wait for run/runWithWritePolicy; not file API rollback. */
+  supportsPerCallCancellation?: boolean;
   /**
    * Whether the runtime can mount FUSE filesystems inside the sandbox.
    * E2B with the `orca-default` custom template advertises true; the

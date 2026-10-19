@@ -1,6 +1,7 @@
 // Copyright The Orca Authors
 // SPDX-License-Identifier: Apache-2.0
 
+import { isCanonicalSubpath, parseThreadMetadata } from './thread-projection.js';
 import { isBoundedAgentEventId } from './event-identity.js';
 import { deterministicChildSpanId, deterministicRootSpanId } from './ids.js';
 import { isValidSampleRate } from './sampling.js';
@@ -11,8 +12,10 @@ import {
 } from './captured-io.js';
 import { MAX_PROJECTED_TOOLS_PER_TURN, parseCompletedToolSpan } from './tool-projection.js';
 import {
-  PROJECTED_TRACE_SCHEMA_VERSION,
-  IO_PROJECTED_TRACE_SCHEMA_VERSION,
+  isProjectionSchema,
+  isIoProjectionSchema,
+  TREE_PROJECTED_TRACE_SCHEMA_VERSION,
+  TREE_IO_PROJECTED_TRACE_SCHEMA_VERSION,
   MAX_PROJECTED_MODEL_SUMMARIES_PER_TURN,
   MAX_PROJECTED_EVALUATIONS_PER_TURN,
   type PinnedDeliveryContext,
@@ -26,8 +29,7 @@ import {
 export function parseProjectedTrace(value: unknown): ProjectedTrace {
   if (
     !isRecord(value) ||
-    (value.schemaVersion !== PROJECTED_TRACE_SCHEMA_VERSION &&
-      value.schemaVersion !== IO_PROJECTED_TRACE_SCHEMA_VERSION) ||
+    !isProjectionSchema(value.schemaVersion) ||
     !isTraceId(value.traceId) ||
     !isWorkspaceId(value.workspaceId) ||
     !isSessionId(value.sessionId) ||
@@ -46,7 +48,7 @@ export function parseProjectedTrace(value: unknown): ProjectedTrace {
     throw new Error('observability exporter outbox trace is invalid');
   }
   if (
-    value.schemaVersion === IO_PROJECTED_TRACE_SCHEMA_VERSION &&
+    isIoProjectionSchema(value.schemaVersion) &&
     !hasOnlyKeys(value, [
       'schemaVersion',
       'traceId',
@@ -68,7 +70,7 @@ export function parseProjectedTrace(value: unknown): ProjectedTrace {
       !isRecord(raw) ||
       !isRecord(raw.metadata) ||
       raw.metadata['orca.projection.schema_version'] !== value.schemaVersion ||
-      (value.schemaVersion === IO_PROJECTED_TRACE_SCHEMA_VERSION &&
+      (isIoProjectionSchema(value.schemaVersion) &&
         !hasOnlyKeys(raw, [
           'spanId',
           'parentSpanId',
@@ -85,7 +87,7 @@ export function parseProjectedTrace(value: unknown): ProjectedTrace {
         ])) ||
       ('io' in raw &&
         (raw.io === undefined ||
-          value.schemaVersion !== IO_PROJECTED_TRACE_SCHEMA_VERSION ||
+          !isIoProjectionSchema(value.schemaVersion) ||
           (type !== 'agent_turn' && type !== 'tool')))
     ) {
       throw new Error('observability exporter outbox trace is invalid');
@@ -132,6 +134,14 @@ export function parseProjectedTrace(value: unknown): ProjectedTrace {
   if (ioBytes > MAX_CAPTURED_IO_BYTES_PER_TURN) {
     throw new Error('observability exporter outbox trace is invalid');
   }
+  if (
+    value.schemaVersion !== TREE_PROJECTED_TRACE_SCHEMA_VERSION &&
+    value.schemaVersion !== TREE_IO_PROJECTED_TRACE_SCHEMA_VERSION &&
+    spans.some(
+      (span) => span.subpath !== '' || Object.keys(parseThreadMetadata(span.metadata)).length > 0,
+    )
+  )
+    throw new Error('observability exporter outbox trace is invalid');
   const traceId = value.traceId;
   if (
     spans.some((span) => span.parentSpanId !== root.spanId) ||
@@ -142,7 +152,11 @@ export function parseProjectedTrace(value: unknown): ProjectedTrace {
       MAX_PROJECTED_EVALUATIONS_PER_TURN ||
     spans.some(
       (span) =>
-        (span.observationType === 'tool' || span.observationType === 'outcome_evaluation') &&
+        (span.observationType === 'tool' ||
+          span.observationType === 'outcome_evaluation' ||
+          ((value.schemaVersion === TREE_PROJECTED_TRACE_SCHEMA_VERSION ||
+            value.schemaVersion === TREE_IO_PROJECTED_TRACE_SCHEMA_VERSION) &&
+            span.observationType === 'turn_model_summary')) &&
         (span.spanId !==
           deterministicChildSpanId(
             traceId,
@@ -186,7 +200,8 @@ function parseProjectedSpan(
       ('outcomeId' in value || 'outcomeKey' in value)) ||
     !isSpanId(value.spanId) ||
     !isEventId(value.sourceEventId) ||
-    value.subpath !== '' ||
+    !isCanonicalSubpath(value.subpath) ||
+    (expectedObservationType !== 'turn_model_summary' && value.subpath !== '') ||
     value.name !== expectedName ||
     !isTimestamp(value.startedAt) ||
     !isTimestamp(value.endedAt) ||
@@ -210,7 +225,7 @@ function parseProjectedSpan(
       ? parseRootMetadata(value.metadata)
       : expectedObservationType === 'outcome_evaluation'
         ? parseEvaluationMetadata(value.metadata, value.sourceEventId)
-        : parseSummaryMetadata(value.metadata, value.sourceEventId);
+        : parseSummaryMetadata(value.metadata, value.sourceEventId, value.subpath);
   const modelSummary =
     value.modelSummary === undefined ? undefined : parseProjectedModelSummary(value.modelSummary);
   if (expectedObservationType !== 'turn_model_summary' && modelSummary !== undefined) {
@@ -271,6 +286,21 @@ function parseRootMetadata(value: Record<string, unknown>): Record<string, Proje
       throw new Error('observability exporter outbox trace is invalid');
     }
   }
+  const overflowKeys = [
+    'orca.turn.tool_observations_truncated',
+    'orca.turn.omitted_tool_call_event_count',
+    'orca.turn.omitted_tool_result_event_count',
+  ];
+  if (overflowKeys.some((key) => Object.hasOwn(value, key))) {
+    if (
+      value[overflowKeys[0]!] !== true ||
+      !isNonNegativeInteger(value[overflowKeys[1]!]) ||
+      !isNonNegativeInteger(value[overflowKeys[2]!]) ||
+      (value[overflowKeys[1]!] === 0 && value[overflowKeys[2]!] === 0)
+    )
+      throw new Error('observability exporter outbox trace is invalid');
+    keys.push(...overflowKeys);
+  }
   if (
     !hasExactKeys(value, keys) ||
     !isProjectionSchema(value['orca.projection.schema_version']) ||
@@ -296,6 +326,7 @@ function parseRootMetadata(value: Record<string, unknown>): Record<string, Proje
 function parseSummaryMetadata(
   value: Record<string, unknown>,
   sourceEventId: string,
+  subpath: string,
 ): Record<string, ProjectedMetadataValue> {
   const keys = [
     'observation_type',
@@ -305,6 +336,7 @@ function parseSummaryMetadata(
     'orca.source.start_event_id',
     'orca.thread.subpath',
   ];
+  keys.push(...Object.keys(parseThreadMetadata(value)));
   if (
     !hasExactKeys(value, keys) ||
     value.observation_type !== 'turn_model_summary' ||
@@ -312,7 +344,7 @@ function parseSummaryMetadata(
     !isProjectionSchema(value['orca.projection.schema_version']) ||
     value['orca.source.start_event_id'] !== sourceEventId ||
     !isEventId(value['orca.source.end_event_id']) ||
-    value['orca.thread.subpath'] !== ''
+    value['orca.thread.subpath'] !== subpath
   ) {
     throw new Error('observability exporter outbox trace is invalid');
   }
@@ -471,10 +503,6 @@ export function parsePinnedDeliveryContext(value: unknown): PinnedDeliveryContex
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function isProjectionSchema(value: unknown): boolean {
-  return value === PROJECTED_TRACE_SCHEMA_VERSION || value === IO_PROJECTED_TRACE_SCHEMA_VERSION;
 }
 
 function isNonEmptyString(value: unknown): value is string {

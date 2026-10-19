@@ -77,6 +77,7 @@ describe('discovery', () => {
       'claude_agent_sdk_persistent',
       'codex_sdk',
       'pi_sdk',
+      'dsh_sdk',
     ]);
     const piProviders = entries[3].models.map((model: { provider: string }) => model.provider);
     expect(piProviders).toEqual(
@@ -95,6 +96,12 @@ describe('discovery', () => {
       modes: ['separate'],
       models: entries[0].models,
       capabilities: { native_resume: false },
+    });
+    expect(entries[4]).toMatchObject({
+      provider: 'dsh-sdk',
+      modes: ['colocated'],
+      models: [expect.objectContaining({ provider: 'deepseek', id: 'deepseek-v4-flash' })],
+      capabilities: { native_resume: true },
     });
   });
 

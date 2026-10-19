@@ -18,7 +18,7 @@ import {
   RegistryResolverScopeError,
 } from './registry-client.js';
 import type { PinnedDeliveryContext, ProjectedTrace } from './types.js';
-import { IO_PROJECTED_TRACE_SCHEMA_VERSION } from './types.js';
+import { isIoProjectionSchema } from './types.js';
 
 export type KafkaTraceDeliveryResult =
   | { kind: 'terminal'; reason: string }
@@ -56,7 +56,7 @@ export async function deliverKafkaTrace(
   } catch {
     return { kind: 'terminal', reason: 'invalid_projected_trace' };
   }
-  const requiresRawIo = trace.schemaVersion === IO_PROJECTED_TRACE_SCHEMA_VERSION;
+  const requiresRawIo = isIoProjectionSchema(trace.schemaVersion);
   if (requiresRawIo && context.captureMode !== 'raw_io') {
     return { kind: 'terminal', reason: 'capture_mode_mismatch' };
   }

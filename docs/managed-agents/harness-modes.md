@@ -11,10 +11,10 @@ Agents carry two optional keys in their free-form `metadata` JSONB field — Ant
 { "harness": "claude_code", "mode": "colocated" }
 ```
 
-| Key                | Values                                                                                                                                               | Default            |
-| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------ |
-| `metadata.harness` | `pi_sdk` \| `codex_sdk` \| `claude_agent_sdk` \| `claude_agent_sdk_persistent` \| `claude_code` \| `codex` \| `cursor` \| `pi` \| `custom` \| `mock` | `claude_agent_sdk` |
-| `metadata.mode`    | `separate` \| `colocated`                                                                                                                            | `separate`         |
+| Key                | Values                                                                                                                                                            | Default            |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------ |
+| `metadata.harness` | `dsh_sdk` \| `pi_sdk` \| `codex_sdk` \| `claude_agent_sdk` \| `claude_agent_sdk_persistent` \| `claude_code` \| `codex` \| `cursor` \| `pi` \| `custom` \| `mock` | `claude_agent_sdk` |
+| `metadata.mode`    | `separate` \| `colocated`                                                                                                                                         | `separate`         |
 
 The registry validates the annotation on every agent create and update (`agents.routes.ts`) using `resolveHarnessAnnotation` from `@orca/harness-catalog`. An unsupported `(harness, mode)` combination — for example `claude_agent_sdk`/`colocated` — is rejected with a `400`. Annotations are stored unchanged in `metadata` JSONB and snapshotted via `agent_versions`.
 
@@ -62,6 +62,7 @@ claude_agent_sdk_persistent   [separate]        null                            
 claude_code                   [colocated]       ghcr.io/orca-ae/sandbox-harness-claude-code:latest  4096
 pi_sdk                        [separate, colocated] ghcr.io/orca-ae/sandbox-harness-claude-code:latest  4096
 codex_sdk                     [separate, colocated] ghcr.io/orca-ae/sandbox-harness-claude-code:latest  4096
+dsh_sdk                       [colocated]       ghcr.io/orca-ae/sandbox-harness-dsh:latest          4096
 codex                         [colocated]       ghcr.io/orca-ae/sandbox-harness-codex:latest        4096
 cursor                        [colocated]       ghcr.io/orca-ae/sandbox-harness-cursor:latest       4096
 pi                            [colocated]       ghcr.io/orca-ae/sandbox-harness-pi:latest           4096
@@ -70,6 +71,106 @@ mock                          [colocated]       null                            
 ```
 
 `registry-service-ts`, `harness-server`, and `sandbox-harness` import `@orca/harness-catalog` via `workspace:*`. The catalog is the only place where images and ports are declared; no other code hard-codes them. The `defaultImage`/`port` columns configure the shared cloud `claude_code` / `codex_sdk` / `pi_sdk` HTTP bridge. Other CLI image entries are placeholders; their implemented providers run through `session-runner` over the WS tunnel. `codex_sdk` shares the Claude sandbox image, entrypoint and port in cloud colocated mode. Its cloud separate mode uses a host-side SDK worker in harness-server; self-hosted mode uses session-runner.
+
+## DSH SDK colocated execution
+
+`metadata: {"harness":"dsh_sdk","mode":"colocated"}` selects DeepSeek Harness
+`0.2.1-alpha.2` on cloud Environments. Its model is pinned to
+`{"provider":"deepseek","id":"deepseek-v4-flash"}`; effort overrides, fast mode,
+Skills, managed multiagent rosters and client-executed custom tools are rejected. The shared SDK host
+adapter retains Orca tool permissions, tool confirmation, request/tool-call guardrails, usage and
+durable turn receipts. Native workload executable tools and ambient plugin discovery are disabled.
+Native in-process spawn/fork and child messaging/control use DSH's own scheduler.
+Before native execution, a private authorization request reaches the host evaluator and existing
+approval gate. Denial creates no child; late approval cannot revive an interrupted call. The native
+tool event remains the sole event producer. `spawn_bounds` counts cumulative `spawn`/`fork`
+dispatches per turn, not concurrent children. Stateful tool-call rules other than this adapter,
+the `headless_subagent_purpose_guard` and all `tool_result` rules are rejected for DSH.
+
+DSH executable tools require `supportsPerCallCancellation`; OpenSandbox implements this through
+execd execution IDs, interrupt requests and bounded exit-status confirmation. The host propagates
+per-call signals and selects only the interrupted subtree. A 10-second backend cleanup deadline
+fits within the host's 15-second wait; an unknown termination result is an error, not success.
+File operations have pre-dispatch cancellation checks, not transactional rollback. Other harness
+call sites carry explicit TODOs; this is not uniform cancellation support for every runtime.
+
+Registry execution snapshots include `archived_thread_subpaths`, required for DSH. Startup
+registers the runner behind an input-admission barrier, rereads Registry state and installs
+monotonic native fences before the first model input. Warm refresh also applies them. Dispatcher
+handles Registry thread interrupt/archive intents on all transcript backends. The private
+`archive_fence` acknowledges prevention of new activation, not completion of running tools; tool
+cleanup and native interruption follow. Existing public terminated/archive responses describe
+conversation control state, not physical process-exit confirmation.
+
+The sandbox worker launches a private `orca-managed` named profile. Its fixed plugin uses
+the DSH loop and native persistence, while file/shell calls return through Orca's existing
+tool request/reply path. There is no DSH UI or runtime package installation. The image
+contains the pinned production dependencies and profile assets.
+
+Model traffic uses `/v1/proxy/deepseek/v1/messages`, with scoped Bearer authentication
+and `X-Orca-Session-Id`. Configure a native Gateway binding for `deepseek` /
+`anthropic-messages` through `aiGateway.piProviders` (or the external Gateway's configuration
+owner), and permit `llm-pi-deepseek-anthropic-messages` and `deepseek-v4-flash` in Registry's
+LLM policy. The upstream default is `https://api.deepseek.com/anthropic`. Gateway
+`emit_usage: false` pairs with harness-authoritative DSH usage. No provider key enters DSH.
+
+Native state is committed through the existing harness-turn API after response persistence.
+The codec checks the DSH version, profile, model, instructions and a 16 MiB aggregate decoded
+limit for the whole native tree (at most 129 files including its manifest). Cold resume restores
+root/child context and lineage, not the temporary workspace, shell processes or
+plugin-private databases. Published outputs use the existing File API. An interrupted or failed
+turn has no new checkpoint and is not automatically replayed.
+The advanced live tree is retired after an uncommitted whole-turn failure. When its submit RPC
+returns, retirement waits for pending interrupt RPCs to settle before closing their transport;
+interrupt deadlines remain bounded. Subsequent explicit input rebuilds from Registry's
+authoritative checkpoint. Lost commit acknowledgements are
+resolved by inspecting the receipt before abandoning a turn. Missing usage is recorded as
+unknown rather than zero and does not prevent durable failure settlement. A parent-handled
+child failure may still commit if the root succeeds and terminal accounting is known.
+
+Child native UUIDs address `subagents/<uuid>` transcript subpaths. Public thread IDs retain the
+existing workspace/Session/subpath-derived `sth_` form. The bridge carries the accepted root
+source ID on canonical events, projects reasoning as `agent.thinking`, and waits for native
+descendants and result delivery before committing a turn. Restored lineage is private control
+data, not replayed creation events. Thread summaries report self-only usage; the harness bills
+the tree total once. Exporter observations remain flat under the accepted-turn root.
+
+Agent toolsets must explicitly disable `web_fetch`. For example, set `default_config.enabled`
+to `false` and enable `bash`/`read` individually in `configs` with `enabled: true` and
+`permission_policy: { type: 'always_allow' }`. Disabled tools resolve to the internal
+`always_deny` policy; that policy is not accepted as a public API permission value. The
+unsupported host-side fetch tool is not exposed or executed by DSH. Shared
+resource mounts do not imply shared private HOME/tmp or persistent shell state.
+
+The tree profile is `orca-managed-tree-v2`; earlier root-only profile checkpoints are rejected,
+not silently migrated. Child-aware exporter state uses reducer v5, upgrading to v6 when tool
+observation capacity overflows; projected traces use v3/v4 (metadata/raw I/O). Tool spans remain
+bounded at 256 with reserved completion capacity and explicit root omission counters, without
+discarding the whole trace or changing model usage. Old single-thread state remains readable. Upgrade exporter readers
+before enabling children; do not roll back to primary-only readers with child-aware work pending.
+
+| Variable                    | Owner and purpose                                                                                                                                             |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SANDBOX_HARNESS_DSH_IMAGE` | harness-server image override; unset uses the catalog default, while explicit `Environment.image` takes precedence. Helm renders `images.sandboxHarness.dsh`. |
+| `DSH_HOME`                  | Worker-generated private child home; owns the fixed profile and native session files. Not inherited from the host.                                            |
+| `ORCA_DSH_SYSTEM`           | Worker-generated Agent system prompt consumed by the fixed child profile. Not an operator override.                                                           |
+
+## Cloud SDK turn deadline
+
+The shared host adapter bounds each `codex_sdk`, `pi_sdk` and `dsh_sdk` turn
+with `HARNESS_TURN_TIMEOUT_MS` (default `600000` milliseconds). Operator-only
+`HARNESS_TURN_TIMEOUT_OVERRIDES_MS`, a JSON map such as `{"dsh_sdk":900000}`,
+overrides that deadline for a matching SDK harness. Helm values are
+`harness.turnTimeoutMs` and `harness.turnTimeoutOverridesMs`. Confirmation waits,
+tools and all native children count against the same whole-turn deadline.
+Invalid configuration fails startup; Claude and session-runner are unaffected.
+
+Gateway JWT refresh occurs between turns, not mid-turn. Startup requires more
+than the effective deadline plus 30 seconds of token validity. Longer turns
+require a corresponding increase to Registry `AI_GATEWAY_LLM_JWT_TTL_SECS`
+and coordinated Gateway route/request deadlines; the harness does not extend
+credentials automatically. See [SDK turn deadlines](services/harness-server.md#sdk-turn-deadlines)
+for bounds, precedence and token-lifetime configuration.
 
 ## The two modes
 

@@ -35,13 +35,15 @@ export function validatePiCheckpoint(state: unknown): void {
 }
 
 import { validateCodexCheckpoint } from './harness-models.js';
+import { validateDshCheckpoint } from './dsh-checkpoint.js';
 /** Bind the native format to the immutable harness whenever a selection is available. */
 export function validateSdkCheckpoint(state: unknown, harness?: string): void {
-  if (harness && harness !== 'pi_sdk' && harness !== 'codex_sdk')
-    throw new Error('unsupported checkpoint harness');
-  const pi = (state as { format?: unknown } | null)?.format === 'pi_sdk';
-  if (harness && (harness === 'pi_sdk') !== pi)
-    throw new Error('checkpoint belongs to another harness');
-  if (pi) validatePiCheckpoint(state);
+  const format = (state as { format?: unknown } | null)?.format;
+  const owner = format === undefined ? 'codex_sdk' : format;
+  if (owner !== 'codex_sdk' && owner !== 'pi_sdk' && owner !== 'dsh_sdk')
+    throw new Error('unsupported checkpoint format');
+  if (harness && harness !== owner) throw new Error('checkpoint belongs to another harness');
+  if (owner === 'dsh_sdk') validateDshCheckpoint(state);
+  else if (owner === 'pi_sdk') validatePiCheckpoint(state);
   else validateCodexCheckpoint(state);
 }

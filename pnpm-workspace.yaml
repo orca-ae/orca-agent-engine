@@ -11,6 +11,7 @@ packages:
   - 'packages/agent-event-contract'
   - 'packages/cloud-sandbox'
   - 'packages/codex-harness'
+  - 'packages/dsh-harness'
   - 'packages/sdk-harness'
   - 'packages/pi-harness'
   - 'packages/e2e-tests'

@@ -6,6 +6,7 @@ import {
   AgentEventKind,
   AgentRuntimeSignalKind,
   GuardrailUsageUnavailableError,
+  DurableHarnessStateError,
   SessionEventKind,
 } from '../harness/agent-harness.js';
 import type {
@@ -164,6 +165,8 @@ export class SessionRunnerStoppingError extends Error {
 export class SessionRunner {
   private pumping = false;
   private stopped = false;
+  private admission: Promise<void> = Promise.resolve();
+  private rejectAdmission: ((error: Error) => void) | undefined;
   private activeSessionMetricRecorded = false;
   private abandonEventPump = false;
   private abandonOutputIndexing = false;
@@ -195,10 +198,37 @@ export class SessionRunner {
     this.opts.harness.applyGuardrailUsageState?.(state);
   }
 
+  deferAdmissionUntil(ready: Promise<void>): void {
+    this.assertAcceptingWork();
+    this.admission = Promise.race([
+      ready,
+      new Promise<never>((_, reject) => {
+        this.rejectAdmission = reject;
+      }),
+    ]);
+    void this.admission.catch(() => {});
+  }
+
+  async waitForAdmission(): Promise<void> {
+    this.assertAcceptingWork();
+    await this.admission;
+    this.assertAcceptingWork();
+  }
+
+  async applyArchivedThreadSubpaths(paths: string[] | undefined): Promise<void> {
+    this.assertAcceptingWork();
+    if (this.supportsNativeThreadInterrupt && !Array.isArray(paths))
+      throw new DurableHarnessStateError('DSH requires authoritative archived thread state');
+    await this.opts.harness.applyArchivedThreadSubpaths?.(paths ?? []);
+    this.assertAcceptingWork();
+  }
+
   async start(input: {
     agentSnapshot: SessionStartInput['agentSnapshot'];
     guardrails?: SessionStartInput['guardrails'];
     guardrailState?: SessionStartInput['guardrailState'];
+    archivedThreadSubpaths?: string[];
+    supportsPerCallCancellation?: boolean;
   }): Promise<void> {
     this.assertAcceptingWork();
     harnessActiveSessions.inc();
@@ -209,6 +239,10 @@ export class SessionRunner {
         sessionId: this.opts.sessionId,
         ...(this.opts.clientToolExecution ? { clientToolExecution: true } : {}),
         agentSnapshot: input.agentSnapshot,
+        ...(input.supportsPerCallCancellation ? { supportsPerCallCancellation: true } : {}),
+        ...(input.archivedThreadSubpaths
+          ? { archivedThreadSubpaths: input.archivedThreadSubpaths }
+          : {}),
         ...(input.guardrails ? { guardrails: input.guardrails } : {}),
         ...(input.guardrailState ? { guardrailState: input.guardrailState } : {}),
         ...(this.opts.mcpServers ? { mcpServers: this.opts.mcpServers } : {}),
@@ -233,6 +267,7 @@ export class SessionRunner {
 
   async submit(ev: UserEvent, hooks?: SubmitHooks): Promise<UserEventSubmitResult | void> {
     this.assertAcceptingWork();
+    if (ev.kind === 'user.message') await this.waitForAdmission();
     if (this.usageStateFailure) await this.flushPendingUsageRecords();
     this.throwIfPumpFailed();
     let rejectPumpFailure!: (error: Error) => void;
@@ -258,6 +293,10 @@ export class SessionRunner {
     return this.opts.harness.hasPendingRequiredAction?.() ?? false;
   }
 
+  get supportsNativeThreadInterrupt(): boolean {
+    return this.opts.harness.supportsNativeThreadInterrupt ?? false;
+  }
+
   hasPendingGuardrailUsage(): boolean {
     return (
       this.usageStateFailure !== null ||
@@ -269,6 +308,7 @@ export class SessionRunner {
   async stop(reason: TerminationReason): Promise<void> {
     if (this.stopped) return;
     this.stopped = true;
+    this.rejectAdmission?.(new SessionRunnerStoppingError());
     this.rejectEventAcknowledgements(new SessionRunnerStoppingError());
     const stopStartedAt = Date.now();
     const shutdownStepGraceMs = this.opts.shutdownStepGraceMs ?? 5_000;

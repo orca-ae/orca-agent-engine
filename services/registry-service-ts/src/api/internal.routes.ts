@@ -27,7 +27,7 @@ import { Readable } from 'node:stream';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { eq, and, isNull, sql, inArray, ne } from 'drizzle-orm';
 import type { FileStore, FilePurpose, FileRecord } from '@orca/file-store';
-import { SEED_PRICE_PROVIDER, piLlmRoute } from '@orca/harness-catalog';
+import { SEED_PRICE_PROVIDER, DSH_LLM_ROUTE, piLlmRoute } from '@orca/harness-catalog';
 import {
   normalizeMemoryRelativePath,
   MemoryConflictError,
@@ -61,7 +61,7 @@ import {
 } from '../persistence/postgres/schema.js';
 import { buildRuntimeSecretResolver } from '../secrets/index.js';
 import type { SecretProvider, SecretStore } from '../secrets/secret-provider.js';
-import type { SessionJwtMinter } from '../auth/session-jwt.js';
+import { sdkGatewayJwtTtlSecs, type SessionJwtMinter } from '../auth/session-jwt.js';
 import { loadInternalSession } from './sessions.routes.js';
 import { verifyEnvKeyForEnvironment } from '../domain/environment-key-state.js';
 import { EnvironmentClaimStore, type EnvironmentClaim } from '../domain/environment-claims.js';
@@ -101,7 +101,7 @@ import {
   resolveAgentObservabilitySessionSecret,
 } from '../domain/agent-observability-secret-resolver.js';
 import { resolveMcpDestination } from '../domain/mcp-destination.js';
-import { intersectLlmModels } from '../domain/llm-policy.js';
+import { dshLlmGrants, intersectLlmModels } from '../domain/llm-policy.js';
 import {
   classifyRequestedVaultCredentialId,
   hasCanonicalRequestedCredentialPath,
@@ -342,6 +342,8 @@ export interface InternalRoutesOptions {
   environmentClaimTtlMs?: number;
   /** True only when AI Gateway's Registry usage sink is deployed and enabled. */
   gatewayRegistryUsageEnabled?: boolean;
+  /** Operator-configured AI_GATEWAY_LLM_JWT_TTL_SECS, not a request override. */
+  llmJwtTtlSecs?: number;
 }
 
 export function registerInternalRoutes(
@@ -1495,7 +1497,14 @@ export function registerInternalRoutes(
     const includeGuardrailClaims = minter.audienceFor(mintOpts) === 'ai-gateway';
     const includeLlmClaims =
       sessionJwtLlmPolicy !== undefined && minter.audienceFor(mintOpts) === 'ai-gateway';
+    if (
+      includeGuardrailClaims &&
+      !sessionJwtLlmPolicy &&
+      mcpBinding.snapshot.metadata.harness === 'dsh_sdk'
+    )
+      return reply.code(403).send({ error: 'dsh_sdk requires scoped LLM policy' });
     let llmRoutes = sessionJwtLlmPolicy?.routes;
+    let dshModels: string[] | undefined;
     if (includeLlmClaims) {
       const selection = await loadSessionHarnessBinding(
         db,
@@ -1503,22 +1512,34 @@ export function registerInternalRoutes(
         session.agentId,
         session.agentVersion,
       );
-      // The SDK keeps one bearer token throughout its bounded ten-minute turn,
-      // including time parked on client tools. Derive the lifetime from the
-      // persisted harness, never a caller-supplied TTL or provider claim.
-      if (selection.harness === 'codex_sdk' || selection.harness === 'pi_sdk')
-        mintOpts.ttlSecs = 660;
-      if (selection.harness === 'pi_sdk') {
+      // The SDK keeps one bearer throughout its bounded turn, including client
+      // waits. Only the persisted harness and trusted operator configuration
+      // determine its lifetime; the request body cannot extend credentials.
+      const sdkTtlSecs = sdkGatewayJwtTtlSecs(selection.harness, options.llmJwtTtlSecs);
+      if (sdkTtlSecs !== undefined) mintOpts.ttlSecs = sdkTtlSecs;
+      if (selection.harness === 'pi_sdk' || selection.harness === 'dsh_sdk') {
         const override = (session.agentOverrides as { model?: unknown } | null)?.model;
         const model = PreparedAgentSnapshotSchema.shape.model.safeParse(
           override ?? mcpBinding.snapshot.model,
         );
         if (!model.success) return reply.code(409).send({ error: 'invalid_runtime_binding' });
-        const route = piLlmRoute(model.data.provider, model.data.id);
+        const route =
+          selection.harness === 'dsh_sdk'
+            ? DSH_LLM_ROUTE
+            : piLlmRoute(model.data.provider, model.data.id);
+        if (selection.harness === 'dsh_sdk') {
+          const grants = dshLlmGrants(sessionJwtLlmPolicy, model.data);
+          if (!grants)
+            return reply.code(403).send({
+              error:
+                'dsh_sdk requires its fixed Messages route/model in SESSION_JWT_LLM_ROUTES/MODELS',
+            });
+          dshModels = grants.llm_models;
+        }
         if (!sessionJwtLlmPolicy.routes.includes(route))
           return reply
             .code(403)
-            .send({ error: `pi_sdk requires ${route} in SESSION_JWT_LLM_ROUTES` });
+            .send({ error: `${selection.harness} requires ${route} in SESSION_JWT_LLM_ROUTES` });
         llmRoutes = [route];
       }
     }
@@ -1527,12 +1548,13 @@ export function registerInternalRoutes(
       try {
         llmModels = intersectLlmModels(
           sessionJwtLlmPolicy.models,
-          await loadEffectiveSessionAgentModels({
-            db,
-            workspaceId,
-            session,
-            primarySnapshot: mcpBinding.snapshot,
-          }),
+          dshModels ??
+            (await loadEffectiveSessionAgentModels({
+              db,
+              workspaceId,
+              session,
+              primarySnapshot: mcpBinding.snapshot,
+            })),
         );
       } catch (error) {
         if (error instanceof InvalidRuntimeBindingError) {

@@ -1336,6 +1336,91 @@ images:
   );
 });
 
+test('DSH image uses digest, explicit tag, then appVersion without changing Claude', () => {
+  const digest = 'sha256:' + 'a'.repeat(64);
+  const config = (values) =>
+    yaml
+      .loadAll(helmTemplate(values ? yaml.dump(values) : ''))
+      .find(
+        (doc) =>
+          doc?.kind === 'ConfigMap' && doc.metadata.name === 'orca-managed-agents-harness-config',
+      ).data;
+  const baseline = config();
+  const appVersion = yaml.load(readFileSync(join(chartDir, 'Chart.yaml'), 'utf8')).appVersion;
+  assert.equal(
+    baseline.SANDBOX_HARNESS_DSH_IMAGE,
+    'ghcr.io/orca-ae/sandbox-harness-dsh:' + appVersion,
+  );
+  for (const [settings, expected] of [
+    [{ repository: 'registry.example/dsh', tag: 'fixed' }, 'registry.example/dsh:fixed'],
+    [
+      { repository: 'registry.example/dsh', tag: 'ignored', digest },
+      'registry.example/dsh@' + digest,
+    ],
+  ]) {
+    const data = config({ images: { sandboxHarness: { dsh: settings } } });
+    assert.equal(data.SANDBOX_HARNESS_DSH_IMAGE, expected);
+    assert.equal(
+      data.SANDBOX_HARNESS_CLAUDE_CODE_IMAGE,
+      baseline.SANDBOX_HARNESS_CLAUDE_CODE_IMAGE,
+    );
+  }
+  const result = spawnSync(
+    'helm',
+    [
+      'template',
+      'orca-managed-agents',
+      chartDir,
+      '-f',
+      writeValues(
+        minimalValues + '\nimages:\n  sandboxHarness:\n    dsh:\n      digest: sha256:bad\n',
+      ),
+    ],
+    { encoding: 'utf8' },
+  );
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /images\.sandboxHarness\.dsh\.digest must be a full sha256/);
+});
+
+test('DSH reuses opt-in DeepSeek Messages native binding without enabling Chat', () => {
+  const binding = {
+    provider: 'deepseek',
+    api: 'anthropic-messages',
+    baseUrl: 'https://api.deepseek.com/anthropic',
+    apiKeyEnv: 'DEEPSEEK_API_KEY',
+    auth: { type: 'header', name: 'x-api-key' },
+    allowedPaths: ['/v1/messages'],
+    headers: { 'anthropic-version': '2023-06-01' },
+    forwardHeaders: ['anthropic-beta'],
+  };
+  const rendered = helmTemplate(yaml.dump({ aiGateway: { piProviders: [binding] } }));
+  const config = yaml.load(
+    yaml.load(document(rendered, 'ConfigMap', 'orca-managed-agents-ai-gateway-config')).data[
+      'config.yaml'
+    ],
+  );
+  const destination = config.destinations['pi-deepseek-anthropic-messages'];
+  assert.equal(destination.kind, 'native_api_key');
+  assert.equal(destination.emit_usage, false);
+  assert.equal(destination.provider, 'deepseek');
+  assert.equal(destination.api, 'anthropic-messages');
+  assert.equal(destination.base_url, binding.baseUrl);
+  assert.deepEqual(destination.allowed_paths, binding.allowedPaths);
+  assert.deepEqual(destination.auth, binding.auth);
+  assert.deepEqual(destination.headers, binding.headers);
+  assert.deepEqual(destination.forward_headers, binding.forwardHeaders);
+  assert.equal(
+    config.vaults.find((v) => v.name === 'pi-deepseek-anthropic-messages').env_var,
+    'DEEPSEEK_API_KEY',
+  );
+  assert.equal(
+    config.routes.find((r) => r.name === 'llm-pi-deepseek-anthropic-messages').match.path,
+    '/v1/proxy/deepseek/anthropic-messages',
+  );
+  assert.equal(config.destinations['deepseek-chat'], undefined);
+  assert.doesNotMatch(helmTemplate(), /pi-deepseek-anthropic-messages/);
+});
+
 test('Orca CLI toolset is enabled by default and can be disabled', () => {
   const rendered = helmTemplate();
   const deployment = document(rendered, 'Deployment', 'orca-managed-agents-toolset');
@@ -3084,6 +3169,46 @@ registry:
     /startupProbe:/,
   );
 });
+
+test('SDK turn deadlines render as milliseconds and a JSON override map', () => {
+  const defaults = helmTemplate();
+  assert.match(defaults, /HARNESS_TURN_TIMEOUT_MS: "600000"/);
+  assert.match(defaults, /HARNESS_TURN_TIMEOUT_OVERRIDES_MS: "\{\}"/);
+  const rendered = helmTemplate(`
+harness:
+  turnTimeoutMs: 900000
+  turnTimeoutOverridesMs:
+    dsh_sdk: 1200000
+`);
+  assert.match(rendered, /HARNESS_TURN_TIMEOUT_MS: "900000"/);
+  assert.ok(rendered.includes('HARNESS_TURN_TIMEOUT_OVERRIDES_MS: "{\\"dsh_sdk\\":1200000}"'));
+});
+
+for (const [field, value] of [
+  ['turnTimeoutMs', '0'],
+  ['turnTimeoutMs', '-1'],
+  ['turnTimeoutMs', '1.5'],
+  ['turnTimeoutMs', '2147483648'],
+  ['turnTimeoutOverridesMs', '[]'],
+  ['turnTimeoutOverridesMs', '{typo: 1000}'],
+  ['turnTimeoutOverridesMs', '{dsh_sdk: 0}'],
+  ['turnTimeoutOverridesMs', '{dsh_sdk: 1.5}'],
+  ['turnTimeoutOverridesMs', '{dsh_sdk: "1000"}'],
+]) {
+  test(`rejects invalid harness.${field}: ${value}`, () => {
+    const valuesPath = writeValues(`${minimalValues}\nharness:\n  ${field}: ${value}\n`);
+    const result = spawnSync(
+      'helm',
+      ['template', 'orca-managed-agents', chartDir, '-f', valuesPath],
+      {
+        cwd: process.cwd(),
+        encoding: 'utf8',
+      },
+    );
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, new RegExp(`harness\\.${field}`));
+  });
+}
 
 test('config and credential changes roll the fleet', () => {
   const first = helmTemplate();

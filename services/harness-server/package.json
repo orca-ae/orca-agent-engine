@@ -39,7 +39,8 @@
     "uuid": "^11.0.0",
     "zod": "^4.0.0",
     "@orca/sdk-harness": "workspace:*",
-    "@orca/pi-harness": "workspace:*"
+    "@orca/pi-harness": "workspace:*",
+    "@orca/dsh-harness": "workspace:*"
   },
   "devDependencies": {
     "@orca/observability-exporter": "workspace:*",

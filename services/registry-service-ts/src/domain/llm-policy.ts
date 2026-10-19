@@ -1,6 +1,7 @@
 // Copyright The Orca Authors
 // SPDX-License-Identifier: Apache-2.0
 
+import { DSH_LLM_ROUTE, validateHarnessModel } from '@orca/harness-catalog';
 import { MAX_MODEL_ID_LENGTH } from '../contracts/model-wire.js';
 
 /** Match the Gateway YAML ACL's exact/simple-star glob semantics. */
@@ -24,4 +25,18 @@ export function intersectLlmModels(patterns: string[], sessionModels: string[]):
       .filter((model) => model.length <= MAX_MODEL_ID_LENGTH && !model.includes('*'))
       .filter((model) => patterns.some((pattern) => llmModelPatternMatches(pattern, model)))
   );
+}
+
+/** One fixed native Messages route/model, narrowed by deployment ACLs in both mint paths. */
+export function dshLlmGrants(
+  policy: { routes: string[]; models: string[] } | undefined,
+  model: { provider: string; id: string; effort?: string; speed?: string },
+): { llm_routes: string[]; llm_models: string[] } | null {
+  if (
+    validateHarnessModel({ harness: 'dsh_sdk' }, model) ||
+    !policy?.routes.includes(DSH_LLM_ROUTE)
+  )
+    return null;
+  const models = intersectLlmModels(policy.models, [model.id]);
+  return models.length ? { llm_routes: [DSH_LLM_ROUTE], llm_models: models } : null;
 }

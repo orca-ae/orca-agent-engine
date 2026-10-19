@@ -204,8 +204,10 @@ export interface ServiceConfig {
    * the session/MCP JWT's `SESSION_JWT_TTL_SECS` (default 300s) so a leaked LLM
    * token expires fast. Defaults to {@link DEFAULT_LLM_PROXY_JWT_TTL_SECS} (120s)
    * when unset; a non-positive value falls back to that default in the resolver.
-   * A `codex_sdk` or `pi_sdk` token lives at least 660s, to cover the bounded
-   * model turn.
+   * The internal SDK ai-gateway mint path also uses this setting: `codex_sdk`,
+   * `pi_sdk` and `dsh_sdk` tokens live for this value or 660s, whichever is longer.
+   * The harness requires its effective turn deadline plus 30s remaining; refresh
+   * occurs between turns, not mid-turn. Other ai-gateway tokens are unaffected.
    */
   aiGatewayLlmJwtTtlSecs?: number;
   secretStoreKubernetesNamespace: string;

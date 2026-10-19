@@ -13,7 +13,7 @@
     "test:gateway": "bash ../../services/dev/scripts/with-dev-env.sh vitest run test/ai-gateway-mcp.spec.ts",
     "test:self-hosted": "bash ../../services/dev/scripts/with-dev-env.sh vitest run test/self-hosted-e2e.spec.ts",
     "test:agent": "bash ../../services/dev/scripts/with-dev-env.sh bash scripts/run-agent-tests.sh",
-    "test:agent:sandbox": "ORCA_E2E_SANDBOX_HARNESS=1 bash ../../services/dev/scripts/with-dev-env.sh vitest run --retry 1 test/custom-tool-result-assertions.spec.ts test/sandbox-harness-agent.spec.ts test/sandbox-harness-multiagent.spec.ts test/guardrails-budget-agent.spec.ts",
+    "test:agent:sandbox": "ORCA_E2E_SANDBOX_HARNESS=1 bash ../../services/dev/scripts/with-dev-env.sh bash scripts/run-agent-tests.sh --sandbox",
     "lint": "eslint 'src/**/*.ts' 'test/**/*.ts' 'scripts/**/*.ts'",
     "test:spend": "bash ../../services/dev/scripts/with-dev-env.sh vitest run --no-file-parallelism --maxWorkers=1 test/spend-control.spec.ts test/spend-subagents.spec.ts test/spend-runner.spec.ts"
   },

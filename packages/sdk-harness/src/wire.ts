@@ -10,7 +10,7 @@ export interface SdkCheckpoint {
   threadId: string;
   files: Record<string, string>;
   instructionsSha256?: string;
-  format?: 'pi_sdk';
+  format?: 'pi_sdk' | 'dsh_sdk';
   sdkVersion?: string;
 }
 /** Normalized SDK events; executable tools use the separate request/reply channel. */
@@ -48,7 +48,9 @@ export interface StartCommand {
   baseUrl?: string;
   /** Pi-only native proxy origin; apiKey is then an Orca JWT, never an upstream key. */
   piGatewayUrl?: string;
+  dshGatewayUrl?: string;
   tools: Tool[];
+  archivedThreadSubpaths?: string[];
   checkpoint?: SdkCheckpoint;
 }
 export interface SdkTurnOptions {
@@ -56,18 +58,44 @@ export interface SdkTurnOptions {
   baseUrl?: string;
   /** Pi-only native proxy origin; apiKey is then an Orca JWT, never an upstream key. */
   piGatewayUrl?: string;
+  dshGatewayUrl?: string;
   system?: string;
 }
 export type WorkerCommand =
   | StartCommand
-  | { type: 'submit'; text: string }
-  | { type: 'interrupt' }
+  | { type: 'submit'; text: string; sourceEventId?: string; threadId?: string }
+  | { type: 'interrupt'; threadId?: string; archived?: boolean }
+  | { type: 'archive_fence'; threadId: string }
+  | { type: 'orchestration_result'; id: string; allowed: boolean; reason?: string }
   | { type: 'stop' }
   | { type: 'tool_result'; id: string; result: CallToolResult };
+export interface WorkerEventOrigin {
+  eventId: string;
+  subpath: string;
+  parentSubpath?: string;
+}
 export type WorkerEvent =
+  | {
+      type: 'orchestration_request';
+      id: string;
+      name: 'spawn' | 'fork' | 'send_message' | 'interrupt_agent';
+      arguments: Record<string, unknown>;
+      origin: WorkerEventOrigin;
+    }
   | { type: 'ready' }
-  | { type: 'event'; event: SdkEvent }
-  | { type: 'tool_call'; id: string; name: string; arguments: Record<string, unknown> }
+  | { type: 'thread_tree'; threads: Array<{ subpath: string; parentSubpath: string }> }
+  | { type: 'event'; event: SdkEvent; origin?: WorkerEventOrigin }
+  | {
+      type: 'canonical_event';
+      event: { id: string; subpath: string; kind: string; payload: Record<string, unknown> };
+    }
+  | {
+      type: 'tool_call';
+      id: string;
+      name: string;
+      arguments: Record<string, unknown>;
+      origin?: WorkerEventOrigin;
+    }
   | { type: 'checkpoint'; checkpoint: SdkCheckpoint }
   | { type: 'done' }
   | { type: 'failure'; message: string; fatal?: true };

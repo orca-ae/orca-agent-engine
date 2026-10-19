@@ -336,6 +336,9 @@ const appOptions: BuildAppOptions = {
     .replace(/^ws:/, 'http:')
     .replace(/^wss:/, 'https:'),
   ...(config.sessionJwtLlmPolicy ? { sessionJwtLlmPolicy: config.sessionJwtLlmPolicy } : {}),
+  ...(config.aiGatewayLlmJwtTtlSecs !== undefined
+    ? { llmJwtTtlSecs: config.aiGatewayLlmJwtTtlSecs }
+    : {}),
   fileStore,
   skillStore,
   memoryStore,

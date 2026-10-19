@@ -2,7 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { CodexSdkHarness } from '../../src/harness/codex-sdk/index.js';
-import { HARNESS_CATALOG } from '@orca/harness-catalog';
+import {
+  HARNESS_CATALOG,
+  resolveHarnessCapabilities,
+  type HarnessType,
+} from '@orca/harness-catalog';
 // THE HARNESS TURN-TERMINAL CONFORMANCE SUITE — one invariant, every provider, every
 // fault shape.
 //
@@ -1870,8 +1874,17 @@ describe('the matrix rows are the registered providers', () => {
     defaultRegisterProviders(registry, CONFORMANCE_CONFIG, new InMemoryTranscriptStore());
     const registered = [...registry.providerNames()].sort();
     expect(
-      Object.values(HARNESS_CATALOG)
-        .map((entry) => entry.provider)
+      Object.entries(HARNESS_CATALOG)
+        // Cloud-only SDKs use sandbox-harness, not this self-hosted runner.
+        .filter(([harness, entry]) =>
+          entry.supportedModes.some((mode) =>
+            resolveHarnessCapabilities({
+              harness: harness as HarnessType,
+              mode,
+            }).supportedTargets.includes('self_hosted'),
+          ),
+        )
+        .map(([, entry]) => entry.provider)
         .sort(),
     ).toEqual(registered);
     const rows = ROWS.map((r) => r.provider)

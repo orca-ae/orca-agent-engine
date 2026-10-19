@@ -48,7 +48,19 @@ import type {
 
 `SandboxHandle` exposes:
 
-- `run(call)` — run a tool call (`bash` / `glob` / `grep`) to completion.
+- `run(call, options?)` — run a tool call (`bash` / `glob` / `grep`) to completion.
+  `options.signal` opts into per-call cancellation; `runWithWritePolicy(call, policy, options?)`
+  and the policy wrapper preserve it. `capabilities.supportsPerCallCancellation` is true only
+  for OpenSandbox. Other adapters reject signal-bearing requests before dispatch.
+  OpenSandbox retains the stream until its `init.text` execution ID arrives, issues
+  `DELETE /command?id=...`, and checks `GET /command/status/:id` for the matching ID,
+  `running=false`, an exit code and a finish timestamp. Cleanup is bounded to 10 seconds.
+  Missing IDs, failed RPCs, invalid status and cleanup deadlines report unknown termination,
+  not a successful abort. `AbortError` means execd confirmed command exit after interruption.
+  This depends on execd's process-group kill implementation; it is not a rollback of effects
+  already committed or a guarantee for descendants escaping that process group.
+  File APIs do not accept cancellation signals: callers can fence them before dispatch,
+  but cannot claim that aborting a waiter reverses or stops a dispatched file mutation.
 - `spawn?(cmd, opts?)` — spawn a **long-lived** process, returning live
   `{ stdout, stdin, kill, exited }` (`exited` resolves with the exit
   code/signal and rejects on spawn failure). Use this when a transport needs

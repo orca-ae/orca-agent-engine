@@ -9,6 +9,7 @@ import { resolveProvider } from '../src/providers/registry.js';
 const worker = vi.hoisted(() => ({ handle: vi.fn(), refreshOptions: vi.fn() }));
 vi.mock('@orca/codex-harness', () => ({ CodexSdkWorker: vi.fn(() => worker) }));
 vi.mock('@orca/pi-harness', () => ({ PiSdkWorker: vi.fn(() => worker) }));
+vi.mock('@orca/dsh-harness', () => ({ DshSdkWorker: vi.fn(() => worker) }));
 const runtimes: CodexSdkRuntime[] = [];
 beforeEach(() => {
   vi.clearAllMocks();
@@ -96,4 +97,42 @@ it('refuses a colocated Pi command missing its Gateway destination before using 
     'explicit native Gateway URL',
   );
   expect(worker.handle).not.toHaveBeenCalled();
+});
+
+it('DSH transports authorization replies and monotonic archive fence before targeted cleanup', async () => {
+  const runtime = new CodexSdkRuntime('dsh-sdk');
+  runtimes.push(runtime);
+  const { baseUrl: _, ...command } = start;
+  await runtime.handleSdkCommand(
+    {
+      ...command,
+      modelProvider: 'deepseek',
+      model: 'deepseek-v4-flash',
+      dshGatewayUrl: 'http://gateway',
+      archivedThreadSubpaths: [],
+    },
+    () => {},
+  );
+  const threadId = '11111111-1111-4111-8111-111111111111';
+  const controls = [
+    { type: 'archive_fence', threadId },
+    { type: 'orchestration_result', id: 'call', allowed: false, reason: 'archived' },
+    { type: 'interrupt', threadId, archived: true },
+  ];
+  for (const control of controls) await runtime.handleSdkCommand(control, () => {});
+  expect(worker.handle.mock.calls.slice(1).map(([command]) => command)).toEqual(controls);
+  const nonDsh = new CodexSdkRuntime();
+  await expect(nonDsh.handleSdkCommand(controls[0], () => {})).rejects.toThrow('DSH-only');
+  const missing = new CodexSdkRuntime('dsh-sdk');
+  await expect(
+    missing.handleSdkCommand(
+      {
+        ...command,
+        modelProvider: 'deepseek',
+        model: 'deepseek-v4-flash',
+        dshGatewayUrl: 'http://gateway',
+      },
+      () => {},
+    ),
+  ).rejects.toThrow('archive state');
 });

@@ -4,7 +4,7 @@
 import { parseProjectedIo } from './captured-io.js';
 import { parsePinnedDeliveryContext } from './canonical-validation.js';
 import {
-  IO_PROJECTED_TRACE_SCHEMA_VERSION,
+  isIoProjectionSchema,
   type ProjectedIo,
   type PinnedDeliveryContext,
   type ProjectedMetadataValue,
@@ -132,7 +132,7 @@ function childSpan(
 
 function observationIo(trace: ProjectedTrace, span: ProjectedSpan): ProjectedIo | undefined {
   if (
-    trace.schemaVersion !== IO_PROJECTED_TRACE_SCHEMA_VERSION ||
+    !isIoProjectionSchema(trace.schemaVersion) ||
     (span.observationType !== 'agent_turn' && span.observationType !== 'tool') ||
     span.io === undefined
   )

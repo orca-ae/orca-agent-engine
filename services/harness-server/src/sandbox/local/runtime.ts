@@ -1,6 +1,8 @@
 // Copyright The Orca Authors
 // SPDX-License-Identifier: Apache-2.0
 
+import { rejectUnsupportedCancellation, type SandboxCallOptions } from '@orca/sandbox-runtime';
+
 import { spawn } from 'node:child_process';
 import { lstatSync, realpathSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -678,7 +680,8 @@ class LocalSandboxHandle implements SandboxHandle {
     });
   }
 
-  async run(call: ToolCall): Promise<ToolResult> {
+  async run(call: ToolCall, options?: SandboxCallOptions): Promise<ToolResult> {
+    rejectUnsupportedCancellation(options);
     if (this.destroyed) throw new Error(`sandbox ${this.id} destroyed`);
 
     if (call.tool === 'bash') {
@@ -725,7 +728,12 @@ class LocalSandboxHandle implements SandboxHandle {
     }
   }
 
-  async runWithWritePolicy(call: ToolCall, policy: SandboxWritePolicy): Promise<ToolResult> {
+  async runWithWritePolicy(
+    call: ToolCall,
+    policy: SandboxWritePolicy,
+    options?: SandboxCallOptions,
+  ): Promise<ToolResult> {
+    rejectUnsupportedCancellation(options);
     if (call.tool === 'bash') {
       const args = call.args as { command: string; timeout_ms?: number };
       return await this.runPolicyCommand(args.command, policy, args.timeout_ms);

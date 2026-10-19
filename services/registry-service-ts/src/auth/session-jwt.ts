@@ -5,6 +5,18 @@ import { SignJWT, jwtVerify, importPKCS8, importSPKI, type KeyLike, type JWTPayl
 import { createPublicKey } from 'node:crypto';
 import { isWorkspaceId } from './workspace-id.js';
 
+/** Operator-owned LLM lifetime for SDK ai-gateway tokens; never request-body input. */
+export function sdkGatewayJwtTtlSecs(
+  harness: string,
+  configuredTtlSecs?: number,
+): number | undefined {
+  if (harness !== 'codex_sdk' && harness !== 'pi_sdk' && harness !== 'dsh_sdk') return undefined;
+  return Math.max(
+    configuredTtlSecs !== undefined && configuredTtlSecs > 0 ? configuredTtlSecs : 0,
+    660,
+  );
+}
+
 export interface SessionJwtClaims {
   org_id: string;
   workspace_id: string;
