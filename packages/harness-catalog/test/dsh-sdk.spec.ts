@@ -5,6 +5,8 @@ import { expect, it } from 'vitest';
 import {
   DSH_MODEL,
   DSH_LLM_ROUTE,
+  dshModel,
+  dshLlmRoute,
   resolveHarnessAnnotation,
   harnessToProvider,
   validateHarnessDeployment,
@@ -16,6 +18,38 @@ import {
 } from '../src/index.js';
 
 const selection = { harness: 'dsh_sdk', mode: 'colocated' } as const;
+it('resolves exact DSH routes and validates catalog-specific controls', () => {
+  expect(dshLlmRoute('deepseek', DSH_MODEL)).toBe(DSH_LLM_ROUTE);
+  expect(dshLlmRoute('anthropic', 'claude-sonnet-4-6')).toBe('llm-pi-anthropic-anthropic-messages');
+  expect(dshLlmRoute('deepseek', 'deepseek-flash')).toBe('llm-pi-deepseek-openai-completions');
+  expect(() => dshLlmRoute('anthropic', 'unknown')).toThrow('Unsupported DSH model');
+  expect(dshModel('__proto__', 'constructor')).toBeUndefined();
+  expect(dshModel('anthropic', 'constructor')).toBeUndefined();
+  expect(
+    validateHarnessModel(selection, {
+      provider: 'anthropic',
+      id: 'claude-sonnet-4-6',
+      effort: 'high',
+    }),
+  ).toBeNull();
+  expect(
+    validateHarnessModel(selection, {
+      provider: 'anthropic',
+      id: 'claude-sonnet-4-6',
+      effort: 'invalid',
+    }),
+  ).toMatch(/effort/);
+  expect(
+    validateHarnessModel(selection, {
+      provider: 'anthropic',
+      id: 'claude-sonnet-4-6',
+      speed: 'fast',
+    }),
+  ).toMatch(/speed/);
+  expect(validateHarnessModel(selection, { provider: 'unknown', id: 'unknown' })).toMatch(
+    /providers/,
+  );
+});
 const checkpoint = {
   version: 1,
   format: 'dsh_sdk',
@@ -28,7 +62,7 @@ const checkpoint = {
   },
 };
 
-it('admits only cloud/colocated DSH with the fixed Messages model', () => {
+it('admits cloud/colocated DSH with legacy DeepSeek and the official model catalog', () => {
   expect(resolveHarnessAnnotation({ harness: 'dsh_sdk' })).toEqual(selection);
   expect(resolveHarnessAnnotation({ harness: 'dsh_sdk', mode: 'separate' })).toHaveProperty(
     'error',
@@ -39,7 +73,13 @@ it('admits only cloud/colocated DSH with the fixed Messages model', () => {
   expect(resolveExecutionOwner('cloud', selection)).toBe('harness-server');
   expect(DSH_LLM_ROUTE).toBe('llm-pi-deepseek-anthropic-messages');
   expect(validateHarnessModel(selection, { provider: 'deepseek', id: DSH_MODEL })).toBeNull();
-  expect(validateHarnessModel(selection, { provider: 'deepseek', id: 'deepseek-flash' })).toMatch(
+  expect(
+    validateHarnessModel(selection, { provider: 'deepseek', id: 'deepseek-flash' }),
+  ).toBeNull();
+  expect(
+    validateHarnessModel(selection, { provider: 'anthropic', id: 'claude-sonnet-4-6' }),
+  ).toBeNull();
+  expect(validateHarnessModel(selection, { provider: 'deepseek', id: 'unknown-model' })).toMatch(
     /not supported/,
   );
   expect(validateHarnessFeatures(selection, { multiagent: {} })).toMatch(/multiagent/);

@@ -9,6 +9,20 @@ import {
 } from '../../src/domain/llm-policy.js';
 
 describe('LLM model policy', () => {
+  it('narrows official DSH provider routes and rejects another provider protocol grant', () => {
+    const model = { provider: 'anthropic', id: 'claude-sonnet-4-6' };
+    const route = 'llm-pi-anthropic-anthropic-messages';
+    expect(
+      dshLlmGrants(
+        { routes: [route, 'llm-pi-openai-openai-responses'], models: ['claude-*'] },
+        model,
+      ),
+    ).toEqual({ llm_routes: [route], llm_models: [model.id] });
+    expect(
+      dshLlmGrants({ routes: ['llm-pi-deepseek-anthropic-messages'], models: ['*'] }, model),
+    ).toBeNull();
+    expect(dshLlmGrants({ routes: [route], models: ['gpt-*'] }, model)).toBeNull();
+  });
   it('narrows DSH grants to the fixed Messages route/model and fails closed', () => {
     const model = { provider: 'deepseek', id: 'deepseek-v4-flash' };
     const route = 'llm-pi-deepseek-anthropic-messages';

@@ -27,7 +27,12 @@ import { Readable } from 'node:stream';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { eq, and, isNull, sql, inArray, ne } from 'drizzle-orm';
 import type { FileStore, FilePurpose, FileRecord } from '@orca/file-store';
-import { SEED_PRICE_PROVIDER, DSH_LLM_ROUTE, piLlmRoute } from '@orca/harness-catalog';
+import {
+  SEED_PRICE_PROVIDER,
+  dshLlmRoute,
+  piLlmRoute,
+  validateHarnessModel,
+} from '@orca/harness-catalog';
 import {
   normalizeMemoryRelativePath,
   MemoryConflictError,
@@ -1523,16 +1528,21 @@ export function registerInternalRoutes(
           override ?? mcpBinding.snapshot.model,
         );
         if (!model.success) return reply.code(409).send({ error: 'invalid_runtime_binding' });
+        if (
+          selection.harness === 'dsh_sdk' &&
+          validateHarnessModel({ harness: 'dsh_sdk' }, model.data)
+        )
+          return reply.code(409).send({ error: 'invalid_runtime_binding' });
         const route =
           selection.harness === 'dsh_sdk'
-            ? DSH_LLM_ROUTE
+            ? dshLlmRoute(model.data.provider, model.data.id)
             : piLlmRoute(model.data.provider, model.data.id);
         if (selection.harness === 'dsh_sdk') {
           const grants = dshLlmGrants(sessionJwtLlmPolicy, model.data);
           if (!grants)
             return reply.code(403).send({
               error:
-                'dsh_sdk requires its fixed Messages route/model in SESSION_JWT_LLM_ROUTES/MODELS',
+                'dsh_sdk requires ' + route + ' and its model in SESSION_JWT_LLM_ROUTES/MODELS',
             });
           dshModels = grants.llm_models;
         }

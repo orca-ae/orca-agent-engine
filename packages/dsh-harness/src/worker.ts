@@ -8,13 +8,15 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { JsonRpcLineTransport } from '@deepseek-ai/dsh-sdk-protocol';
 import { assertSdkTerminalUsage, type SdkWorker, type SdkTurnOptions } from '@orca/sdk-harness';
+import { dshModel, validateHarnessModel } from '@orca/harness-catalog';
 import {
   assertDshCheckpointInstructions,
   decodeCheckpoint,
+  assertDshCheckpointModel,
   DSH_SDK_VERSION,
   NATIVE_ID,
 } from './checkpoint.js';
-import { gatewayBase } from './transport.js';
+import { gatewayBase, assertDshProtocol } from './transport.js';
 import { boundedLines } from './bounds.js';
 import {
   orchestration,
@@ -183,22 +185,27 @@ export class DshSdkWorker implements SdkWorker {
   private async start(input: DshStartCommand): Promise<void> {
     this.archived = archivedSubpaths(input.archivedThreadSubpaths);
     // Host admission requires effective always_deny for web_fetch; never expose its executable.
-    input = { ...input, tools: input.tools.filter((tool) => tool.name !== 'web_fetch') };
+    input = {
+      ...input,
+      modelProvider: input.modelProvider ?? 'deepseek',
+      tools: input.tools.filter((tool) => tool.name !== 'web_fetch'),
+    };
     gatewayBase(input.dshGatewayUrl);
-    if (
-      !input.apiKey ||
-      input.model !== 'deepseek-v4-flash' ||
-      (input.modelProvider && input.modelProvider !== 'deepseek') ||
-      input.baseUrl
-    )
-      throw new Error('DSH requires managed DeepSeek credentials and Gateway origin');
-    if (input.effort && !['off', 'low', 'high', 'max'].includes(input.effort))
-      throw new Error('Unsupported DSH reasoning effort');
+    if (!input.apiKey || input.baseUrl)
+      throw new Error('DSH requires scoped credentials and Gateway origin');
+    const error = validateHarnessModel(
+      { harness: 'dsh_sdk' },
+      {
+        provider: input.modelProvider!,
+        id: input.model,
+        ...(input.effort ? { effort: input.effort } : {}),
+      },
+    );
+    if (error) throw new Error(error);
+    assertDshProtocol(dshModel(input.modelProvider!, input.model)!.api);
     if (input.checkpoint) {
       assertDshCheckpointInstructions(input.checkpoint, input.system);
-      const metadata = JSON.parse(decodeCheckpoint(input.checkpoint)['orca.json']!.toString());
-      if (metadata.model !== input.model)
-        throw new Error('DSH checkpoint model differs from pinned Agent');
+      assertDshCheckpointModel(input.checkpoint, input.modelProvider!, input.model);
     }
     this.input = input;
     const require = createRequire(import.meta.url);

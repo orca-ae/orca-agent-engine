@@ -44,29 +44,18 @@ Each item is proposed as an OIP pull request; the design is reviewed there befor
   it. Primary-thread archive currently fails closed by retiring the DSH tree rather than providing
   native root archive acknowledgement; complete that path before claiming full thread-control
   parity. File writes and remote MCP business effects are not transactionally rolled back.
-- **DSH explicit provider/model selection.** Trigger: the isolated official-plugin Claude probe
-  establishes a concrete second-provider use case. Preserve the
-  existing DeepSeek path for compatibility and support the provider/model/protocol capabilities
-  of the pinned official `dsh-llm-pi-ai` plugin without an Orca provider-name whitelist.
-  Derive admission and route selection from that plugin's catalog and trusted configured models,
-  not from the set with live-test evidence or a potentially different Orca Pi catalog version.
-  Reuse Agent model fields, worker commands and native Gateway bindings;
-  no new provider framework, model discovery, Gateway mapping or Helm key is needed.
-  Complete catalog admission, provider-specific JWT grants/refresh, managed transport and raw
-  usage attribution. Bind provider/model in checkpoint validation, preserving old DeepSeek
-  restore only where compatible and rejecting cross-model restore; use the existing profile
-  version mechanism if formats cannot safely coexist. First pass the parameterized existing
-  DSH smoke through actual Registry token issuance, managed bash, File API and persisted usage
-  with Claude. Then verify credential refresh, cold restore, child inheritance and control.
-  The isolated live probe covers neither these production seams nor full native-tree recovery.
-  Claude is the first live milestone, not the supported-provider boundary. Inventory installed
-  catalog protocols separately from the plugin's three custom-route protocols; reuse existing
-  protocol-specific transport/usage validation and close remaining integration gaps. Missing
-  Gateway bindings, credentials or ACLs are deployment readiness failures, not unsupported
-  provider names. Keep upstream auth in Gateway, including provider-specific requirements.
-  Track fixture/live evidence independently; do not claim parity until all supported paths are
-  integrated. Do not migrate the existing DeepSeek path or add an adapter-version registry merely
-  to introduce another provider.
+- **DSH model catalog and provider acceptance.** The static catalog uses the pinned official
+  plugin's chat models; managed transport/raw usage covers Messages, Chat Completions,
+  Responses and Google Generative AI with local published-runtime fixtures. Remaining catalog
+  protocols require protocol-specific transport/auth/usage integration when their deployments
+  need them; reject explicitly before inference until integrated. Real Claude acceptance requires
+  the parameterized existing smoke through Registry-issued JWTs, managed bash, File API and
+  persisted usage, plus deployment verification of refresh, cold restore and child control.
+  Fixture evidence is separate from live-provider/deployment evidence. Operator-configured and
+  dynamic model descriptors require a DSH-specific exact plugin/pi-ai profile and trusted source
+  when deployments need models outside the bundled catalog. This work remains separate from
+  DeepSeek-only deployment acceptance. Separate/self-hosted execution and runtime plugin
+  installation remain out of scope.
 - **ACP harness provider.** Run any agent that speaks the Agent Client Protocol over stdio as a
   session-runner provider, with Orca's tools exposed to it over MCP and its permission requests
   routed through the tool-confirmation gate. OIP pending.

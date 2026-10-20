@@ -212,11 +212,18 @@ describe('AgentSnapshotResolver (gateway egress)', () => {
     ['pi_sdk', 'openai', 'gpt-5.4', 'llm-pi-openai-openai-responses'],
     ['pi_sdk', 'anthropic', 'claude-sonnet-4-6', 'llm-pi-anthropic-anthropic-messages'],
     ['pi_sdk', 'deepseek', 'deepseek-flash', 'llm-pi-deepseek-openai-completions'],
+    ['dsh_sdk', 'anthropic', 'claude-sonnet-4-6', 'llm-pi-anthropic-anthropic-messages'],
+    ['dsh_sdk', 'openai', 'gpt-5.4', 'llm-pi-openai-openai-responses'],
+    ['dsh_sdk', 'deepseek', 'deepseek-flash', 'llm-pi-deepseek-openai-completions'],
   ] as const)(
     'pins %s and narrows gateway claims to its overridden model',
     async (harness, provider, model, route) => {
       const data = {
         ...loaderData,
+        environment: {
+          ...loaderData.environment,
+          target: harness === 'dsh_sdk' ? ('cloud' as const) : ('self_hosted' as const),
+        },
         session: {
           ...loaderData.session,
           agentVersion: 2,

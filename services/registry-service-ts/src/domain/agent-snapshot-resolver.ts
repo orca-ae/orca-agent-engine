@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
-  DSH_LLM_ROUTE,
+  dshLlmRoute,
   piLlmRoute,
   validateHarnessDeployment,
   validateHarnessModel,
@@ -667,7 +667,7 @@ export class AgentSnapshotResolver {
       // the internal mint-jwt endpoint; absence never grants model access.
       const nativeRoute =
         resolveAgentProvider(agent.metadata) === 'dsh-sdk'
-          ? DSH_LLM_ROUTE
+          ? dshLlmRoute(agent.model.provider, agent.model.id)
           : resolveAgentProvider(agent.metadata) === 'pi-sdk'
             ? piLlmRoute(agent.model.provider, agent.model.id)
             : 'llm-responses';
@@ -676,7 +676,7 @@ export class AgentSnapshotResolver {
         !dshLlmGrants(this.llmPolicy, agent.model)
       )
         throw new Error(
-          'dsh_sdk requires its fixed Messages route/model in SESSION_JWT_LLM_ROUTES/MODELS',
+          'dsh_sdk requires its catalog route/model in SESSION_JWT_LLM_ROUTES/MODELS',
         );
       const models = nativeSdk
         ? intersectLlmModels(this.llmPolicy?.models ?? [], [agent.model.id])

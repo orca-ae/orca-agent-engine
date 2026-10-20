@@ -8,6 +8,7 @@ import { getClaudeModelEffortCapability } from './model-controls.js';
 import piModels from './pi-models.json' with { type: 'json' };
 import piModelApis from './pi-model-apis.json' with { type: 'json' };
 import codexModels from './codex-models.json' with { type: 'json' };
+import dshCatalog from './dsh-models.json' with { type: 'json' };
 
 // Pinned with @openai/codex-sdk 0.154.0, from OpenAI's
 // codex-rs/models-manager/models.json at rust-v0.154.0 (API-supported entries).
@@ -39,6 +40,39 @@ export function piLlmRoute(provider: string, id: string): string {
 // DSH 0.2.1-alpha.2 SDK-created agents use the DeepSeek Messages adapter.
 export const DSH_MODEL = 'deepseek-v4-flash';
 export const DSH_LLM_ROUTE = 'llm-pi-deepseek-anthropic-messages';
+export const DSH_CATALOG_VERSION = { plugin: dshCatalog.pluginVersion, pi: dshCatalog.piVersion };
+const dshModels: Readonly<
+  Record<string, Readonly<Record<string, { api: string; efforts: readonly string[] }>>>
+> = dshCatalog.providers;
+export function dshModel(
+  provider: string,
+  id: string,
+): { api: string; efforts: readonly string[] } | undefined {
+  if (provider === 'deepseek' && id === DSH_MODEL)
+    return { api: 'anthropic-messages', efforts: [] };
+  const models = Object.hasOwn(dshModels, provider) ? dshModels[provider] : undefined;
+  return models && Object.hasOwn(models, id) ? models[id] : undefined;
+}
+export const DSH_SDK_MODELS: Readonly<Record<string, Readonly<Record<string, readonly string[]>>>> =
+  {
+    ...Object.fromEntries(
+      Object.entries(dshModels).map(([provider, models]) => [
+        provider,
+        Object.fromEntries(Object.entries(models).map(([id, model]) => [id, model.efforts])),
+      ]),
+    ),
+    deepseek: {
+      ...Object.fromEntries(
+        Object.entries(dshModels.deepseek ?? {}).map(([id, model]) => [id, model.efforts]),
+      ),
+      [DSH_MODEL]: [],
+    },
+  };
+export function dshLlmRoute(provider: string, id: string): string {
+  const model = dshModel(provider, id);
+  if (!model) throw new Error('Unsupported DSH model: ' + provider + '/' + id);
+  return 'llm-pi-' + provider + '-' + model.api;
+}
 
 export interface HarnessModelPolicy {
   modelsByProvider?: typeof PI_SDK_MODELS;
@@ -80,7 +114,11 @@ export const HARNESS_MODEL_POLICIES: Partial<Record<HarnessType, HarnessModelPol
     providers: Object.keys(PI_SDK_MODELS),
     modelsByProvider: PI_SDK_MODELS,
   },
-  dsh_sdk: { defaultProvider: 'deepseek', providers: ['deepseek'], models: { [DSH_MODEL]: [] } },
+  dsh_sdk: {
+    defaultProvider: 'deepseek',
+    providers: Object.keys(DSH_SDK_MODELS),
+    modelsByProvider: DSH_SDK_MODELS,
+  },
   codex_sdk: { defaultProvider: 'openai', providers: ['openai'], models: CODEX_SDK_MODELS },
 };
 
@@ -109,8 +147,15 @@ export function validateHarnessModel(
       return `model.effort '${model.effort}' is not supported for ${model.provider}/${model.id}`;
     return null;
   }
-  if (selected.harness === 'dsh_sdk' && model.speed && model.speed !== 'standard')
-    return 'dsh_sdk does not support model.speed fast';
+  if (selected.harness === 'dsh_sdk') {
+    const selectedModel = dshModel(model.provider, model.id);
+    if (!selectedModel) return 'model is not supported by harness dsh_sdk';
+    if (model.speed && model.speed !== 'standard')
+      return 'dsh_sdk does not support model.speed fast';
+    if (model.effort && !selectedModel.efforts.includes(model.effort))
+      return 'model.effort is not supported for ' + model.provider + '/' + model.id;
+    return null;
+  }
   if (policy.models) {
     const id = model.provider === 'anthropic' ? stripDatedSnapshotSuffix(model.id) : model.id;
     if (!Object.hasOwn(policy.models, id)) {

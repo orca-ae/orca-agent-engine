@@ -4,9 +4,11 @@
 import { createHash } from 'node:crypto';
 import type { SdkCheckpoint } from '@orca/sdk-harness';
 import { sessionFormatCatalog } from '@deepseek-ai/dsh-session-format-catalog';
+import { DSH_MODEL, DSH_CATALOG_VERSION } from '@orca/harness-catalog';
 
 export const DSH_SDK_VERSION = '0.2.1-alpha.2';
 export const PROFILE = 'orca-managed-tree-v2';
+const PI_PROFILE = 'orca-managed-pi-ai-' + DSH_CATALOG_VERSION.pi + '-v1';
 export const MAX_STATE_BYTES = 16 * 1024 * 1024;
 export const MAX_STATE_FILES = 129;
 export const NATIVE_ID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
@@ -53,13 +55,18 @@ export function decodeCheckpoint(checkpoint: SdkCheckpoint): Record<string, Buff
   }
   const manifest = JSON.parse(files['orca.json']?.toString('utf8') ?? 'null');
   if (
-    manifest?.profile !== PROFILE ||
+    ![PROFILE, PI_PROFILE].includes(manifest?.profile) ||
     manifest?.sdkVersion !== DSH_SDK_VERSION ||
     manifest?.threadId !== checkpoint.threadId ||
     manifest?.instructionsSha256 !== checkpoint.instructionsSha256 ||
     Object.keys(files).length < 2
   )
     throw new Error('Incompatible DSH native profile');
+  if (
+    manifest.profile === PI_PROFILE &&
+    (typeof manifest.provider !== 'string' || typeof manifest.model !== 'string')
+  )
+    throw new Error('DSH checkpoint model identity unavailable');
   validateTree(checkpoint.threadId, files);
   return files;
 }
@@ -118,22 +125,41 @@ export function assertDshCheckpointInstructions(checkpoint: SdkCheckpoint, syste
     throw new Error('DSH instructions differ from checkpoint');
 }
 
+export function assertDshCheckpointModel(
+  checkpoint: SdkCheckpoint,
+  provider: string,
+  model: string,
+): void {
+  const manifest = JSON.parse(decodeCheckpoint(checkpoint)['orca.json']!.toString());
+  const legacy = manifest.profile === PROFILE && manifest.model === DSH_MODEL;
+  const pinnedProvider = manifest.provider ?? (legacy ? 'deepseek' : undefined);
+  const expectedProfile = provider === 'deepseek' && model === DSH_MODEL ? PROFILE : PI_PROFILE;
+  if (
+    pinnedProvider !== provider ||
+    manifest.model !== model ||
+    manifest.profile !== expectedProfile
+  )
+    throw new Error('DSH checkpoint provider/model differs from pinned Agent');
+}
+
 export function captureCheckpoint(
   threadId: string,
   system: string,
   nativeFiles: Record<string, Buffer>,
-  model?: string,
+  model: string = DSH_MODEL,
+  provider = 'deepseek',
 ): SdkCheckpoint {
   const instructionsSha256 = digest(system);
   const files = {
     ...nativeFiles,
     'orca.json': Buffer.from(
       JSON.stringify({
-        profile: PROFILE,
+        profile: provider === 'deepseek' && model === DSH_MODEL ? PROFILE : PI_PROFILE,
         sdkVersion: DSH_SDK_VERSION,
         threadId,
         instructionsSha256,
         model,
+        provider,
       }),
     ),
   };

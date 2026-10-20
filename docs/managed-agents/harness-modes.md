@@ -75,9 +75,14 @@ mock                          [colocated]       null                            
 ## DSH SDK colocated execution
 
 `metadata: {"harness":"dsh_sdk","mode":"colocated"}` selects DeepSeek Harness
-`0.2.1-alpha.2` on cloud Environments. Its model is pinned to
-`{"provider":"deepseek","id":"deepseek-v4-flash"}`; effort overrides, fast mode,
-Skills, managed multiagent rosters and client-executed custom tools are rejected. The shared SDK host
+`0.2.1-alpha.2` on cloud Environments. Agent model.provider/id select from the complete chat catalog of the pinned official
+DSH llm-pi-ai plugin 0.2.1-alpha.2 and pi-ai 1.1.0. The legacy
+DeepSeek deepseek-v4-flash selection keeps its existing Messages adapter and route.
+Effort values follow the selected model's catalog capabilities. Fast mode, Skills,
+managed multiagent rosters and client-executed custom tools are rejected.
+The bundled catalog admits known model identities, independently of deployment credentials.
+Managed execution supports anthropic-messages, openai-completions, openai-responses and
+google-generative-ai. Other catalog protocols fail explicitly before a model request. The shared SDK host
 adapter retains Orca tool permissions, tool confirmation, request/tool-call guardrails, usage and
 durable turn receipts. Native workload executable tools and ambient plugin discovery are disabled.
 Native in-process spawn/fork and child messaging/control use DSH's own scheduler.
@@ -114,8 +119,25 @@ owner), and permit `llm-pi-deepseek-anthropic-messages` and `deepseek-v4-flash` 
 LLM policy. The upstream default is `https://api.deepseek.com/anthropic`. Gateway
 `emit_usage: false` pairs with harness-authoritative DSH usage. No provider key enters DSH.
 
+Other providers use the same native Gateway bindings and exact
+llm-pi-<provider>-<protocol> route grants. For Claude, configure provider anthropic,
+api anthropic-messages, allowed path /v1/messages, Gateway-owned upstream x-api-key,
+and route llm-pi-anthropic-anthropic-messages; allow the selected model ID in
+Registry's SESSION_JWT_LLM_MODELS and that route in SESSION_JWT_LLM_ROUTES.
+Bindings configured on an external Gateway are owned by that deployment, not by the
+engine chart. Missing routes, vault credentials or ACLs are deployment failures;
+an image or Helm upgrade alone does not enable provider access. Registry narrows both
+initial and refreshed JWTs to the selected route/model. Raw protocol usage remains
+harness-authoritative; SDK-normalized missing counters are not accepted as zero.
+
+The existing DSH smoke is parameterized with ORCA_E2E_SANDBOX_HARNESS_PROVIDER and
+ORCA_E2E_SANDBOX_HARNESS_MODEL. For a preconfigured remote Claude stack, select
+ORCA_E2E_AGENT_HARNESS=dsh_sdk, ORCA_E2E_SANDBOX_HARNESS_PROVIDER=anthropic,
+ORCA_E2E_SANDBOX_HARNESS_MODEL=claude-sonnet-4-6, ORCA_BASE_URL and ORCA_API_KEY,
+then run pnpm e2e:agent:sandbox. The remote client needs no provider key.
+
 Native state is committed through the existing harness-turn API after response persistence.
-The codec checks the DSH version, profile, model, instructions and a 16 MiB aggregate decoded
+The codec checks the DSH version, profile, provider/model, instructions and a 16 MiB aggregate decoded
 limit for the whole native tree (at most 129 files including its manifest). Cold resume restores
 root/child context and lineage, not the temporary workspace, shell processes or
 plugin-private databases. Published outputs use the existing File API. An interrupted or failed
@@ -142,7 +164,8 @@ to `false` and enable `bash`/`read` individually in `configs` with `enabled: tru
 unsupported host-side fetch tool is not exposed or executed by DSH. Shared
 resource mounts do not imply shared private HOME/tmp or persistent shell state.
 
-The tree profile is `orca-managed-tree-v2`; earlier root-only profile checkpoints are rejected,
+The legacy DeepSeek tree profile is `orca-managed-tree-v2`; official-adapter profiles
+also pin the pi-ai version. Cross-provider/model restore and earlier root-only checkpoints are rejected,
 not silently migrated. Child-aware exporter state uses reducer v5, upgrading to v6 when tool
 observation capacity overflows; projected traces use v3/v4 (metadata/raw I/O). Tool spans remain
 bounded at 256 with reserved completion capacity and explicit root omission counters, without

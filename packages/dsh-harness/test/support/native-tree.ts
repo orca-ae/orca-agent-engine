@@ -22,6 +22,7 @@ type FixtureEvent = DshWorkerEvent | Canonical | ThreadTree;
 
 export async function exerciseNativeTree(
   observe: (event: DshWorkerEvent) => void = () => {},
+  model = { provider: 'deepseek', id: 'deepseek-v4-flash' },
 ): Promise<void> {
   const requests: Array<{
     id: string;
@@ -64,9 +65,43 @@ export async function exerciseNativeTree(
   const server = createServer((req, res) => {
     const chunks: Buffer[] = [];
     req.on('data', (chunk) => chunks.push(chunk));
-    req.on('end', () => {
+    req.on('end', async () => {
       const body = JSON.parse(Buffer.concat(chunks).toString());
-      const id = String(req.headers['x-deepseek-harness-session-id']);
+      expect(req.headers['x-deepseek-harness-session-id']).toBeUndefined();
+      // Use private runtime facts and the fixture's user prompts, not an outbound native ID.
+      const userText = JSON.stringify(
+        body.messages
+          .filter((message: { role: string }) => message.role === 'user')
+          .flatMap((message: { content: string | Array<{ type: string; text?: string }> }) =>
+            typeof message.content === 'string'
+              ? [message.content]
+              : message.content.filter((block) => block.type === 'text').map((block) => block.text),
+          ),
+      );
+      const label = userText.includes('GRANDCHILD')
+        ? 'bounded nested child'
+        : userText.includes('CHILD_A')
+          ? 'fresh parallel child'
+          : userText.includes('CHILD_B')
+            ? 'fork parallel child'
+            : undefined;
+      const identity = () =>
+        label
+          ? events.find(
+              (event) =>
+                event.type === 'canonical_event' &&
+                event.event.kind === 'session.thread_created' &&
+                event.event.payload.agent_name === label,
+            )
+          : events.find((event) => event.type === 'event' && event.event.type === 'thread.started');
+      await expect.poll(identity, { timeout: 2000 }).toBeDefined();
+      const source = identity()!;
+      const id =
+        source.type === 'canonical_event'
+          ? String(source.event.payload.native_session_id)
+          : source.type === 'event' && source.event.type === 'thread.started'
+            ? source.event.thread_id
+            : '';
       requests.push({
         id,
         auth: req.headers.authorization,
@@ -96,10 +131,18 @@ export async function exerciseNativeTree(
           },
         ];
         blocks.forEach((block, index) => {
-          frames.push(
-            { type: 'content_block_start', index, content_block: block },
-            { type: 'content_block_stop', index },
-          );
+          frames.push({
+            type: 'content_block_start',
+            index,
+            content_block: block.type === 'tool_use' ? { ...block, input: {} } : block,
+          });
+          if (block.type === 'tool_use')
+            frames.push({
+              type: 'content_block_delta',
+              index,
+              delta: { type: 'input_json_delta', partial_json: JSON.stringify(block.input) },
+            });
+          frames.push({ type: 'content_block_stop', index });
         });
         frames.push(
           {
@@ -239,8 +282,8 @@ export async function exerciseNativeTree(
     type: 'start',
     root,
     sessionId: 'orca-session',
-    model: 'deepseek-v4-flash',
-    modelProvider: 'deepseek',
+    model: model.id,
+    modelProvider: model.provider,
     system: 'Fixed grant',
     apiKey: 'scoped-jwt',
     dshGatewayUrl: 'http://127.0.0.1:' + (server.address() as { port: number }).port,
@@ -574,8 +617,8 @@ export async function exerciseNativeTree(
       requests.every(
         (request) =>
           request.session === 'orca-session' &&
-          request.url === '/v1/proxy/deepseek/v1/messages' &&
-          request.body.model === 'deepseek-v4-flash',
+          request.url?.split('?')[0] === '/v1/proxy/' + model.provider + '/v1/messages' &&
+          request.body.model === model.id,
       ),
     ).toBe(true);
     expect(canonical().some((event) => event.event.kind === 'agent.thinking')).toBe(true);
