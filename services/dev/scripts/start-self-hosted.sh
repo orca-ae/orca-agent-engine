@@ -440,6 +440,12 @@ umask 077
   echo "ORCA_SELF_HOSTED_ENVIRONMENT_ID=${ENVIRONMENT_ID}"
   echo "ORCA_SELF_HOSTED_ENVIRONMENT_KEY=${ENVIRONMENT_KEY}"
   echo "ORCA_SELF_HOSTED_ENVIRONMENT_NAME=${SELF_HOSTED_ENVIRONMENT_NAME}"
+  # The workspace api key too, so a client can drive this stack without seeding its
+  # own. `seedWorkspaceApiKey()` mints a fresh plaintext on every call and rotates
+  # the same row, so a consumer that re-seeds would invalidate the key recorded
+  # here -- reading it is the only way to share one. Same 600 as the env_key above,
+  # and for the same reason.
+  echo "ORCA_SELF_HOSTED_API_KEY=${bootstrap_api_key}"
 } > "${self_hosted_env_file}"
 umask "${umask_old}"
 

@@ -1,0 +1,21 @@
+{
+  "name": "@orca/example-laptop-agent",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Run an agent on your own laptop through the Orca Agent Engine — against a local engine or a shared one, with the same client.",
+  "scripts": {
+    "local": "tsx src/local.ts",
+    "shared": "tsx src/shared.ts",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "lint": "eslint 'src/**/*.ts'",
+    "format": "prettier --write 'src/**/*.ts' '*.{json,md}'",
+    "format:check": "prettier --check 'src/**/*.ts' '*.{json,md}'"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.5.0"
+  }
+}
