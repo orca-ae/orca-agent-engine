@@ -11,6 +11,8 @@ import { apply as control } from '@deepseek-ai/dsh-tool-subagent-control';
 import { SessionId, type Session } from '@deepseek-ai/dsh-session';
 import { createUserMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm';
 import { registerDeepSeekProvider, resolveAdapterOptions } from '@deepseek-ai/dsh-llm-deepseek';
+import { DSH_MODEL } from '@orca/harness-catalog';
+import { registerManagedPi } from './pi-adapter.js';
 import { JsonRpcLineTransport } from '@deepseek-ai/dsh-sdk-protocol';
 import { createHash, randomUUID } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -52,6 +54,8 @@ export function apply(ctx: Context): void {
   const inputStream = process.stdin.pipe(boundedLines());
   const rpc = new JsonRpcLineTransport(inputStream, process.stdout);
   let input: DshStartCommand | undefined;
+  let nativeProvider = 'orca-deepseek';
+  let managedPi: { api: string; baseUrl: string } | undefined;
   let archived = new Set<string>();
   let handle: AgentHandle | undefined;
   let active = false;
@@ -140,14 +144,19 @@ export function apply(ctx: Context): void {
       usage.set(id, value);
       canonical(id, 'model:start', 'span.model_request_start', {
         model_observation_kind: 'turn_model_summary',
-        provider: 'deepseek',
+        provider: input!.modelProvider ?? 'deepseek',
         model: input!.model,
       });
     }
     return value;
   };
   const releaseFetch = installManagedFetch(
-    () => ({ origin: input!.dshGatewayUrl!, token: input!.apiKey, sessionId: input!.sessionId }),
+    () => ({
+      origin: input!.dshGatewayUrl!,
+      token: input!.apiKey,
+      sessionId: input!.sessionId,
+      ...(managedPi ? { ...managedPi, provider: input!.modelProvider!, model: input!.model } : {}),
+    }),
     (next, id) => {
       const value = record(id);
       value.completed++;
@@ -155,6 +164,9 @@ export function apply(ctx: Context): void {
       value.counts.output_tokens += next.output_tokens;
       value.counts.cached_input_tokens += next.cached_input_tokens;
       value.counts.cache_write_input_tokens! += next.cache_write_input_tokens ?? 0;
+      if (next.cache_write_input_tokens_1h !== undefined)
+        value.counts.cache_write_input_tokens_1h =
+          (value.counts.cache_write_input_tokens_1h ?? 0) + next.cache_write_input_tokens_1h;
       assertSdkTerminalUsage(value.counts);
     },
     (id) => {
@@ -165,7 +177,7 @@ export function apply(ctx: Context): void {
 
   const setup = async (agentCtx: Context, agent: Agent): Promise<void> => {
     if (!input) throw new Error('DSH composition before initialization');
-    if (agent.options.provider !== 'orca-deepseek' || agent.options.model !== input.model)
+    if (agent.options.provider !== nativeProvider || agent.options.model !== input.model)
       throw new Error('DSH child model expansion rejected');
     for (const tool of input.tools) {
       if (orchestration.has(tool.name) || tool.name === 'web_fetch')
@@ -508,7 +520,13 @@ export function apply(ctx: Context): void {
       }
     }
     if (Object.keys(files).length !== ids.size) throw new Error('Incomplete DSH tree state');
-    return captureCheckpoint(String(handle!.agent.id), input!.system, files, input!.model);
+    return captureCheckpoint(
+      String(handle!.agent.id),
+      input!.system,
+      files,
+      input!.model,
+      input!.modelProvider ?? 'deepseek',
+    );
   };
   inputStream.on('error', () => {
     void ctx.root.fiber.dispose();
@@ -520,22 +538,29 @@ export function apply(ctx: Context): void {
       input = params as unknown as DshStartCommand;
       archived = archivedSubpaths(input.archivedThreadSubpaths);
       gatewayBase(input.dshGatewayUrl);
-      registerDeepSeekProvider(ctx, 'orca-deepseek', {
-        options: () =>
-          resolveAdapterOptions({
-            baseURL: gatewayBase(input!.dshGatewayUrl),
-            retryPolicy: { mode: 'normal', maxRetries: 0 },
-            streamIdleTimeoutMs: 600000,
+      const provider = input.modelProvider ?? 'deepseek';
+      const legacy = provider === 'deepseek' && input.model === DSH_MODEL;
+      if (legacy) {
+        registerDeepSeekProvider(ctx, 'orca-deepseek', {
+          options: () =>
+            resolveAdapterOptions({
+              baseURL: gatewayBase(input!.dshGatewayUrl),
+              retryPolicy: { mode: 'normal', maxRetries: 0 },
+              streamIdleTimeoutMs: 600000,
+            }),
+          resolveAuth: async () => ({
+            headers: {
+              Authorization: 'Bearer ' + input!.apiKey,
+              'X-Orca-Session-Id': input!.sessionId,
+            },
           }),
-        resolveAuth: async () => ({
-          headers: {
-            Authorization: 'Bearer ' + input!.apiKey,
-            'X-Orca-Session-Id': input!.sessionId,
-          },
-        }),
-      });
+        });
+      } else {
+        nativeProvider = provider;
+        managedPi = registerManagedPi(ctx, provider, input.model);
+      }
       const options = {
-        provider: 'orca-deepseek',
+        provider: nativeProvider,
         model: input.model,
         ...(input.effort ? { reasoningEffort: ReasoningEffortId(input.effort) } : {}),
       };
@@ -654,15 +679,15 @@ export function apply(ctx: Context): void {
         throw new Error('DSH tree incomplete or terminal usage unavailable');
       const total = zero();
       for (const value of usage.values())
-        for (const key of Object.keys(total) as Array<keyof SdkTerminalUsage>)
-          total[key]! += value.counts[key] ?? 0;
+        for (const key of Object.keys(value.counts) as Array<keyof SdkTerminalUsage>)
+          total[key] = (total[key] ?? 0) + (value.counts[key] ?? 0);
       assertSdkTerminalUsage(total);
       emit({ type: 'checkpoint', checkpoint: await checkpoint() });
       for (const [id, value] of usage)
         canonical(id, 'model:end', 'span.model_request_end', {
           model_request_start_id: identity(id, 'model:start'),
           model_observation_kind: 'turn_model_summary',
-          provider: 'deepseek',
+          provider: input.modelProvider ?? 'deepseek',
           model: input.model,
           is_error: terminals.get(id) !== 'completed',
           model_usage: {

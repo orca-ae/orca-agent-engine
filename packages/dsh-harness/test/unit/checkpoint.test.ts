@@ -6,6 +6,7 @@ import {
   captureCheckpoint,
   decodeCheckpoint,
   assertDshCheckpointInstructions,
+  assertDshCheckpointModel,
   MAX_STATE_BYTES,
 } from '../../src/checkpoint.js';
 import { MessagesUsage, gatewayBase } from '../../src/transport.js';
@@ -23,6 +24,32 @@ const native = Buffer.from(
   }) + '\n',
 );
 describe('DSH native boundary', () => {
+  it('binds provider/model, accepts only compatible legacy DeepSeek, and separates adapter profiles', () => {
+    const checkpoint = captureCheckpoint(
+      id,
+      'system',
+      { [file]: native },
+      'claude-sonnet-4-6',
+      'anthropic',
+    );
+    expect(() =>
+      assertDshCheckpointModel(checkpoint, 'anthropic', 'claude-sonnet-4-6'),
+    ).not.toThrow();
+    expect(() => assertDshCheckpointModel(checkpoint, 'other', 'claude-sonnet-4-6')).toThrow(
+      'provider/model',
+    );
+    expect(() => assertDshCheckpointModel(checkpoint, 'anthropic', 'claude-opus-4-6')).toThrow(
+      'provider/model',
+    );
+    const legacy = captureCheckpoint(id, 'system', { [file]: native });
+    const manifest = JSON.parse(Buffer.from(legacy.files['orca.json']!, 'base64').toString());
+    delete manifest.provider;
+    legacy.files['orca.json'] = Buffer.from(JSON.stringify(manifest)).toString('base64');
+    expect(() => assertDshCheckpointModel(legacy, 'deepseek', 'deepseek-v4-flash')).not.toThrow();
+    expect(() => assertDshCheckpointModel(legacy, 'anthropic', 'deepseek-v4-flash')).toThrow(
+      'provider/model',
+    );
+  });
   it('round trips native files and pins instructions/version/profile', () => {
     const checkpoint = captureCheckpoint(id, 'system', { [file]: native });
     expect(decodeCheckpoint(checkpoint)[file]).toEqual(native);

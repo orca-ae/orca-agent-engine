@@ -7,6 +7,20 @@ import { expect, it, vi } from 'vitest';
 import { DshSdkWorker } from '../../src/worker.js';
 import { exerciseNativeTree } from '../support/native-tree.js';
 
+it('official Claude adapter preserves scoped refresh, native children and cold restore', async () => {
+  const failures: string[] = [];
+  try {
+    await exerciseNativeTree(
+      (event) => {
+        if (event.type === 'failure') failures.push(event.message);
+      },
+      { provider: 'anthropic', id: 'claude-sonnet-4-6' },
+    );
+  } catch (cause) {
+    throw new Error('Official adapter fixture: ' + failures.join('; '), { cause });
+  }
+}, 45000);
+
 it('published DSH runs parallel spawn/fork, control, scoped tools and a cold native tree', async () => {
   const timeout = vi.spyOn(AbortSignal, 'timeout');
   try {

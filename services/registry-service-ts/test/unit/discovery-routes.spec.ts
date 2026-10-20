@@ -100,7 +100,10 @@ describe('discovery', () => {
     expect(entries[4]).toMatchObject({
       provider: 'dsh-sdk',
       modes: ['colocated'],
-      models: [expect.objectContaining({ provider: 'deepseek', id: 'deepseek-v4-flash' })],
+      models: expect.arrayContaining([
+        expect.objectContaining({ provider: 'deepseek', id: 'deepseek-v4-flash' }),
+        expect.objectContaining({ provider: 'anthropic', id: 'claude-sonnet-4-6' }),
+      ]),
       capabilities: { native_resume: true },
     });
   });

@@ -1,7 +1,33 @@
 // Copyright The Orca Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { assertSdkTerminalUsage, type SdkTerminalUsage } from '@orca/sdk-harness';
+import {
+  assertSdkTerminalUsage,
+  validatedProviderFetch,
+  type SdkTerminalUsage,
+} from '@orca/sdk-harness';
+
+export function assertDshProtocol(api: string): void {
+  if (
+    ![
+      'anthropic-messages',
+      'openai-completions',
+      'openai-responses',
+      'google-generative-ai',
+    ].includes(api)
+  )
+    throw new Error('DSH managed transport/usage is not integrated for protocol ' + api);
+}
+
+interface ManagedCredentials {
+  origin: string;
+  token: string;
+  sessionId: string;
+  provider?: string;
+  api?: string;
+  baseUrl?: string;
+  model?: string;
+}
 
 const count = (value: unknown): number => {
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0)
@@ -75,13 +101,94 @@ export function gatewayBase(origin: string | undefined): string {
 
 /** Installed only in the private DSH child; preserves bytes and the native serializer. */
 export function installManagedFetch(
-  credentials: () => { origin: string; token: string; sessionId: string },
+  credentials: () => ManagedCredentials,
   completed: (usage: SdkTerminalUsage, nativeSessionId: string) => void,
   started?: (nativeSessionId: string) => void,
 ): () => void {
   const original = globalThis.fetch;
   globalThis.fetch = async (input, init) => {
     const auth = credentials();
+    if (auth.provider) {
+      assertDshProtocol(auth.api!);
+      const request = new Request(input, init);
+      const upstream = new URL(auth.baseUrl!);
+      const url = new URL(request.url);
+      const prefix = upstream.pathname.replace(/[/]$/, '');
+      const suffix = url.pathname.slice(prefix.length);
+      const endpoint =
+        auth.api === 'anthropic-messages'
+          ? ['/v1/messages', '/messages']
+          : auth.api === 'openai-responses'
+            ? ['/responses']
+            : auth.api === 'openai-completions'
+              ? ['/chat/completions']
+              : [];
+      const google =
+        auth.api === 'google-generative-ai' &&
+        suffix.startsWith('/models/') &&
+        suffix.endsWith(':streamGenerateContent');
+      if (
+        request.method !== 'POST' ||
+        url.origin !== upstream.origin ||
+        !url.pathname.startsWith(prefix + '/') ||
+        (!endpoint.includes(suffix) && !google)
+      )
+        throw new Error('DSH unmanaged network request rejected');
+      if (!auth.token) throw new Error('DSH scoped credentials unavailable');
+      const body = await request.arrayBuffer();
+      if (body.byteLength > 32 * 1024 * 1024) throw new Error('DSH request exceeds limit');
+      try {
+        const matches = google
+          ? decodeURIComponent(suffix) === '/models/' + auth.model + ':streamGenerateContent'
+          : JSON.parse(new TextDecoder().decode(body))?.model === auth.model;
+        if (!matches) throw new Error('model mismatch');
+      } catch {
+        throw new Error('DSH request model is invalid or differs from pinned Agent');
+      }
+      const headers = new Headers(request.headers);
+      const id = headers.get('x-deepseek-harness-session-id');
+      if (!id) throw new Error('DSH native request identity unavailable');
+      headers.delete('x-deepseek-harness-session-id');
+      for (const name of [
+        'authorization',
+        'proxy-authorization',
+        'x-api-key',
+        'api-key',
+        'x-goog-api-key',
+        'cookie',
+        'host',
+      ])
+        headers.delete(name);
+      headers.set('Authorization', 'Bearer ' + auth.token);
+      headers.set('X-Orca-Session-Id', auth.sessionId);
+      for (const name of [...url.searchParams.keys()]) {
+        if (!['alt', 'beta'].includes(name)) url.searchParams.delete(name);
+      }
+      const target = new URL(gatewayBase(auth.origin));
+      target.pathname = '/v1/proxy/' + auth.provider + url.pathname;
+      target.search = url.search;
+      started?.(id);
+      return validatedProviderFetch(
+        auth.api!,
+        async () => {
+          const response = await original(target, {
+            method: 'POST',
+            headers,
+            body,
+            signal: request.signal,
+            redirect: 'error',
+          });
+          if (
+            !response.ok ||
+            !response.body ||
+            !response.headers.get('content-type')?.includes('text/event-stream')
+          )
+            throw new Error('DSH managed model request did not return a successful stream');
+          return response;
+        },
+        (usage) => completed(usage, id),
+      )(request);
+    }
     if (typeof init?.body === 'string' && Buffer.byteLength(init.body) > 32 * 1024 * 1024)
       throw new Error('DSH Messages request exceeds limit');
     const request = new Request(input, init);
@@ -93,6 +200,7 @@ export function installManagedFetch(
     const headers = new Headers(request.headers);
     const nativeSessionId = headers.get('x-deepseek-harness-session-id');
     if (!nativeSessionId) throw new Error('DSH native request identity unavailable');
+    headers.delete('x-deepseek-harness-session-id');
     started?.(nativeSessionId);
     headers.delete('x-api-key');
     headers.set('Authorization', `Bearer ${auth.token}`);

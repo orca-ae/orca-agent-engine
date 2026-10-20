@@ -3,6 +3,7 @@
 
 /** Provider selection for the shared real-model E2E scenarios. */
 const harness = process.env['ORCA_E2E_AGENT_HARNESS'] ?? 'claude_agent_sdk';
+const dshProvider = process.env['ORCA_E2E_SANDBOX_HARNESS_PROVIDER'] ?? 'deepseek';
 if (!['claude_agent_sdk', 'codex_sdk', 'pi_sdk', 'dsh_sdk'].includes(harness)) {
   throw new Error(`Unsupported ORCA_E2E_AGENT_HARNESS: ${harness}`);
 }
@@ -14,7 +15,10 @@ export const REAL_AGENT = {
     harness === 'codex_sdk'
       ? { provider: 'openai', id: 'gpt-5.4', effort: 'low' }
       : harness === 'dsh_sdk'
-        ? { provider: 'deepseek', id: 'deepseek-v4-flash' }
+        ? {
+            provider: dshProvider,
+            id: process.env['ORCA_E2E_SANDBOX_HARNESS_MODEL'] ?? 'deepseek-v4-flash',
+          }
         : {
             provider: 'anthropic',
             id: harness === 'pi_sdk' ? 'claude-sonnet-4-6' : 'claude-sonnet-4-5-20250929',
@@ -23,7 +27,7 @@ export const REAL_AGENT = {
   metadata: harness === 'dsh_sdk' ? { harness, mode: 'colocated' } : { harness },
   keyVariable:
     harness === 'dsh_sdk'
-      ? 'DEEPSEEK_API_KEY'
+      ? dshProvider.replaceAll('-', '_').toUpperCase() + '_API_KEY'
       : harness === 'codex_sdk'
         ? 'OPENAI_API_KEY'
         : 'ANTHROPIC_API_KEY',
@@ -35,7 +39,9 @@ export function requireRealAgentKey(): void {
   if (!process.env[REAL_AGENT.keyVariable]) {
     if (harness === 'dsh_sdk')
       throw new Error(
-        'DSH live smoke requires a local stack with DEEPSEEK_API_KEY configured in its Gateway, or ORCA_BASE_URL and ORCA_API_KEY for a pre-provisioned DSH stack. Missing prerequisites fail rather than skip.',
+        'DSH live smoke requires ' +
+          REAL_AGENT.keyVariable +
+          ' configured in its local Gateway, or ORCA_BASE_URL and ORCA_API_KEY for a pre-provisioned stack. Missing prerequisites fail rather than skip.',
       );
     throw new Error(
       `Layer B ${REAL_AGENT.harness} requires ${REAL_AGENT.keyVariable} in the test and harness environments. ` +

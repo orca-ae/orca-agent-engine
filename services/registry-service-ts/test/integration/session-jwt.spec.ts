@@ -200,72 +200,75 @@ describe('session JWT mint (integration)', () => {
     }
   });
 
-  it('pins Pi native route and model grants to the effective persisted provider', async () => {
-    const { db } = await getTestDb();
-    const piApp = buildCombinedTestApp({
-      db,
-      oidc: { allowedIssuers: [], audience: 'orca-managed-agents' },
-      store: buildStubStore(),
-      sse: STUB_SSE_CONFIG,
-      jwtMinter: buildTestJwtMinter(),
-      sessionJwtLlmPolicy: {
-        routes: ['llm-responses', 'llm-messages', 'llm-pi-anthropic-anthropic-messages'],
-        models: ['claude-*', 'gpt-*', 'deepseek-*'],
-      },
-      fileStore: buildStubFileStore(),
-    });
-    await piApp.listen({ host: '127.0.0.1', port: 0 });
-    try {
-      const url = `http://127.0.0.1:${(piApp.server.address() as AddressInfo).port}`;
-      const ws = uniqueWorkspace('pi_native_scope');
-      const apiKey = await createTestApiKey(db, ws);
-      const created = await fetch(`${url}/v1/agents`, {
-        method: 'POST',
-        headers: { 'x-api-key': apiKey, 'content-type': 'application/json' },
-        body: JSON.stringify({
-          name: 'Pi scoped route',
-          model: { provider: 'anthropic', id: 'claude-sonnet-4-6' },
-          metadata: { harness: 'pi_sdk' },
-          tools: [],
-        }),
+  it.each(['pi_sdk', 'dsh_sdk'] as const)(
+    'pins %s native route and model grants to the effective persisted provider',
+    async (harness) => {
+      const { db } = await getTestDb();
+      const piApp = buildCombinedTestApp({
+        db,
+        oidc: { allowedIssuers: [], audience: 'orca-managed-agents' },
+        store: buildStubStore(),
+        sse: STUB_SSE_CONFIG,
+        jwtMinter: buildTestJwtMinter(),
+        sessionJwtLlmPolicy: {
+          routes: ['llm-responses', 'llm-messages', 'llm-pi-anthropic-anthropic-messages'],
+          models: ['claude-*', 'gpt-*', 'deepseek-*'],
+        },
+        fileStore: buildStubFileStore(),
       });
-      expect(created.status).toBe(200);
-      const sessionId = await createTestSession(
-        url,
-        apiKey,
-        ((await created.json()) as { id: string }).id,
-      );
-      const mint = () =>
-        fetch(`${url}/internal/v1/workspaces/${ws}/sessions/${sessionId}/mint-jwt`, {
+      await piApp.listen({ host: '127.0.0.1', port: 0 });
+      try {
+        const url = `http://127.0.0.1:${(piApp.server.address() as AddressInfo).port}`;
+        const ws = uniqueWorkspace('pi_native_scope');
+        const apiKey = await createTestApiKey(db, ws);
+        const created = await fetch(`${url}/v1/agents`, {
           method: 'POST',
-          headers: { 'content-type': 'application/json' },
+          headers: { 'x-api-key': apiKey, 'content-type': 'application/json' },
           body: JSON.stringify({
-            llm_routes: ['llm-responses'],
-            model: { provider: 'openai', id: 'gpt-5.4' },
+            name: 'Pi scoped route',
+            model: { provider: 'anthropic', id: 'claude-sonnet-4-6' },
+            metadata: { harness },
+            tools: [],
           }),
         });
-      const response = await mint();
-      expect(response.status).toBe(200);
-      const pub = await importSPKI(PUBLIC_PEM, 'RS256');
-      const { payload } = await jwtVerify(
-        ((await response.json()) as { token: string }).token,
-        pub,
-        { audience: 'ai-gateway' },
-      );
-      expect(payload['llm_routes']).toEqual(['llm-pi-anthropic-anthropic-messages']);
-      expect(payload['llm_models']).toEqual(['claude-sonnet-4-6']);
-      expect(payload.exp! - payload.iat!).toBe(660);
-      await db
-        .update(sessions)
-        .set({ agentOverrides: { model: { provider: 'deepseek', id: 'deepseek-flash' } } })
-        .where(and(eq(sessions.workspaceId, ws), eq(sessions.id, sessionId)));
-      const denied = await mint();
-      expect(denied.status).toBe(403);
-      expect(await denied.text()).toContain('llm-pi-deepseek-openai-completions');
-    } finally {
-      await piApp.close();
-    }
-  });
+        expect(created.status).toBe(200);
+        const sessionId = await createTestSession(
+          url,
+          apiKey,
+          ((await created.json()) as { id: string }).id,
+        );
+        const mint = () =>
+          fetch(`${url}/internal/v1/workspaces/${ws}/sessions/${sessionId}/mint-jwt`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              llm_routes: ['llm-responses'],
+              model: { provider: 'openai', id: 'gpt-5.4' },
+            }),
+          });
+        const response = await mint();
+        expect(response.status).toBe(200);
+        const pub = await importSPKI(PUBLIC_PEM, 'RS256');
+        const { payload } = await jwtVerify(
+          ((await response.json()) as { token: string }).token,
+          pub,
+          { audience: 'ai-gateway' },
+        );
+        expect(payload['llm_routes']).toEqual(['llm-pi-anthropic-anthropic-messages']);
+        expect(payload['llm_models']).toEqual(['claude-sonnet-4-6']);
+        expect(payload.exp! - payload.iat!).toBe(660);
+        await db
+          .update(sessions)
+          .set({ agentOverrides: { model: { provider: 'deepseek', id: 'deepseek-flash' } } })
+          .where(and(eq(sessions.workspaceId, ws), eq(sessions.id, sessionId)));
+        const denied = await mint();
+        expect(denied.status).toBe(403);
+        expect(await denied.text()).toContain('llm-pi-deepseek-openai-completions');
+      } finally {
+        await piApp.close();
+      }
+    },
+  );
 
   it('returns a Session-scoped Registry guardrail bundle and rejects mismatched scope', async () => {
     const { db } = await getTestDb();

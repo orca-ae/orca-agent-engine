@@ -3,6 +3,7 @@
 
 export * from './wire.js';
 export * from './usage.js';
+export * from './provider-usage.js';
 export * from './custom-tool-result.js';
 
 export * from './credentials.js';

@@ -148,6 +148,9 @@ importers:
       '@deepseek-ai/dsh-llm-deepseek':
         specifier: 0.2.1-alpha.2
         version: 0.2.1-alpha.2(npe7fxoxewdpartibpaa4mfd7a)
+      '@deepseek-ai/dsh-llm-pi-ai':
+        specifier: 0.2.1-alpha.2
+        version: 0.2.1-alpha.2(ewu5mfknejyvwqvm7h3vtiwhuy)
       '@deepseek-ai/dsh-sdk-protocol':
         specifier: 0.2.1-alpha.2
         version: 0.2.1-alpha.2(@deepseek-ai/cordis@4.0.5-alpha.1)(@deepseek-ai/dsh-llm@0.2.1-alpha.2(@deepseek-ai/cordis@4.0.5-alpha.1))(@deepseek-ai/dsh-session@0.2.1-alpha.2(@deepseek-ai/cordis@4.0.5-alpha.1)(@deepseek-ai/dsh-scope@0.2.1-alpha.2(@deepseek-ai/cordis@4.0.5-alpha.1)))(@deepseek-ai/dsh-subagent@0.2.1-alpha.2(dnmxhtt5waq44jqdoiasptiazi))
@@ -190,6 +193,12 @@ importers:
       '@deepseek-ai/dsh-working-directory':
         specifier: 0.2.1-alpha.2
         version: 0.2.1-alpha.2(ymoy3ym3anaj2jw5pgj6fmnrd4)
+      '@earendil-works/pi-ai':
+        specifier: 1.1.0
+        version: 1.1.0(@aws-sdk/credential-provider-node@3.972.83)(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(@smithy/signature-v4@5.7.3)(undici@8.10.2)(ws@8.22.0)(zod@4.4.3)
+      '@orca/harness-catalog':
+        specifier: workspace:*
+        version: link:../harness-catalog
       '@orca/sdk-harness':
         specifier: workspace:*
         version: link:../sdk-harness

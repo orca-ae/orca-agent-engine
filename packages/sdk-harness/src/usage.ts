@@ -1,7 +1,7 @@
 // Copyright The Orca Authors
 // SPDX-License-Identifier: Apache-2.0
 
-/** Complete raw SDK counters, before converting total input into uncached input. */
+/** Input includes cache reads but excludes cache writes, which have their own bucket. */
 export interface SdkTerminalUsage {
   input_tokens: number;
   output_tokens: number;

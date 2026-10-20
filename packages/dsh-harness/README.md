@@ -6,11 +6,23 @@ Implements `SdkWorker`; the shared host adapter owns tools, approvals, usage and
 `DshSdkWorker` starts a private named profile with the published DSH CLI. The profile loads
 `@orca/dsh-harness/plugin`, not the default DSH application or native executable tools.
 Gateway Bearer credentials and the Orca Session header are refreshed through the worker API.
-The only model is `deepseek-v4-flash`.
+Agent model.provider/id select from all chat models bundled with the official
+DSH llm-pi-ai plugin 0.2.1-alpha.2 and its pinned pi-ai 1.1.0 dependency. The
+legacy deepseek/deepseek-v4-flash adapter and route remain unchanged. Other selections
+use the official PiAiAdapter with managed transport. The catalog includes model
+identity and effort support; it does not grant access or prove protocol integration.
+Managed transport and raw usage support anthropic-messages, openai-completions,
+openai-responses and google-generative-ai. Other catalog protocols fail before inference.
+Provider credentials stay in Gateway; no native login or ambient auth is enabled.
+
+Host usage input includes cache reads but excludes cache writes, which are reported in their
+own bucket. OpenAI-style totals are reduced by cache writes before host conversion;
+Anthropic input and cache reads are combined without adding its separate cache-write count.
+Native session headers correlate usage locally and are removed before requests reach Gateway.
 
 Each submit requires the accepted root `sourceEventId` (`evt_…`); optional `threadId` addresses
 a native child UUID. The reviewed profile provides native in-process `spawn`, `fork`,
-`send_message` and `interrupt_agent`. Fresh child scopes explicitly receive the same fixed model
+`send_message` and `interrupt_agent`. Fresh child scopes explicitly receive the same pinned provider/model
 and Orca tool wrappers. Model/cwd/grant overrides and external backends are rejected. Native
 `tools/pre-execute` sends `orca.authorize` for each orchestration operation before native side
 effects. The worker forwards `orchestration_request` and parks until the host returns
@@ -62,8 +74,10 @@ requests have validated terminal usage.
 
 Native tree checkpoints preserve reachable conversation history up to 16 MiB decoded and
 129 files including the compatibility manifest. The codec validates native catalogs, own fork
-suffixes and lineage; unrelated sessions and missing descendants are rejected. Profile identity
-`orca-managed-tree-v2` explicitly rejects earlier root-only checkpoints without migration. They do not
+suffixes and lineage; unrelated sessions and missing descendants are rejected. The legacy DeepSeek profile is orca-managed-tree-v2; official-adapter checkpoints use
+a profile tied to the pinned pi-ai version. Both bind provider/model and reject cross-model
+restore. Legacy DeepSeek manifests without provider restore only as the original fixed model.
+Earlier root-only checkpoints are rejected without migration. They do not
 back up the workspace or background processes. `assertDshCheckpointInstructions` validates the
 runtime/profile identity and fixed Agent instructions before restore.
 
@@ -72,6 +86,7 @@ Build before running the small named-profile fixture, which uses a local HTTP mo
 ```sh
 pnpm --filter @orca/dsh-harness... build
 pnpm -F @orca/dsh-harness test
+node packages/dsh-harness/scripts/generate-catalog.mjs --check
 ```
 
 The production image retains `dist/`, `profile/` and runtime dependencies. No package installation
