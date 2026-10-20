@@ -752,6 +752,70 @@ Two conditions would reopen the design rather than just the implementation:
 
 This is the same shape as the `/v1/environments/{id}/work*` family above; the two should stay in step.
 
+## Designed, not built — embedded / zero-infrastructure engine
+
+Both `examples/laptop-agent` modes use an engine backed by Postgres and object storage;
+the local mode starts Postgres and RustFS with Docker. `registry-service-ts/src/main.ts`
+wires `S3BlobStore` and four Postgres pools
+unconditionally, and there is no `--database-uri` and no SQLite. A comparable meta-harness
+gets a zero-dependency local mode by pointing the same server at `sqlite:///<tmpdir>`, so
+the client never learns whether the engine is local or shared.
+
+`@orca/file-store` already ships in-memory blob and metadata backends, and the integration
+suites already construct `buildApp` with them, so the missing piece is a selectable profile
+rather than new storage code. The four Drizzle migration sets are the real work.
+
+**Trigger:** when we want `npx`-grade onboarding for the examples, or a CI job that
+exercises the public API with no services running.
+
+## Colocated parity gaps the e2e suite pins
+
+`packages/e2e-tests/test/self-hosted-capabilities.spec.ts` covers the Claude runner path
+against the capabilities the `separate` suite establishes. Resource, output and accounting
+assertions remain commented out pending the capabilities described below. Additional
+parity scenarios are listed under [Colocated coverage the minimal stack cannot reach](#colocated-coverage-the-minimal-stack-cannot-reach).
+
+**The legacy Claude runner sandbox has no `/mnt` resource tree.** A read of an attached resource
+returns "File does not exist", and a write beneath it returns
+`EROFS: read-only file system, mkdir '/mnt'`. Two capabilities follow from that one
+cause:
+
+- **Session resources are not materialized.** A `resources: [{ type: 'file', … }]`
+  binding on a colocated session never reaches the sandbox, and no
+  `session.resource_mounted` event is emitted. Covered on `separate` by
+  `real-agent-loop.spec.ts` scenario 1 and on the retired in-sandbox path by
+  `sandbox-harness-agent.spec.ts`.
+- **Output capture does not happen.** Nothing can be written to
+  `/mnt/session/outputs/`, so no file is ever indexed as a scoped session output.
+
+**Session usage is not rolled up.** The runner emits `agent.usage` with real numbers
+(`input_tokens: 18, output_tokens: 269` in a sample run), but the registry does not
+aggregate it into the session's own `usage` on this path, so the roll-up stays zero.
+
+**`agent.usage` leaks into the public event list.** On `separate` it is filtered out of
+`GET /v1/sessions/:id/events` as a runtime-only accounting signal; on the colocated path
+it is returned to clients, carrying token counts and cache statistics. This one is a
+disclosure difference rather than a missing feature.
+
+**Trigger:** resource materialization and output capture gate any colocated workload that
+consumes attached files or produces artifacts — most real ones. The usage roll-up gates
+per-session cost attribution. The leak should be closed whenever the event projection is
+next touched.
+
+## Colocated coverage the minimal stack cannot reach
+
+The self-hosted stack is Postgres + RustFS by design, which puts four further parity items
+out of reach without growing it. Recorded so they are deferrals rather than oversights:
+
+- **Remote MCP through ai-gateway.** No gateway in this stack. `ai-gateway-mcp.spec.ts`
+  proves the gateway with a hand-minted JWT; nothing proves a *colocated runner* mints one
+  and drives it. **Trigger:** when the colocated path is expected to reach remote MCP.
+- **Cron triggers on a colocated agent.** Whether the distributor routes trigger-created
+  sessions in colocated mode is unverified, and worth answering before a test is written.
+- **Workspace archive tears down the runner.** The `separate` assertion reads
+  harness-server's `/metrics` active-session gauge; colocated needs a different observable.
+- **`github_repository` resource clone.** Needs `GITHUB_TOKEN` and network egress.
+
 ## Known limitations
 
 Present behavior a user or operator could be surprised by. These describe today's code — the
@@ -774,7 +838,6 @@ corresponding design docs state the same behavior without promising a fix.
   as PDF fail explicitly. Supporting them requires workspace-scoped File-store
   resolution, bounded URL fetching through approved egress, and an explicit binary
   document conversion contract. Trigger: a workload requiring those source formats.
-
 - The separate Claude SDK runtime exposes custom tools only for the primary
   agent. Coordinator subagent snapshots do not carry `custom_tools`, so child
   agents cannot initiate the `agent.custom_tool_use` /

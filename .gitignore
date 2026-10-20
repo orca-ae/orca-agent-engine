@@ -18,6 +18,7 @@ pnpm-debug.log*
 node_modules
 dist/
 coverage/
+.artifacts/
 .turbo/
 .cache/
 *.tsbuildinfo

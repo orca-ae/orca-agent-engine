@@ -1,0 +1,276 @@
+# Copyright The Orca Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# Colocated (self_hosted) end-to-end suite.
+#
+# The path this exercises — registry → environment-worker → session-runner →
+# single-writer bridge → SSE — had a spec, a start script, a compose file and two
+# Makefile targets, and nothing ran any of it. This is that job.
+#
+# Two suites, split by what they REQUIRE rather than by what they cover:
+#
+#   self-hosted-e2e       the `mock` provider. Deterministic, LLM-free, no secret.
+#                         ~2 minutes. This is the one that should gate merges.
+#   self-hosted-e2e-real  the capability suite. Needs a real model credential, so it
+#                         is label-gated like `e2e-stack` and skips on fork PRs.
+#
+# When this runs:
+#   push to main      every merged commit
+#   pull_request      when `changed-areas.sh` says the stack is affected; the real
+#                     suite additionally needs the `run-e2e` label
+#   schedule          03:30 UTC daily, so a break landing between merges surfaces
+#                     within a day rather than at the next stack PR
+#   workflow_dispatch any ref, on demand
+#
+# Gating is by job-level `if:`, never a `paths:` filter on `on:`. A job skipped by
+# `if:` reports SUCCESS; a workflow skipped by a trigger filter never reports at all,
+# so a required check would sit Pending forever and the PR could never merge.
+#
+name: self-hosted-e2e
+
+on:
+  push:
+    branches: [main]
+  # Naming `types:` discards the defaults, so the first three are restated. `labeled`
+  # is here so applying `run-e2e` to an open PR triggers a run rather than requiring a
+  # new push.
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+  schedule:
+    - cron: '30 3 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: self-hosted-e2e-${{ github.ref }}
+  # Never cancel a main or scheduled run: those are the ones whose result is a record.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      stack: ${{ steps.areas.outputs.stack }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # changed-areas.sh diffs against the merge base; a shallow clone has none.
+          fetch-depth: 0
+      - id: areas
+        run: bash .github/scripts/changed-areas.sh
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+
+  # The always-on gate. No credential, no gateway, no Kind, no broker.
+  self-hosted-e2e:
+    runs-on: ubuntu-latest
+    needs: changes
+    timeout-minutes: 25
+    # `!= 'false'` rather than `== 'true'`: an unset output means the filter itself
+    # broke, and the safe answer is to run.
+    if: ${{ !cancelled() && needs.changes.outputs.stack != 'false' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: bufbuild/buf-action@v1
+        with:
+          setup_only: true
+
+      - name: Install OS prerequisites
+        # start-self-hosted.sh probes all three registry ports with lsof before binding.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lsof
+
+      - name: pnpm install
+        run: bash .github/scripts/pnpm-install-with-retry.sh
+
+      - name: pnpm proto:gen
+        run: pnpm proto:gen
+
+      - name: Pre-create the compose bind-mount dirs
+        # These do not exist before `docker compose up` on a fresh runner, so Docker
+        # creates them root-owned. Postgres and RustFS write through the mounts and both
+        # crash with "Permission denied".
+        run: |
+          mkdir -p services/dev/data/self-hosted/postgres services/dev/data/self-hosted/rustfs
+          chmod -R 777 services/dev/data/self-hosted
+
+      - name: Bring up the self-hosted stack
+        # The script builds the workspace and applies migrations itself, so there is no
+        # separate build step here.
+        run: bash services/dev/scripts/start-self-hosted.sh
+
+      - name: Run the colocated plumbing suite (mock provider)
+        run: |
+          mkdir -p .artifacts/self-hosted
+          pnpm e2e:self-hosted --reporter=default --reporter=junit --outputFile=../../.artifacts/self-hosted/junit.xml
+
+      - name: Collect stack logs
+        if: always()
+        run: |
+          mkdir -p .artifacts/self-hosted
+          bash .github/scripts/dump-self-hosted-logs.sh > .artifacts/self-hosted/stack.log 2>&1
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: self-hosted-plumbing-${{ github.run_attempt }}
+          path: .artifacts/self-hosted/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Tear down
+        if: always()
+        run: bash services/dev/scripts/stop-self-hosted.sh || true
+
+  # The capability suite. Needs a real model credential, which on a fork PR resolves to
+  # the empty string — so the spec's hard-fail would fire. Hence the label gate: this
+  # runs when someone has asked for it, or on main/schedule where the secret is present.
+  self-hosted-e2e-real:
+    runs-on: ubuntu-latest
+    needs: changes
+    timeout-minutes: 40
+    if: >-
+      ${{ !cancelled()
+      && needs.changes.outputs.stack != 'false'
+      && (github.event_name != 'pull_request'
+          || (github.event.pull_request.head.repo.full_name == github.repository
+              && contains(github.event.pull_request.labels.*.name, 'run-e2e'))) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: bufbuild/buf-action@v1
+        with:
+          setup_only: true
+
+      - name: Install OS prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lsof
+
+      - name: pnpm install
+        run: bash .github/scripts/pnpm-install-with-retry.sh
+
+      - name: pnpm proto:gen
+        run: pnpm proto:gen
+
+      - name: Pre-create the compose bind-mount dirs
+        run: |
+          mkdir -p services/dev/data/self-hosted/postgres services/dev/data/self-hosted/rustfs
+          chmod -R 777 services/dev/data/self-hosted
+
+      - name: Bring up the self-hosted stack with a real credential
+        # The key must be present when the stack STARTS, not just when the spec runs:
+        # the worker forwards an allowlist to the runner, so a key exported later never
+        # reaches the provider.
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          test -n "$ANTHROPIC_API_KEY" || { echo "::error::ANTHROPIC_API_KEY is required for the capability baseline"; exit 1; }
+          export ORCA_RUNNER_ENV_PASSTHROUGH=ANTHROPIC_API_KEY
+          bash services/dev/scripts/start-self-hosted.sh
+
+      - name: Run the colocated capability suite
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          mkdir -p .artifacts/self-hosted
+          pnpm e2e:self-hosted:real --reporter=default --reporter=junit --outputFile=../../.artifacts/self-hosted/junit.xml
+
+      - name: Collect stack logs
+        if: always()
+        run: |
+          mkdir -p .artifacts/self-hosted
+          bash .github/scripts/dump-self-hosted-logs.sh > .artifacts/self-hosted/stack.log 2>&1
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: self-hosted-capabilities-${{ github.run_attempt }}
+          path: .artifacts/self-hosted/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Tear down
+        if: always()
+        run: bash services/dev/scripts/stop-self-hosted.sh || true
+
+  # One expectation derived from context, checked against every suite.
+  #
+  # Accepting "success or skipped" per job would be wrong: a job that times out records
+  # as `cancelled`, which is neither, and a job whose `needs` failed records as
+  # `skipped` — so a per-job either/or reports green over a run that proved nothing.
+  self-hosted-e2e-summary:
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [changes, self-hosted-e2e, self-hosted-e2e-real]
+    steps:
+      - name: Check every suite against one expectation
+        env:
+          EVENT: ${{ github.event_name }}
+          LABELED: ${{ contains(github.event.pull_request.labels.*.name, 'run-e2e') }}
+          SAME_REPO: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+          CHANGES: ${{ needs.changes.result }}
+          STACK: ${{ needs.changes.outputs.stack }}
+          MOCK: ${{ needs.self-hosted-e2e.result }}
+          REAL: ${{ needs.self-hosted-e2e-real.result }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$CHANGES" == "success" && "$STACK" == "false" ]]; then
+            expect_mock=skipped
+            echo "changed-areas said the stack is unaffected; both suites must be skipped."
+          else
+            expect_mock=success
+            echo "stack affected (or the filter was unavailable); the mock suite must pass."
+          fi
+
+          # The real suite has the mock suite's expectation plus the label gate.
+          expect_real="$expect_mock"
+          if [[ "$expect_real" == "success" && "$EVENT" == "pull_request" ]] &&
+             [[ "$LABELED" != "true" || "$SAME_REPO" != "true" ]]; then
+            expect_real=skipped
+            echo "fork or pull_request without run-e2e; the capability suite must be skipped."
+          fi
+
+          failed=0
+          check() {
+            if [[ "$2" == "$3" ]]; then
+              echo "ok: $1 = $2"
+            else
+              echo "::error::$1 = $2 (expected $3)"
+              failed=1
+            fi
+          }
+          check "colocated plumbing (mock)" "$MOCK" "$expect_mock"
+          check "colocated capabilities (real)" "$REAL" "$expect_real"
+          [[ $failed -eq 0 ]] || exit 1
+
+  # Deliberately NOT in the summary's `needs:` — it would be measured against `expect`
+  # and would break the very verdict it reports on.
+  notify-failure:
+    needs: self-hosted-e2e-summary
+    if: >-
+      ${{ always()
+      && needs.self-hosted-e2e-summary.result == 'failure'
+      && github.event_name != 'pull_request' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/notify-slack-failure
+        with:
+          webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}

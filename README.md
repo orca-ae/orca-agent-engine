@@ -70,6 +70,12 @@ pnpm e2e:self-hosted
 make self-hosted-down
 ```
 
+The laptop example in [examples/laptop-agent](examples/laptop-agent/) uses the same client against
+this local engine or a shared engine with your laptop attached as its environment. The
+[self-hosted-e2e workflow](.github/workflows/self-hosted-e2e.yml) runs mock-provider plumbing on
+stack changes and real-model capabilities on main, nightly, on demand, and on same-repository PRs
+carrying the run-e2e label. Each suite uploads its test report and stack logs for 14 days.
+
 ### Run the full stack
 
 `make stack-up` starts Postgres, Kafka, RustFS and the AI gateway in Docker, builds the workspace,

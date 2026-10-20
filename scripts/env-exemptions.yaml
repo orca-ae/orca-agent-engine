@@ -107,6 +107,21 @@ exemptions:
   # regex collects because they are SCREAMING_SNAKE in backticks.
   # ---------------------------------------------------------------------------
 
+  - name: ORCA_SELF_HOSTED_ENVIRONMENT_KEY
+    reason: not-an-env-var
+    note: >-
+      A KEY INSIDE services/dev/run/self-hosted.env, not a variable anything reads from the
+      environment. start-self-hosted.sh writes the file so the Env Key -- echoed exactly once
+      at create and never recoverable -- survives the run that minted it; a human or a
+      hand-started worker reads it back. Documented in local-stack.md because an operator who
+      opens that file needs to know which of its four values are credentials.
+
+  - name: ORCA_SELF_HOSTED_ENVIRONMENT_NAME
+    reason: not-an-env-var
+    note: >-
+      Its sibling in the same file: the generated environment name, recorded so a run is
+      recognizable in an environment list. Also written, never read from the environment.
+
   - name: MUST_BE_CORE
     reason: not-an-env-var
     note: >-

@@ -150,9 +150,19 @@ make self-hosted-down
 ```
 
 The registry and the worker stay running behind pid files in `services/dev/run` after the
-command returns — the same posture as `stack-up`. The created environment's id and its
-one-time Env Key are written to `services/dev/run/self-hosted.env` (mode 600); the e2e
-reads the id from there.
+command returns — the same posture as `stack-up`. What the run produced is written to
+`services/dev/run/self-hosted.env`, mode 600 because two of the four are credentials:
+
+| Key                                | What it is                                                                                                 |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `ORCA_SELF_HOSTED_ENVIRONMENT_ID`  | The `target=self_hosted` Environment the worker attached to. A session must name THIS environment to be dispatched. |
+| `ORCA_SELF_HOSTED_ENVIRONMENT_KEY` | Its Env Key, echoed exactly once at create and never recoverable — which is why it is captured here rather than re-read later. |
+| `ORCA_SELF_HOSTED_ENVIRONMENT_NAME`| The generated name, for recognizing it in a list.                                                           |
+| `ORCA_SELF_HOSTED_API_KEY`         | A workspace api key in the same workspace, so a client can drive the stack without seeding its own.         |
+
+The self-hosted specs and [`examples/laptop-agent`](../../examples/laptop-agent/) read
+the environment id and API key from here. Reusing this key avoids rotating the stack's
+bootstrap key when running a suite.
 
 Re-running is safe and mints a **new** Environment each time: an Env Key is echoed exactly
 once at create and never stored, so a previous environment's key cannot be recovered and
@@ -174,6 +184,19 @@ its row cannot be reused.
 here exactly as they do for `stack-up`. All three are pre-flighted before anything starts:
 the registry binds three listeners, and a clash on any of them used to surface as a
 120-second health-check timeout that named no port.
+
+The [self-hosted workflow](../../.github/workflows/self-hosted-e2e.yml) runs
+`pnpm e2e:self-hosted` for mock dispatch, pending work, guardrails and single-writer ordering.
+`pnpm e2e:self-hosted:real` runs the existing tool working-directory and interrupt scenarios
+with `claude_agent_sdk` and requires `ANTHROPIC_API_KEY` when starting the stack and testing it.
+For a locally authenticated Claude CLI, select `ORCA_E2E_COLOCATED_HARNESS=claude_code`.
+Missing credentials fail the capability suite rather than silently skipping it.
+
+Stack-touching PRs run plumbing; same-repository PRs with `run-e2e` also run capabilities.
+Pushes to `main`, the nightly schedule and manual dispatch run capabilities when the stack
+filter selects them. Both jobs upload JUnit results and stack logs, including successful
+runs, as `self-hosted-plumbing-<attempt>` and `self-hosted-capabilities-<attempt>` artifacts
+with 14-day retention. Environment files containing credentials are excluded.
 
 ## Bring-up walkthrough
 

@@ -154,6 +154,13 @@ const CONFIG_SOURCES = [
   'packages/e2e-tests/scripts/kind-helm-e2e.ts',
   'packages/e2e-tests/scripts/run-agent-tests.sh',
   'packages/e2e-tests/src/client.ts',
+  // The laptop-agent example is a CLIENT of the public API, so the only environment
+  // it reads is where the engine is and who it is -- the same two names `oeadm`
+  // reads, documented in its AGENTS.md. Scanned rather than excused so an example
+  // that grows a new knob has to document it like everything else.
+  'examples/laptop-agent/src/local.ts',
+  'examples/laptop-agent/src/shared.ts',
+  'examples/laptop-agent/src/chat.ts',
   'packages/e2e-tests/src/seed.ts',
   'packages/file-store/drizzle.config.ts',
   'packages/memory-store/drizzle.config.ts',
@@ -247,6 +254,7 @@ const DOC_FILES = [
   'services/sandbox-harness/README.md',
   'services/dev/README.md',
   'packages/e2e-tests/README.md',
+  'examples/laptop-agent/README.md',
   'packages/file-store/README.md',
   'packages/memory-store/README.md',
   'packages/skill-store/README.md',
@@ -287,7 +295,7 @@ const DOC_FILES = [
  * is unit-tested. It used to be three separate patterns inline here, and that is
  * how one of them ended up unreachable without anyone noticing.
  */
-const SOURCE_DIRS = ['services', 'packages', 'charts', 'scripts', '.github'];
+const SOURCE_DIRS = ['services', 'packages', 'charts', 'scripts', '.github', 'examples'];
 
 /**
  * Top-level directories deliberately outside the scan, with the reason.
@@ -621,6 +629,9 @@ const SOURCE_FLOORS = {
   'services/sandbox-harness/docker-entrypoint.sh': 1,
   'services/dev/scripts/start-services.sh': 3,
   'services/dev/scripts/test-transcript-avro.sh': 3,
+  'examples/laptop-agent/src/local.ts': 0,
+  'examples/laptop-agent/src/shared.ts': 0,
+  'examples/laptop-agent/src/chat.ts': 0,
   'services/dev/scripts/start-self-hosted.sh': 0,
   'services/dev/scripts/stop-self-hosted.sh': 0,
   'services/dev/scripts/dev-infra-services.sh': 0,

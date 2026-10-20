@@ -25,6 +25,7 @@ packages:
   - 'packages/skill-store'
   - 'packages/transcript-store'
   - 'packages/transcript-store-types'
+  - 'examples/laptop-agent'
 allowBuilds:
   argon2: true
   better-sqlite3: true
