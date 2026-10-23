@@ -61,6 +61,7 @@ export class MessagesUsage {
           throw new Error('Non-cumulative Messages usage');
         this.start[field] = updated;
       }
+      if (raw?.cache_creation !== undefined) this.start.cache_creation = raw.cache_creation;
       const next = count(raw?.output_tokens);
       if (this.output !== undefined && next < this.output)
         throw new Error('Non-cumulative Messages usage');
@@ -73,11 +74,22 @@ export class MessagesUsage {
     if (!this.stopped || !this.start || this.output === undefined)
       throw new Error('DSH Messages terminal usage unavailable');
     const cached = count(this.start.cache_read_input_tokens ?? 0);
+    const cache = this.start.cache_creation as Record<string, unknown> | undefined;
+    const written = count(this.start.cache_creation_input_tokens ?? 0);
+    if (
+      cache?.ephemeral_5m_input_tokens !== undefined &&
+      count(cache.ephemeral_5m_input_tokens) + count(cache.ephemeral_1h_input_tokens ?? 0) !==
+        written
+    )
+      throw new Error('Invalid DSH Messages cache usage');
     const usage = {
       input_tokens: count(this.start.input_tokens) + cached,
       output_tokens: this.output,
       cached_input_tokens: cached,
-      cache_write_input_tokens: count(this.start.cache_creation_input_tokens ?? 0),
+      cache_write_input_tokens: written,
+      ...(cache?.ephemeral_1h_input_tokens !== undefined
+        ? { cache_write_input_tokens_1h: count(cache.ephemeral_1h_input_tokens) }
+        : {}),
     };
     assertSdkTerminalUsage(usage);
     return usage;

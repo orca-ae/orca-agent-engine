@@ -443,6 +443,13 @@ export function toPublicHttpEvent(
     return publicEventFields(publicEvent, ['content', 'from_session_thread_id', 'from_agent_name']);
   }
   if (publicEvent.type === SpanEventKind.modelRequestEnd) {
+    if (
+      isRecord(publicEvent.model_usage) &&
+      'cache_creation_input_tokens_1h' in publicEvent.model_usage
+    ) {
+      const { cache_creation_input_tokens_1h: _oneHour, ...usage } = publicEvent.model_usage;
+      publicEvent.model_usage = usage;
+    }
     delete publicEvent.model_observation_kind;
     delete publicEvent.provider;
     delete publicEvent.model;

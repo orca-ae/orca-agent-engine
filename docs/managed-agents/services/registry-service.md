@@ -73,6 +73,17 @@ Sessions deleted before the bulk reload are omitted, while cursor boundaries sti
 original selected page. The reload preserves the legacy reader's freshness boundary; the
 page and its associations are not a transactionally consistent snapshot.
 
+DSH child Thread list/detail usage reads cumulative self-only `turn_model_summary` facts
+from the unique Session event index, scoped to workspace, Session and exact child subpath.
+Thread list loads all selected child histories in one query, independently of event pagination.
+The public visibility and exact subpath predicates allow the existing event read index to
+narrow child histories. PostgreSQL can still choose a Session scan for large Thread pages;
+reads transfer and validate every matching model fact rather than storing running totals.
+Only original harness-authored model-end facts for the pinned DSH Agent version contribute;
+malformed facts and derived primary projections do not. Replayed event IDs count once. This
+read projection does not update Session usage, budget counters or cost. Other harnesses and
+the active primary Thread retain their existing usage semantics.
+
 `REGISTRY_BATCH_READS_ENABLED` defaults to `true`; `false` restores the per-item readers for
 Agents, Sessions, Threads and Trigger history. It does not change writes or stored data.
 Environment `work_stats` uses one conditional aggregate for its three Session counts, then

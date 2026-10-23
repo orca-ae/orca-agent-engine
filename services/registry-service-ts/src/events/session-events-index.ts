@@ -8,6 +8,9 @@ import {
   AgentRuntimeSignalKind,
   InternalTranscriptEventKind,
   SessionThreadEventKind,
+  SpanEventKind,
+  isAgentEventId,
+  type ModelUsageCounts,
 } from '@orca/agent-event-contract';
 import type { DbClient } from '../persistence/postgres/client.js';
 import {
@@ -116,9 +119,15 @@ export async function indexTranscriptEvents(
       eventToIndexRow(projectedEvent, projectionOrdinal, options.guardrailSubject),
     ),
   );
+  // PostgreSQL cannot update the same conflict target twice in one INSERT.
+  const uniqueIndexRows = [
+    ...new Map(
+      indexRows.map((row) => [JSON.stringify([row.workspaceId, row.sessionId, row.eventId]), row]),
+    ).values(),
+  ];
   await db
     .insert(sessionEventsIndex)
-    .values(indexRows)
+    .values(uniqueIndexRows)
     .onConflictDoUpdate({
       target: [
         sessionEventsIndex.workspaceId,
@@ -265,6 +274,90 @@ export async function nextSessionEventsIndexCursor(
     .limit(1);
   if (!rows[0]) return '';
   return String(rows[0].seq + 1);
+}
+
+/** Read self deltas from unique canonical facts, never from accounting/tree totals. */
+export async function loadDshChildUsage(
+  db: DbClient,
+  workspaceId: string,
+  sessionId: string,
+  subpaths: readonly string[],
+): Promise<Map<string, ModelUsageCounts>> {
+  const paths = subpaths.filter((path) =>
+    /^subagents[/][0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(path),
+  );
+  const totals = new Map<string, ModelUsageCounts>();
+  if (paths.length === 0) return totals;
+  const rows = await db
+    .select({ subpath: sessionEventsIndex.subpath, payload: sessionEventsIndex.payload })
+    .from(sessionEventsIndex)
+    .innerJoin(
+      sessions,
+      and(
+        eq(sessions.workspaceId, sessionEventsIndex.workspaceId),
+        eq(sessions.id, sessionEventsIndex.sessionId),
+      ),
+    )
+    .innerJoin(
+      agentVersions,
+      and(
+        eq(agentVersions.workspaceId, sessions.workspaceId),
+        eq(agentVersions.agentId, sessions.agentId),
+        eq(agentVersions.version, sessions.agentVersion),
+      ),
+    )
+    .where(
+      and(
+        eq(sessionEventsIndex.workspaceId, workspaceId),
+        eq(sessionEventsIndex.sessionId, sessionId),
+        inArray(sessionEventsIndex.subpath, paths),
+        // Model-end facts are public; constrain the existing visibility/subpath index prefix.
+        eq(sessionEventsIndex.visibility, 'public'),
+        eq(sessionEventsIndex.kind, SpanEventKind.modelRequestEnd),
+        eq(sessionEventsIndex.producedBy, 'harness'),
+        eq(sessionEventsIndex.projectionOrdinal, 0),
+        sql`${agentVersions.snapshot}->'metadata'->>'harness' = 'dsh_sdk'`,
+        sql`${sessionEventsIndex.payload}->>'model_observation_kind' = 'turn_model_summary'`,
+      ),
+    );
+  for (const { subpath, payload } of rows) {
+    if (!isRecord(payload) || !isRecord(payload.model_usage)) continue;
+    const usage = payload.model_usage;
+    const oneHour =
+      usage.cache_creation_input_tokens_1h === undefined ? 0 : usage.cache_creation_input_tokens_1h;
+    if (
+      payload.subpath !== subpath ||
+      payload.native_session_id !== subpath.slice('subagents/'.length) ||
+      payload.session_thread_id !== stableSessionThreadId(workspaceId, sessionId, subpath) ||
+      !isAgentEventId(payload.turn_event_id) ||
+      !isAgentEventId(payload.model_request_start_id) ||
+      typeof payload.is_error !== 'boolean' ||
+      ![
+        usage.input_tokens,
+        usage.output_tokens,
+        usage.cache_read_input_tokens,
+        usage.cache_creation_input_tokens,
+        oneHour,
+      ].every((count) => typeof count === 'number' && Number.isSafeInteger(count) && count >= 0) ||
+      (oneHour as number) > (usage.cache_creation_input_tokens as number)
+    )
+      continue;
+    const total = totals.get(subpath) ?? {
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0,
+      cache_creation_input_tokens_1h: 0,
+    };
+    total.input_tokens += usage.input_tokens as number;
+    total.output_tokens += usage.output_tokens as number;
+    total.cache_read_input_tokens += usage.cache_read_input_tokens as number;
+    total.cache_creation_input_tokens += usage.cache_creation_input_tokens as number;
+    total.cache_creation_input_tokens_1h =
+      (total.cache_creation_input_tokens_1h ?? 0) + (oneHour as number);
+    totals.set(subpath, total);
+  }
+  return totals;
 }
 
 export async function listSessionEventsFromIndex(

@@ -595,6 +595,13 @@ describe('event mapping', () => {
       model: 'claude-opus',
       total_cost_usd: 0.125,
     });
+    const splitEvent = {
+      ...event,
+      model_usage: { ...event.model_usage, cache_creation_input_tokens_1h: 2 },
+    };
+    expect(toPublicHttpEvent(splitEvent, false)).toEqual(toPublicHttpEvent(event, false));
+    expect(toPublicHttpEvent(splitEvent, true)).toBe(splitEvent);
+    expect(splitEvent.model_usage.cache_creation_input_tokens_1h).toBe(2);
   });
 
   it('normalizes legacy session errors to the Claude nested retry shape', () => {

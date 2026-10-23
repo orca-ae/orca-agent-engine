@@ -234,6 +234,43 @@ describe('DSH canonical tree admission', () => {
       },
     };
     expect(() => projection.validate({ ...end, subpath: '' }, 'evt_turn')).toThrow();
+    for (const invalid of [-1, 0.5, 1, null, '0'])
+      expect(() =>
+        projection.validate(
+          {
+            ...end,
+            payload: {
+              ...end.payload,
+              model_usage: { ...end.payload.model_usage, cache_creation_input_tokens_1h: invalid },
+            },
+          },
+          'evt_turn',
+        ),
+      ).toThrow('Invalid DSH model usage');
     expect(() => projection.validate(end, 'evt_turn')).not.toThrow();
+    projection.beginTurn();
+    projection.validate(
+      {
+        id: 'evt_model',
+        subpath: child,
+        kind: 'span.model_request_start',
+        payload: { turn_event_id: 'evt_turn', model_observation_kind: 'turn_model_summary' },
+      },
+      'evt_turn',
+    );
+    const split = {
+      ...end,
+      payload: {
+        ...end.payload,
+        model_usage: {
+          ...end.payload.model_usage,
+          cache_creation_input_tokens: 3,
+          cache_creation_input_tokens_1h: 2,
+        },
+      },
+    };
+    expect(projection.validate(split, 'evt_turn').payload).toMatchObject({
+      model_usage: { cache_creation_input_tokens: 3, cache_creation_input_tokens_1h: 2 },
+    });
   });
 });

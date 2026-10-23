@@ -194,7 +194,11 @@ existing workspace/Session/subpath-derived `sth_` form. The bridge carries the a
 source ID on canonical events, projects reasoning as `agent.thinking`, and waits for native
 descendants and result delivery before committing a turn. Restored lineage is private control
 data, not replayed creation events. Thread summaries report self-only usage; the harness bills
-the tree total once. Exporter observations remain flat under the accepted-turn root.
+the tree total once. Public child Thread usage accumulates those authoritative self summaries
+over the complete indexed history for that exact child subpath, excluding descendants. Cache
+creation preserves the optional 1h subset; legacy total-only summaries assign creation to 5m.
+Summary input tokens already exclude cache reads. Session and active primary Thread usage retain
+the tree accounting total. Exporter observations remain flat under the accepted-turn root.
 
 Agent toolsets must explicitly disable `web_fetch`. For example, set `default_config.enabled`
 to `false` and enable `bash`/`read` individually in `configs` with `enabled: true` and
