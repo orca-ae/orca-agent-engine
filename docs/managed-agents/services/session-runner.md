@@ -480,6 +480,13 @@ block subsequent guarded requests while control followers remain available. Ungu
 interrupts do not leave a budget marker. Public Agent/Session APIs retain Orca's
 Managed Agents event format.
 
+`agent.usage` is a private runtime signal. The Registry bridge consumes managed
+Codex SDK and Pi SDK reports through `parseUsageDelta`/`persistUsage` before
+discarding the frame. Accounting errors still retire that bridge generation.
+Other runner providers have their frames discarded without updating Session
+counters; their internal-route authority follows the pinned harness configuration.
+These signals are excluded from public list/SSE results and runner recovery.
+
 Gateway deployments configure:
 
 - `AI_GATEWAY_MCP_URL`: the gateway MCP endpoint.

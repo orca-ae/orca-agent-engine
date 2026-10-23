@@ -21,6 +21,25 @@ import {
 import { sessionEventsIndex, sessionThreads } from '../../src/persistence/postgres/schema.js';
 
 describe('session events index', () => {
+  it.each(['', 'subagents/worker', 'threads/sth_worker'])(
+    'indexes historical usage internally without public thread projections (%s)',
+    async (subpath) => {
+      const { db, insertedRows } = fakeDb();
+      const event = makeEvent({
+        kind: 'agent.usage',
+        producedBy: 'harness',
+        subpath,
+        payload: { usage: { input_tokens: 42 } },
+      });
+      await indexTranscriptEvents(db, [event]);
+      expect(insertedRows).toEqual([
+        expect.objectContaining({ kind: 'agent.usage', visibility: 'internal' }),
+      ]);
+      expect(primaryThreadProjectionEvents(event)).toEqual([]);
+      for (const requested of ['', 'subagents/worker', 'threads/sth_worker'])
+        expect(streamableEventsForSubpath(event, requested)).toEqual([]);
+    },
+  );
   it('updates explicit lifecycle names without erasing an existing name when omitted', async () => {
     const { db, threadRows, threadUpdates } = fakeDb(true);
     const subpath = 'subagents/11111111-1111-4111-8111-111111111111';

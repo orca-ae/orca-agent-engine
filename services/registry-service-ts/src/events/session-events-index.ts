@@ -1,10 +1,11 @@
 // Copyright The Orca Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { isNull, and, asc, desc, eq, gt, gte, inArray, lt, lte, or, sql } from 'drizzle-orm';
+import { isNull, and, asc, desc, eq, gt, gte, inArray, lt, lte, ne, or, sql } from 'drizzle-orm';
 import type { Event, TranscriptStore } from '@orca/transcript-store';
 import {
   AgentEventKind,
+  AgentRuntimeSignalKind,
   InternalTranscriptEventKind,
   SessionThreadEventKind,
 } from '@orca/agent-event-contract';
@@ -38,6 +39,60 @@ const MAX_SAFE_CURSOR = BigInt(Number.MAX_SAFE_INTEGER);
 const USER_EVENT_PROCESSED_KIND_SQL = sql.raw(
   `'${InternalTranscriptEventKind.userEventProcessed}'`,
 );
+
+export type UsageVisibilityCursor = Pick<
+  typeof sessionEventsIndex.$inferSelect,
+  'workspaceId' | 'sessionId' | 'eventId'
+>;
+
+/** Seek past committed batches within a run; visibility remains the durable restart checkpoint. */
+export async function backfillUsageEventVisibility(
+  db: DbClient,
+  batchSize = 500,
+  after?: UsageVisibilityCursor,
+): Promise<{ changed: number; nextCursor: UsageVisibilityCursor | null }> {
+  if (!Number.isSafeInteger(batchSize) || batchSize < 1 || batchSize > 1_000)
+    throw new Error('invalid usage visibility batch size');
+  return db.transaction(async (tx) => {
+    const rows = await tx
+      .select({
+        workspaceId: sessionEventsIndex.workspaceId,
+        sessionId: sessionEventsIndex.sessionId,
+        eventId: sessionEventsIndex.eventId,
+      })
+      .from(sessionEventsIndex)
+      .where(
+        and(
+          eq(sessionEventsIndex.kind, AgentRuntimeSignalKind.usage),
+          ne(sessionEventsIndex.visibility, 'internal'),
+          after
+            ? sql`(${sessionEventsIndex.workspaceId}, ${sessionEventsIndex.sessionId}, ${sessionEventsIndex.eventId}) > (${after.workspaceId}, ${after.sessionId}, ${after.eventId})`
+            : undefined,
+        ),
+      )
+      .orderBy(
+        asc(sessionEventsIndex.workspaceId),
+        asc(sessionEventsIndex.sessionId),
+        asc(sessionEventsIndex.eventId),
+      )
+      .limit(batchSize)
+      .for('update', { skipLocked: true });
+    for (const row of rows) {
+      await tx
+        .update(sessionEventsIndex)
+        .set({ visibility: 'internal' })
+        .where(
+          and(
+            eq(sessionEventsIndex.workspaceId, row.workspaceId),
+            eq(sessionEventsIndex.sessionId, row.sessionId),
+            eq(sessionEventsIndex.eventId, row.eventId),
+            eq(sessionEventsIndex.kind, AgentRuntimeSignalKind.usage),
+          ),
+        );
+    }
+    return { changed: rows.length, nextCursor: rows.at(-1) ?? null };
+  });
+}
 
 interface CatchUpSessionEventsIndexOptions {
   maxEvents?: number;
@@ -268,6 +323,7 @@ export async function listSessionEventsFromIndex(
     eq(sessionEventsIndex.workspaceId, input.workspaceId),
     eq(sessionEventsIndex.sessionId, input.sessionId),
     eq(sessionEventsIndex.visibility, 'public'),
+    ne(sessionEventsIndex.kind, AgentRuntimeSignalKind.usage),
     cursorCondition,
     input.createdAtGt ? gt(sessionEventsIndex.producedAt, input.createdAtGt) : undefined,
     input.createdAtGte ? gte(sessionEventsIndex.producedAt, input.createdAtGte) : undefined,

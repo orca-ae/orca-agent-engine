@@ -761,8 +761,9 @@ exercises the public API with no services running.
 
 `packages/e2e-tests/test/self-hosted-capabilities.spec.ts` covers the Claude runner path
 against the capabilities the `separate` suite establishes. Resource, output and accounting
-assertions remain commented out pending the capabilities described below. Additional
-parity scenarios are listed under [Colocated coverage the minimal stack cannot reach](#colocated-coverage-the-minimal-stack-cannot-reach).
+assertions remain commented out pending the capabilities described below. The runtime usage
+visibility assertion is enabled. Additional parity scenarios are listed under
+[Colocated coverage the minimal stack cannot reach](#colocated-coverage-the-minimal-stack-cannot-reach).
 
 **The legacy Claude runner sandbox has no `/mnt` resource tree.** A read of an attached resource
 returns "File does not exist", and a write beneath it returns
@@ -777,19 +778,34 @@ cause:
 - **Output capture does not happen.** Nothing can be written to
   `/mnt/session/outputs/`, so no file is ever indexed as a scoped session output.
 
-**Session usage is not rolled up.** The runner emits `agent.usage` with real numbers
-(`input_tokens: 18, output_tokens: 269` in a sample run), but the registry does not
-aggregate it into the session's own `usage` on this path, so the roll-up stays zero.
+**Complete native Claude usage remains blocked.** Claude Agent SDK 0.3.283
+documents `result.usage` as main-loop-only. Its cumulative `modelUsage` includes
+query-pipeline calls but excludes helper calls such as permission classification
+and token-count probes; resume/fork can inherit earlier totals and `/clear` resets
+them. Its cache-creation aggregate also lacks TTL buckets. Neither field alone
+establishes complete execution reporting. The existing gateway sink can count
+traffic routed through it, but enabling that sink does not constrain direct
+model egress. Keep Claude, claude-sdk-persistent and claude-code partial and the
+usage-accounting assertion blocked until a complete raw-usage hook, verifiably disabled
+unreported calls, or constrained complete egress establishes one usage writer.
+The choice requires provider-specific evidence before enabling a new authority.
 
-**`agent.usage` leaks into the public event list.** On `separate` it is filtered out of
-`GET /v1/sessions/:id/events` as a runtime-only accounting signal; on the colocated path
-it is returned to clients, carrying token counts and cache statistics. This one is a
-disclosure difference rather than a missing feature.
+**Retained reports and recoverable completion.** Native Codex,
+Cursor, Pi and custom adapters also require completeness and cumulative/delta
+evidence before Registry roll-up admission. Existing managed Codex/Pi terminal
+accounting and stateful pending markers are not a usage completion receipt or
+a retained report log: they do not implement canonical per-report conflict
+checks, a declared report set, retry after lost payloads, or prepared-receipt
+terminal recovery. Failed/aborted Pi model streams explicitly leave usage unknown.
+Trigger the negotiated receipt/ACK implementation when an admitted provider can
+retain complete normalized reports through reconnect; preserve the shared
+`persistUsage` transaction and extend that same completion authority for captured
+outputs. Process loss with unavailable reports must remain incomplete and block
+automatic model replay; it cannot be repaired by re-running the model.
 
 **Trigger:** resource materialization and output capture gate any colocated workload that
 consumes attached files or produces artifacts — most real ones. The usage roll-up gates
-per-session cost attribution. The leak should be closed whenever the event projection is
-next touched.
+per-session cost attribution.
 
 ## Colocated coverage the minimal stack cannot reach
 

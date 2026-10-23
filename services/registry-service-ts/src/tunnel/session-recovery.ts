@@ -303,6 +303,10 @@ export class SessionRecovery {
     };
     const opts: ReadOptions = { fromCursor: '', maxEvents: 0, subpath: '' };
     for await (const event of this.store.read(this.workspaceId, this.sessionId, opts)) {
+      const wasPastCursor = pastCursor;
+      // Old replay slices could end at usage that is now internal. Locate the
+      // raw identity before filtering, without replaying the cursor itself.
+      if (event.id === cursor) pastCursor = true;
       if (!isPublicTranscriptEvent(event)) continue;
       if (isUserTurnEvent(event)) pendingTurns.set(event.id, event);
       if (isCompletedTurnEvent(event)) {
@@ -310,10 +314,7 @@ export class SessionRecovery {
         if (sourceTurnId) pendingTurns.delete(sourceTurnId);
         else pendingTurns.clear(); // Historical uncorrelated completion boundary.
       }
-      if (!pastCursor) {
-        if (event.id === cursor) pastCursor = true;
-        continue;
-      }
+      if (!wasPastCursor) continue;
       replayedCount += 1;
       if (replayDelivered) {
         page.push(event);

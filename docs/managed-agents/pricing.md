@@ -264,6 +264,37 @@ mechanisms keep it honest:
 
 ## Cost accounting
 
+Runner `agent.usage` frames are internal accounting signals, not public transcript
+events. The managed Codex SDK and Pi SDK bridge uses the shared Registry usage
+transaction; their normalized terminal report remains one aggregate per accepted
+turn. The native Claude runner mapper forwards the SDK result
+`usage` field, whose scope in Claude Agent SDK 0.3.283 is the main agent loop.
+The SDK's `modelUsage` field is cumulative across streaming-input turns and
+includes query-pipeline subagents and compaction, while excluding helper calls
+outside that pipeline, such as permission classification and token-count probes.
+Native Claude runtime frames are discarded without updating Session counters.
+Enabling the Gateway Registry usage sink selects the existing gateway
+writer for applicable pinned harnesses; that flag describes sink configuration,
+not a constraint on direct model egress.
+
+Historical usage visibility is maintained with:
+
+```bash
+pnpm -F @orca/registry-service-ts db:backfill-usage-visibility
+pnpm -F @orca/registry-service-ts db:backfill-usage-visibility --verify
+```
+
+Both commands use `DATABASE_URL`. The first updates at most 500 index rows per
+transaction. Within one invocation it advances by the composite
+`(workspace_id, session_id, event_id)` key, avoiding rescans of processed prefixes.
+A restarted invocation searches from the beginning for remaining non-internal
+usage rows. The second command performs a read-only verification. Both fail if
+the final pass finds non-internal usage rows, including rows locked by another
+backfill. Drain old Registry writers before the final pass and rerun after an interruption or a
+verification failure. Query filters remain active during rolling upgrades.
+The command updates only index visibility: raw transcript bytes, Session usage
+and monetary accounting records are retained unchanged.
+
 Usage is reported as it is produced and **priced by Registry** at the internal
 usage route, at that moment, with the model identity that produced it — the
 harness never holds price rows, so the catalog (including an organization's

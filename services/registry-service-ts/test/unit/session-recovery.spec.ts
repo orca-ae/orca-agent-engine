@@ -1060,6 +1060,7 @@ it('streams private events without losing the visible suffix', async () => {
   const { recovery, store, runner } = buildRecovery({ maxReplayEvents: 2 });
   runner.connect();
   await appendAgentEvent(store, 'harness.resource_deletions');
+  await appendAgentEvent(store, 'agent.usage');
   const visible = await appendUserMessage(store, 'visible prefix');
   const completed = await appendTurnCompleted(store);
   const outcome = await recovery.recover('');
@@ -1069,6 +1070,49 @@ it('streams private events without losing the visible suffix', async () => {
   expect(outcome.pendingUserTurn).toBeNull();
   expect(allReplayedLines(runner).map((line) => line.id)).toEqual([visible.id, completed.id]);
 });
+
+it.each(['agent.usage', 'harness.private'])(
+  'resumes after a historical internal cursor (%s) without replaying it or losing pending turns',
+  async (kind) => {
+    const { recovery, store, runner } = buildRecovery({ replayChunkSize: 1 });
+    runner.connect();
+    await appendUserMessage(store, 'previous turn');
+    const cursor = await appendAgentEvent(store, kind);
+    await appendAgentEvent(store, 'agent.usage');
+    const completed = await appendTurnCompleted(store);
+    const pending = await appendUserMessage(store, 'next turn');
+    const outcome = await recovery.recover(cursor.id);
+    expect(outcome).toMatchObject({
+      fresh: false,
+      replayDelivered: true,
+      replayedCount: 2,
+      replayTruncated: false,
+      pendingUserTurn: { id: pending.id },
+    });
+    expect(allReplayedLines(runner).map((line) => line.id)).toEqual([completed.id, pending.id]);
+    expect(runner.replays.map((replay) => replay.cursor)).toEqual([cursor.id, completed.id]);
+  },
+);
+
+it.each([false, true])(
+  'acknowledges an internal cursor with no public suffix (hidden suffix=%s)',
+  async (hiddenSuffix) => {
+    const { recovery, store, runner } = buildRecovery();
+    runner.connect();
+    const pending = await appendUserMessage(store, 'unanswered turn');
+    const cursor = await appendAgentEvent(store, 'agent.usage');
+    if (hiddenSuffix) await appendAgentEvent(store, 'harness.private');
+    const outcome = await recovery.recover(cursor.id);
+    expect(outcome).toMatchObject({
+      fresh: false,
+      replayDelivered: true,
+      replayedCount: 0,
+      replayTruncated: false,
+      pendingUserTurn: { id: pending.id },
+    });
+    expect(runner.replays).toEqual([{ cursor: cursor.id, sessionId: SESSION_ID, lines: [] }]);
+  },
+);
 
 it('recovers beyond 10,000 raw events and resumes from a cursor beyond the old cap', async () => {
   const { recovery, store, runner } = buildRecovery();

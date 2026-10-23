@@ -351,24 +351,19 @@ describe(`self-hosted capabilities — real provider (${HARNESS})`, () => {
   //   TEST_TIMEOUT_MS,
   // );
 
-  // COMMENTED OUT — public usage filtering is tracked in the roadmap's colocated parity gaps.
-  //
-  // `agent.usage` is a runtime-only accounting signal outside the canonical vocabulary.
-  // `separate` filters it out of `GET /events`; this path returns it to clients with
-  // token counts and cache statistics.
-  // it(
-  //   'keeps agent.usage off the public event list',
-  //   async () => {
-  //     const sessionId = await startSession(
-  //       `colocated-usageleak-${Date.now()}`,
-  //       'Answer in one short word.',
-  //     );
-  //     await runTurn(cfg, sessionId, 'Say the word ready.', TURN_DEADLINE_MS);
-  //     const events = await readEvents(cfg, sessionId);
-  //     expect(events.map((e) => e.type)).not.toContain('agent.usage');
-  //   },
-  //   TEST_TIMEOUT_MS,
-  // );
+  it(
+    'keeps agent.usage off the public event list',
+    async () => {
+      const sessionId = await startSession(
+        `colocated-usageleak-${Date.now()}`,
+        'Answer in one short word.',
+      );
+      await runTurn(cfg, sessionId, 'Say the word ready.', TURN_DEADLINE_MS);
+      const events = await readEvents(cfg, sessionId);
+      expect(events.map((e) => e.type)).not.toContain('agent.usage');
+    },
+    TEST_TIMEOUT_MS,
+  );
 
   // ── 5. Interrupt ──────────────────────────────────────────────────────────────
 

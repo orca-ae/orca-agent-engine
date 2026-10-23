@@ -48,6 +48,61 @@ describe('BoundedBuffer', () => {
 });
 
 describe('slow consumers', () => {
+  it.each([false, true])(
+    'hides historical usage from primary and thread SSE (orcaBeta=%s)',
+    async (orcaBeta) => {
+      for (const subpath of ['', 'threads/sth_worker']) {
+        const writes: string[] = [];
+        const raw = Object.assign(new EventEmitter(), {
+          writable: true,
+          setHeader() {},
+          writeHead() {},
+          end() {},
+          write: (chunk: string) => {
+            writes.push(chunk);
+            return true;
+          },
+        });
+        const store = {
+          async *tail() {
+            for (const [seq, kind] of [
+              [1, 'agent.usage'],
+              [2, 'agent.message'],
+            ] as const)
+              yield {
+                id: `evt_${seq}`,
+                workspaceId: 'ws_usage',
+                sessionId: 'ses_usage',
+                subpath,
+                seq,
+                producedAt: '2026-10-20T00:00:00.000Z',
+                producedBy: 'harness',
+                kind,
+                idempotencyKey: '',
+                payload: Buffer.from(
+                  JSON.stringify({
+                    type: kind,
+                    content: [{ type: 'text', text: 'visible' }],
+                    usage: { input_tokens: 17 },
+                  }),
+                ),
+              } satisfies Event;
+          },
+        } as unknown as TranscriptStore;
+        await streamSession(
+          { raw } as unknown as FastifyReply,
+          store,
+          'ws_usage',
+          'ses_usage',
+          '',
+          subpath,
+          { bufferSize: 10, dropAgeMs: 1_000, heartbeatMs: 60_000, orcaBeta },
+        );
+        expect(writes.join('')).not.toContain('agent.usage');
+        expect(writes.join('')).toContain('visible');
+      }
+    },
+  );
   it('waits for drain during the grace period without losing an event', async () => {
     const writes: string[] = [];
     let blocked = true;

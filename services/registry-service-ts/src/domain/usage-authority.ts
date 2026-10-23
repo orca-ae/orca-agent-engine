@@ -9,9 +9,9 @@ export type AuthoritativeUsageCaller = 'harness' | 'ai-gateway';
 /**
  * Select the single usage writer for a pinned AgentVersion.
  *
- * Colocation only proves that LLM traffic crosses AI Gateway. Registry usage
- * writeback is a separately deployed sink, so Harness remains authoritative
- * until operators explicitly enable that sink.
+ * The gateway flag enables a separately deployed accounting sink; neither it
+ * nor colocation proves that all model traffic crosses that gateway. This
+ * legacy selection does not establish complete accounting for native runners.
  */
 export function authoritativeUsageCallerForSnapshot(
   snapshot: unknown,
