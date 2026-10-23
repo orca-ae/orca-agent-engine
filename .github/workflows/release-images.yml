@@ -127,6 +127,14 @@ jobs:
             services/registry-service-ts/openapi \
             docs/managed-agents/conformance-matrix.md \
           || (echo "API artifacts out of sync; run pnpm openapi:gen && pnpm conformance:gen and commit." && exit 1)
+      - name: Install Local sandbox probe prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap ripgrep socat
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          npm install -g @anthropic-ai/sandbox-runtime@0.0.50
       - run: pnpm test
       # `pnpm lint`, not `pnpm -r lint`: the recursive form iterates workspace
       # packages and skips the root, so the root script's `eslint scripts/**/*.mjs`

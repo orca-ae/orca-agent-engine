@@ -24,6 +24,20 @@ const imageNames = [
   'sandbox-harness-dsh',
 ];
 
+test('release validation prepares Local sandbox probes before running unit tests, like TS CI', () => {
+  const tsWorkflow = yaml.load(
+    readFileSync(new URL('../workflows/test-ts.yml', import.meta.url), 'utf8'),
+  );
+  const prerequisites = tsWorkflow.jobs.test.steps.find(
+    (step) => step.name === 'Install Local sandbox probe prerequisites',
+  );
+  const steps = jobs.validate.steps;
+  const setupIndex = steps.findIndex((step) => step.name === prerequisites.name);
+  const testIndex = steps.findIndex((step) => step.run === 'pnpm test');
+  assert.ok(setupIndex >= 0 && setupIndex < testIndex);
+  assert.deepEqual(steps[setupIndex], prerequisites);
+});
+
 test('both architectures build natively without weakening validation or attestations', () => {
   const build = jobs['build-images'];
   assert.deepEqual(build.strategy.matrix.image, imageNames);
