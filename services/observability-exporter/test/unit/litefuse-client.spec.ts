@@ -11,8 +11,13 @@ import {
   OtlpHttpStatusError,
   OtlpPartialSuccessError,
 } from '../../src/litefuse-client.js';
-import { encodeLangfuseOtlpJson } from '../../src/otlp-json.js';
-import { TRANSCRIPT_SECRET, completedProjectedTrace } from '../support/events.js';
+import { encodeLangfuseOtlpJson, type OtlpExportRequest } from '../../src/otlp-json.js';
+import type { CaptureMode } from '../../src/types.js';
+import {
+  TRANSCRIPT_SECRET,
+  completedProjectedTrace,
+  completedNativeChildTrace,
+} from '../support/events.js';
 
 interface CapturedRequest {
   url: string | undefined;
@@ -34,6 +39,41 @@ afterEach(async () => {
 });
 
 describe('LitefuseOtlpHttpClient', () => {
+  it.each<CaptureMode>(['metadata_only', 'raw_io'])(
+    'sends exact child thread metadata in the collected HTTP body (%s)',
+    async (mode) => {
+      const server = await startMockServer(200);
+      const client = new LitefuseOtlpHttpClient({
+        endpoint: server.endpoint,
+        publicKey: 'pk-test',
+        secretKey: 'sk-test',
+      });
+      const trace = completedNativeChildTrace(mode);
+      const payload = encodeLangfuseOtlpJson(trace);
+      await client.send(payload);
+      expect(server.requests).toHaveLength(1);
+      const body = JSON.parse(server.requests[0]!.body) as OtlpExportRequest;
+      expect(body).toEqual(payload);
+      const spans = body.resourceSpans[0]!.scopeSpans[0]!.spans;
+      expect(spans).toHaveLength(3);
+      for (const [index, span] of spans.entries()) {
+        expect(span.spanId).toBe([trace.root, ...trace.spans][index]!.spanId);
+        expect(span.parentSpanId).toBe(index === 0 ? undefined : trace.root.spanId);
+        expect(
+          span.attributes.some(({ key }) => key.startsWith('langfuse.trace.metadata.orca.thread.')),
+        ).toBe(false);
+        for (const [key, value] of Object.entries(
+          [trace.root, ...trace.spans][index]!.metadata,
+        ).filter(([key]) => key.startsWith('orca.thread.'))) {
+          expect(span.attributes).toContainEqual({
+            key: 'langfuse.observation.metadata.' + key,
+            value: { stringValue: value },
+          });
+        }
+      }
+    },
+  );
+
   it('posts OTLP JSON to exact traces path with Litefuse headers', async () => {
     const server = await startMockServer(200);
     const client = new LitefuseOtlpHttpClient({

@@ -26,6 +26,18 @@ The root sampling and capture pin applies to the whole trace, including the exis
 capture ceilings and state limits. Primary-stream client tool replies/confirmations address child
 actions through `payload.subpath` and the existing tool-use identity, not through arrival order.
 
+The OTLP encoder emits `orca.thread.*` identity and lineage only as
+`langfuse.observation.metadata.*`. Each observation carries its own subpath and available lineage;
+the projected root contains only the empty subpath, with no thread IDs or parent lineage to inherit.
+Thread creation before the accepted turn is not retained in per-turn state: later child events can
+supply their own thread IDs while `parent_subpath` remains absent. Missing lineage is not inferred.
+Thread identity is available to consumers and dashboard filters through observation metadata only.
+The encoder excludes these keys from `langfuse.trace.metadata.*` on every span so the root's empty
+subpath does not conflict with child identity. Workspace, Session, turn and pinned deployment
+attribution remain shared across the trace. This encoding applies to metadata-only and raw-I/O
+traces. The read-back matcher compares each expected observation thread key exactly, including
+when receiver metadata is returned as a JSON string.
+
 Child-aware reducer checkpoints use version 5; metadata-only/raw-I/O outbox traces use projected
 schema v3/v4 respectively. Existing reducer v1–v4 and outbox v1/v2 remain readable, and root-only
 projection retains its previous IDs and output. Older exporter binaries reject the new versions.

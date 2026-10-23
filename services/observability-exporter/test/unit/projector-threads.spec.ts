@@ -9,8 +9,8 @@ import {
 } from '../../src/projector.js';
 import { parseProjectedTrace } from '../../src/canonical-validation.js';
 import { deterministicChildSpanId } from '../../src/ids.js';
-import { event, completedPrimaryTurnEvents } from '../support/events.js';
-import { encodeLangfuseOtlpJson } from '../../src/otlp-json.js';
+import { event, completedPrimaryTurnEvents, completedNativeChildTrace } from '../support/events.js';
+import { encodeLangfuseOtlpJson, type OtlpExportRequest } from '../../src/otlp-json.js';
 import type { CaptureMode } from '../../src/types.js';
 
 const children = [
@@ -106,6 +106,160 @@ function treeEvents() {
 }
 
 describe('flat canonical native threads', () => {
+  it.each<CaptureMode>(['metadata_only', 'raw_io'])(
+    'retains available child identity when creation predates the accepted turn in %s',
+    (mode) => {
+      const subpath = children[0]!;
+      const identity = { session_thread_id: 'sth_child1', parent_thread_id: 'sth_root' };
+      const events = treeEvents().filter((entry) => entry.subpath !== children[1]);
+      // DSH supplies IDs on later events, but parent_subpath is only on creation.
+      events[3] = event(
+        0,
+        'session.thread_created',
+        { ...identity, parent_subpath: '' },
+        { subpath },
+      );
+      for (const entry of events.filter((entry) => entry.subpath === subpath)) {
+        entry.payload = Buffer.from(
+          JSON.stringify({ ...JSON.parse(entry.payload.toString()), ...identity }),
+        );
+      }
+      const first = reduceCanonicalEventBatch(
+        initialCanonicalProjectionState(),
+        events.slice(0, 6),
+        new Set(),
+        undefined,
+        mode,
+      );
+      const result = reduceCanonicalEventBatch(
+        parseCanonicalProjectionState(JSON.parse(JSON.stringify(first.state))),
+        events.slice(6),
+        new Set(first.acceptedSourceIds),
+        undefined,
+        mode,
+      );
+      expect(result.issues).toEqual([]);
+      const trace = parseProjectedTrace(JSON.parse(JSON.stringify(result.completedTraces[0])));
+      expect(trace.root.metadata).not.toHaveProperty('orca.thread.session_thread_id');
+      expect(trace.root.metadata).not.toHaveProperty('orca.thread.parent_thread_id');
+      expect(() =>
+        parseProjectedTrace({
+          ...trace,
+          root: {
+            ...trace.root,
+            metadata: { ...trace.root.metadata, 'orca.thread.session_thread_id': 'sth_root' },
+          },
+        }),
+      ).toThrow();
+      const wire = encodeLangfuseOtlpJson(trace).resourceSpans[0]!.scopeSpans[0]!.spans;
+      const childSpans = trace.spans.filter((span) => span.subpath === subpath);
+      expect(childSpans).toHaveLength(2);
+      for (const child of childSpans) {
+        const span = wire.find(({ spanId }) => spanId === child.spanId)!;
+        expect(span.spanId).toBe(
+          deterministicChildSpanId(
+            trace.traceId,
+            child.observationType,
+            subpath,
+            child.sourceEventId,
+          ),
+        );
+        expect(span.parentSpanId).toBe(trace.root.spanId);
+        expect(
+          Object.fromEntries(
+            span.attributes
+              .filter(({ key }) => key.startsWith('langfuse.observation.metadata.orca.thread.'))
+              .map(({ key, value }) => [key, value.stringValue]),
+          ),
+        ).toEqual({
+          'langfuse.observation.metadata.orca.thread.subpath': subpath,
+          'langfuse.observation.metadata.orca.thread.session_thread_id': identity.session_thread_id,
+          'langfuse.observation.metadata.orca.thread.parent_thread_id': identity.parent_thread_id,
+        });
+        expect(span.attributes).toContainEqual({
+          key: 'langfuse.observation.metadata.orca.turn.anchor_event_id',
+          value: { stringValue: 'evt_1' },
+        });
+      }
+      expect(childSpans.find((span) => span.modelSummary)!.modelSummary!.usage!.inputTokens).toBe(
+        3,
+      );
+    },
+  );
+
+  it.each<CaptureMode>(['metadata_only', 'raw_io'])(
+    'preserves sibling spawn/fork observations without trace thread metadata in %s',
+    (mode) => {
+      const trace = completedNativeChildTrace(mode);
+      const restored = parseProjectedTrace(JSON.parse(JSON.stringify(trace)));
+      expect(restored).toEqual(trace);
+      const wire = JSON.parse(
+        JSON.stringify(encodeLangfuseOtlpJson(restored)),
+      ) as OtlpExportRequest;
+      const spans = wire.resourceSpans[0]!.scopeSpans[0]!.spans;
+      expect(spans).toHaveLength(3);
+      for (const span of spans) {
+        expect(span.traceId).toBe(trace.traceId);
+        expect(
+          span.attributes.filter(({ key }) =>
+            key.startsWith('langfuse.trace.metadata.orca.thread.'),
+          ),
+        ).toEqual([]);
+        expect(span.attributes).toContainEqual({
+          key: 'langfuse.trace.metadata.orca.turn.anchor_event_id',
+          value: { stringValue: 'evt_1' },
+        });
+        expect(span.attributes).toEqual(
+          expect.arrayContaining([
+            {
+              key: 'session.id',
+              value: { stringValue: trace.workspaceId + ':' + trace.sessionId },
+            },
+            { key: 'orca.workspace.id', value: { stringValue: trace.workspaceId } },
+            { key: 'orca.session.id', value: { stringValue: trace.sessionId } },
+            { key: 'orca.turn.anchor_event_id', value: { stringValue: 'evt_1' } },
+          ]),
+        );
+      }
+      expect(spans[0]!.spanId).toBe(trace.root.spanId);
+      expect(spans[0]!.parentSpanId).toBeUndefined();
+      for (const [index, kind] of ['spawn', 'fork'].entries()) {
+        const subpath = children[index]!;
+        const span = spans[index + 1]!;
+        expect(span.spanId).toBe(
+          deterministicChildSpanId(
+            trace.traceId,
+            'turn_model_summary',
+            subpath,
+            index === 0 ? 'evt_4' : 'evt_7',
+          ),
+        );
+        expect(span.parentSpanId).toBe(trace.root.spanId);
+        expect(
+          Object.fromEntries(
+            span.attributes
+              .filter(({ key }) => key.startsWith('langfuse.observation.metadata.orca.thread.'))
+              .map(({ key, value }) => [key, value.stringValue]),
+          ),
+        ).toEqual({
+          'langfuse.observation.metadata.orca.thread.subpath': subpath,
+          'langfuse.observation.metadata.orca.thread.session_thread_id': 'sth_' + kind,
+          'langfuse.observation.metadata.orca.thread.parent_thread_id': 'sth_root',
+          'langfuse.observation.metadata.orca.thread.parent_subpath': '',
+        });
+        const usage = span.attributes.find(
+          ({ key }) => key === 'langfuse.observation.usage_details',
+        )!.value.stringValue!;
+        expect(JSON.parse(usage)).toEqual({
+          input: index + 3,
+          output: index + 5,
+          cache_creation_input_tokens: index + 7,
+          input_cached_tokens: index + 11,
+        });
+      }
+    },
+  );
+
   it.each<CaptureMode>(['metadata_only', 'raw_io'])(
     'correlates child-addressed input across restart and acceptance replay in %s',
     (mode) => {
@@ -282,9 +436,19 @@ describe('flat canonical native threads', () => {
         mode,
       );
       expect(replay.completedTraces).toEqual([]);
-      const wire = JSON.stringify(encodeLangfuseOtlpJson(trace));
-      expect(wire).toContain(children[0]!);
-      expect(wire).toContain('orca.thread.parent_subpath');
+      const wire = JSON.parse(JSON.stringify(encodeLangfuseOtlpJson(trace))) as OtlpExportRequest;
+      for (const span of wire.resourceSpans[0]!.scopeSpans[0]!.spans) {
+        const projected = [trace.root, ...trace.spans].find(
+          ({ spanId }) => spanId === span.spanId,
+        )!;
+        expect(span.attributes).toContainEqual({
+          key: 'langfuse.observation.metadata.orca.thread.subpath',
+          value: { stringValue: projected.subpath },
+        });
+        expect(
+          span.attributes.some(({ key }) => key.startsWith('langfuse.trace.metadata.orca.thread.')),
+        ).toBe(false);
+      }
     },
   );
 
