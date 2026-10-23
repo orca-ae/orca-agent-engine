@@ -142,6 +142,13 @@ limit for the whole native tree (at most 129 files including its manifest). Cold
 root/child context and lineage, not the temporary workspace, shell processes or
 plugin-private databases. Published outputs use the existing File API. An interrupted or failed
 turn has no new checkpoint and is not automatically replayed.
+Native setup validates each root or lazily restored child's working directory before its first
+input is claimed. An existing directory is retained; an unavailable directory recovers through
+DSH's native persistence and notice mechanism. The recovery notice precedes the current input
+in the same model step, so it does not schedule a separate acknowledgement after that reply.
+If both the recorded directory and native fallback are unavailable, root setup rejects startup
+before readiness or input submission; no model/tool execution or replacement checkpoint occurs.
+The committed checkpoint remains available for a later explicit restore.
 The advanced live tree is retired after an uncommitted whole-turn failure. When its submit RPC
 returns, retirement waits for pending interrupt RPCs to settle before closing their transport;
 interrupt deadlines remain bounded. Subsequent explicit input rebuilds from Registry's
