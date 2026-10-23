@@ -64,7 +64,12 @@ import {
   type HarnessMode,
   type HarnessType,
 } from '@orca/harness-catalog';
-import { AgentEventKind, SessionThreadEventKind, SpanEventKind } from '@orca/agent-event-contract';
+import {
+  AgentEventKind,
+  SessionThreadEventKind,
+  SpanEventKind,
+  type ModelUsageCounts,
+} from '@orca/agent-event-contract';
 import {
   CLAUDE_SESSION_EVENT_TYPES,
   eventBatchIdempotencyKeys,
@@ -77,6 +82,7 @@ import {
   indexTranscriptEvents,
   isValidSessionEventsCursor,
   listSessionEventsFromIndex,
+  loadDshChildUsage,
 } from '../events/session-events-index.js';
 import { stableSessionThreadId } from '../domain/thread-projection.js';
 import { authenticatedGuardrailSubject } from '../auth/guardrail-subject.js';
@@ -3004,11 +3010,17 @@ export function registerSessionsRoutes(
       .limit(limit + 1);
     const page = rows.slice(0, limit);
     const orcaBeta = isOrcaBetaRequest(req);
+    const childUsage = await loadDshChildUsage(
+      db,
+      auth.workspaceId,
+      id,
+      page.map((row) => row.subpath),
+    );
     const context = batchReadsEnabled
       ? createSessionReadContext(db, auth.workspaceId, orcaBeta, requestReadSignal(req, reply))
       : undefined;
     const data = await Promise.all(
-      page.map((row) => threadToApi(db, row, session, orcaBeta, context)),
+      page.map((row) => threadToApi(db, row, session, orcaBeta, context, childUsage)),
     );
     const response = {
       data,
@@ -3331,6 +3343,7 @@ async function threadToApi(
   session?: typeof sessions.$inferSelect,
   orcaBeta = false,
   context?: SessionReadContext,
+  childUsage?: ReadonlyMap<string, ModelUsageCounts>,
 ) {
   const primarySession =
     row.subpath === ''
@@ -3345,6 +3358,11 @@ async function threadToApi(
     : row.status;
   const archivedAt = useSessionLifecycle ? primarySession.archivedAt : row.archivedAt;
   const updatedAt = useSessionLifecycle ? primarySession.updatedAt : row.updatedAt;
+  const selfUsage = row.subpath
+    ? (
+        childUsage ?? (await loadDshChildUsage(db, row.workspaceId, row.sessionId, [row.subpath]))
+      ).get(row.subpath)
+    : undefined;
   return {
     id: row.id,
     type: 'session_thread',
@@ -3357,7 +3375,21 @@ async function threadToApi(
     stats: useSessionLifecycle
       ? primaryThreadStats(primarySession, context?.now)
       : threadStats(row, context?.now),
-    usage: useSessionLifecycle ? sessionUsage(primarySession) : emptyThreadUsage(),
+    usage: useSessionLifecycle
+      ? sessionUsage(primarySession)
+      : selfUsage
+        ? {
+            input_tokens: selfUsage.input_tokens,
+            output_tokens: selfUsage.output_tokens,
+            cache_read_input_tokens: selfUsage.cache_read_input_tokens,
+            cache_creation: {
+              ephemeral_1h_input_tokens: selfUsage.cache_creation_input_tokens_1h ?? 0,
+              ephemeral_5m_input_tokens:
+                selfUsage.cache_creation_input_tokens -
+                (selfUsage.cache_creation_input_tokens_1h ?? 0),
+            },
+          }
+        : emptyThreadUsage(),
     archived_at: archivedAt?.toISOString() ?? null,
     created_at: row.createdAt.toISOString(),
     updated_at: updatedAt.toISOString(),

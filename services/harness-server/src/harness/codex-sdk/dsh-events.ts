@@ -316,6 +316,10 @@ export class DshEventProjection {
               Number.isSafeInteger(usage[key]) &&
               (usage[key] as number) >= 0,
           ) ||
+          (usage.cache_creation_input_tokens_1h !== undefined &&
+            (!sequence(usage.cache_creation_input_tokens_1h) ||
+              usage.cache_creation_input_tokens_1h >
+                (usage.cache_creation_input_tokens as number))) ||
           typeof payload.is_error !== 'boolean'
         )
           throw new Error('Invalid DSH model usage');

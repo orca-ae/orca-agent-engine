@@ -14,6 +14,7 @@ import { registerSessionsRoutes } from '../../src/api/sessions.routes.js';
 vi.mock('../../src/events/session-events-index.js', async (original) => ({
   ...(await original<Record<string, unknown>>()),
   indexTranscriptEvents: vi.fn(async () => {}),
+  loadDshChildUsage: vi.fn(async () => new Map()),
 }));
 
 it('actual interrupt/archive HTTP routes persist scoped control intent IDs and deny archived follow-up', async () => {

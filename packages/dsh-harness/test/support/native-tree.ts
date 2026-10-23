@@ -25,6 +25,11 @@ export function replyMessages(
   model: string,
   blocks: Array<Record<string, unknown>> = [{ type: 'text', text: 'OK' }],
   stop = 'end_turn',
+  usage: Record<string, unknown> = {
+    input_tokens: 4,
+    output_tokens: 0,
+    cache_read_input_tokens: 3,
+  },
 ): void {
   const frames: Array<Record<string, unknown>> = [
     {
@@ -35,7 +40,7 @@ export function replyMessages(
         role: 'assistant',
         content: [],
         model,
-        usage: { input_tokens: 4, output_tokens: 0, cache_read_input_tokens: 3 },
+        usage,
       },
     },
   ];
@@ -166,7 +171,14 @@ export async function exerciseNativeTree(
       const reply = (
         blocks: Array<Record<string, unknown>> = [{ type: 'text', text: 'OK' }],
         stop = 'end_turn',
-      ) => replyMessages(res, body.model, blocks, stop);
+      ) =>
+        replyMessages(res, body.model, blocks, stop, {
+          input_tokens: 4,
+          output_tokens: 0,
+          cache_read_input_tokens: 3,
+          cache_creation_input_tokens: 5,
+          cache_creation: { ephemeral_1h_input_tokens: 2, ephemeral_5m_input_tokens: 3 },
+        });
       const call = (name: string, input: object) => ({
         type: 'tool_use',
         id: 'native-' + name + '-' + ++callSequence,
@@ -483,6 +495,21 @@ export async function exerciseNativeTree(
         0,
       ),
     ).toBe(observed * 4);
+    for (const summary of summaries)
+      expect(summary.event.payload.model_usage).toMatchObject({
+        cache_creation_input_tokens_1h: expect.any(Number),
+      });
+    expect(
+      summaries.reduce(
+        (sum, event) =>
+          sum +
+          Number(
+            (event.event.payload.model_usage as { cache_creation_input_tokens_1h: number })
+              .cache_creation_input_tokens_1h,
+          ),
+        0,
+      ),
+    ).toBe(observed * 2);
     expect(summaries.some((event) => event.event.subpath === '')).toBe(true);
     expect(summaries.some((event) => event.event.subpath === 'subagents/' + a)).toBe(true);
     await worker.close();

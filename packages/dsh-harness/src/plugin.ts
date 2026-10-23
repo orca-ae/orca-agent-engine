@@ -697,6 +697,9 @@ export function apply(ctx: Context): void {
             output_tokens: value.counts.output_tokens,
             cache_read_input_tokens: value.counts.cached_input_tokens,
             cache_creation_input_tokens: value.counts.cache_write_input_tokens ?? 0,
+            ...(value.counts.cache_write_input_tokens_1h !== undefined
+              ? { cache_creation_input_tokens_1h: value.counts.cache_write_input_tokens_1h }
+              : {}),
           },
         });
       emit({ type: 'event', event: { type: 'turn.completed', usage: total } });

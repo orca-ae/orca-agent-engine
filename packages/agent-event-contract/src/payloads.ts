@@ -118,6 +118,8 @@ export interface ModelUsageCounts {
   output_tokens: number;
   cache_creation_input_tokens: number;
   cache_read_input_tokens: number;
+  /** Optional 1h subset; legacy summaries assign all creation tokens to 5m. */
+  cache_creation_input_tokens_1h?: number;
 }
 
 /** Proven granularity for currently emitted model observations. */

@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { afterEach, expect, it, vi } from 'vitest';
-import { installManagedFetch } from '../../src/transport.js';
+import { validatedProviderFetch } from '@orca/sdk-harness';
+import { installManagedFetch, MessagesUsage } from '../../src/transport.js';
 
 const newline = String.fromCharCode(10);
 const sse = (...events: unknown[]) =>
@@ -24,6 +25,51 @@ const messages = (output = 2) => [
   { type: 'message_stop' },
 ];
 afterEach(() => vi.unstubAllGlobals());
+
+it.each(['native Messages', 'shared provider'])(
+  '%s preserves omitted cache breakdowns and validates complete cumulative replacements',
+  async (parser) => {
+    async function observe(delta: Record<string, unknown>) {
+      const events: Record<string, unknown>[] = messages();
+      events[1] = {
+        type: 'message_delta',
+        delta: { stop_reason: 'end_turn' },
+        usage: { output_tokens: 2, ...delta },
+      };
+      if (parser === 'native Messages') {
+        const usage = new MessagesUsage();
+        for (const event of events) usage.event(event);
+        return usage.finish();
+      }
+      const completed = vi.fn();
+      const fetch = validatedProviderFetch(
+        'anthropic-messages',
+        async () => new Response(sse(...events)),
+        completed,
+      );
+      await (await fetch('https://upstream.example/v1/messages')).text();
+      return completed.mock.calls[0]?.[0];
+    }
+    expect(await observe({})).toMatchObject({
+      input_tokens: 7,
+      cached_input_tokens: 3,
+      cache_write_input_tokens: 2,
+      cache_write_input_tokens_1h: 1,
+    });
+    expect(
+      await observe({
+        cache_creation_input_tokens: 5,
+        cache_creation: { ephemeral_5m_input_tokens: 3, ephemeral_1h_input_tokens: 2 },
+      }),
+    ).toMatchObject({ cache_write_input_tokens: 5, cache_write_input_tokens_1h: 2 });
+    await expect(
+      observe({
+        cache_creation_input_tokens: 5,
+        cache_creation: { ephemeral_5m_input_tokens: 3, ephemeral_1h_input_tokens: 1 },
+      }),
+    ).rejects.toThrow('cache usage');
+  },
+);
 
 it.each([
   [
