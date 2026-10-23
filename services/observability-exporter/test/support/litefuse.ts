@@ -177,7 +177,9 @@ function observationMatches(
     ioMatches(observation.output, io?.output?.json) &&
     usageMatches(observation, span) &&
     Object.entries(span.metadata)
-      .filter(([key]) => key.startsWith('orca.tool.last_approval.'))
+      .filter(
+        ([key]) => key.startsWith('orca.tool.last_approval.') || key.startsWith('orca.thread.'),
+      )
       .every(([key, value]) => readMetadata(observation)[key] === value)
   );
 }

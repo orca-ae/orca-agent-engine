@@ -7,7 +7,7 @@ import {
   IO_VERSION,
   type PinnedDeliveryContext,
 } from '../../src/types.js';
-import { completedProjectedTrace } from '../support/events.js';
+import { completedProjectedTrace, completedNativeChildTrace } from '../support/events.js';
 import { waitForLitefuseProjectedTrace } from '../support/litefuse.js';
 import { toolSpan } from '../support/tools.js';
 
@@ -88,6 +88,70 @@ describe('Litefuse observation read-back', () => {
     await vi.runAllTimersAsync();
     await result;
   });
+
+  it.each(['object', 'string'] as const)(
+    'checks exact spawn/fork thread metadata returned as %s',
+    async (representation) => {
+      const trace = completedNativeChildTrace('metadata_only');
+      const { credentials } = fixture();
+      for (const tampered of [
+        'none',
+        'spawn subpath',
+        'fork subpath',
+        'thread ID',
+        'parent thread ID',
+        'parent subpath',
+        'missing subpath',
+      ]) {
+        const observations = [trace.root, ...trace.spans].map((span, index) => {
+          const metadata = { ...trace.root.metadata, ...span.metadata };
+          if (
+            (index === 1 && tampered === 'spawn subpath') ||
+            (index === 2 && tampered === 'fork subpath')
+          )
+            metadata['orca.thread.subpath'] = '';
+          if (index === 1 && tampered === 'thread ID')
+            metadata['orca.thread.session_thread_id'] = 'sth_wrong';
+          if (index === 1 && tampered === 'parent thread ID')
+            metadata['orca.thread.parent_thread_id'] = 'sth_wrong';
+          if (index === 1 && tampered === 'parent subpath')
+            metadata['orca.thread.parent_subpath'] = span.subpath;
+          if (index === 1 && tampered === 'missing subpath') delete metadata['orca.thread.subpath'];
+          const usage = span.modelSummary?.usage;
+          return {
+            id: span.spanId,
+            traceId: trace.traceId,
+            parentObservationId: span.parentSpanId ?? null,
+            name: span.name,
+            type: index === 0 ? 'AGENT' : 'SPAN',
+            level: 'DEFAULT',
+            startTime: span.startedAt,
+            endTime: span.endedAt,
+            sessionId: trace.workspaceId + ':' + trace.sessionId,
+            metadata: representation === 'string' ? JSON.stringify(metadata) : metadata,
+            usageDetails: {
+              input: usage?.inputTokens,
+              output: usage?.outputTokens,
+              cache_creation_input_tokens: usage?.cacheCreationInputTokens,
+              input_cached_tokens: usage?.cacheReadInputTokens,
+            },
+          };
+        });
+        vi.useFakeTimers();
+        vi.stubEnv('LITEFUSE_SMOKE_TIMEOUT_MS', '10');
+        vi.stubGlobal(
+          'fetch',
+          vi.fn(async () => Response.json({ data: observations })),
+        );
+        const work = waitForLitefuseProjectedTrace({ trace, credentials });
+        const result =
+          tampered === 'none'
+            ? expect(work).resolves.toBeUndefined()
+            : expect(work).rejects.toThrow('was not queryable');
+        await Promise.all([result, vi.runAllTimersAsync()]);
+      }
+    },
+  );
 
   it('does not report success when a tool output is missing', async () => {
     const { trace, credentials, observations } = fixture();

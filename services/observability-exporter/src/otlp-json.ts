@@ -208,7 +208,13 @@ function sharedTraceAttributes(trace: ProjectedTrace): OtlpAttribute[] {
     ...(trace.userId === undefined
       ? []
       : [stringAttribute('langfuse.user.id', `${trace.workspaceId}:${trace.userId}`)]),
-    ...metadataAttributes('langfuse.trace.metadata.', trace.root.metadata),
+    // Thread identity belongs to each observation, not to the shared trace.
+    ...metadataAttributes(
+      'langfuse.trace.metadata.',
+      Object.fromEntries(
+        Object.entries(trace.root.metadata).filter(([key]) => !key.startsWith('orca.thread.')),
+      ),
+    ),
   ];
 }
 

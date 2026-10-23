@@ -33,6 +33,14 @@ describe('pinned trace attribution', () => {
     const trace = completedProjectedTrace();
     const spans = encodeLangfuseOtlpJson(trace, context).resourceSpans[0]!.scopeSpans[0]!.spans;
     for (const span of spans) {
+      for (const { key, value } of span.attributes.filter(({ key }) =>
+        key.startsWith('langfuse.observation.metadata.orca.deployment.'),
+      )) {
+        expect(span.attributes).toContainEqual({
+          key: key.replace('langfuse.observation.metadata.', 'langfuse.trace.metadata.'),
+          value,
+        });
+      }
       expect(span.attributes).toEqual(
         expect.arrayContaining([
           {

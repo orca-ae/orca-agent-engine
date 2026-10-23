@@ -2,8 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { Event } from '@orca/transcript-store-types';
-import { projectCanonicalTurns } from '../../src/projector.js';
-import type { ProjectedTrace } from '../../src/types.js';
+import {
+  initialCanonicalProjectionState,
+  projectCanonicalTurns,
+  reduceCanonicalEventBatch,
+} from '../../src/projector.js';
+import type { CaptureMode, ProjectedTrace } from '../../src/types.js';
 
 export const WORKSPACE_ID = 'ws_observability';
 export const SESSION_ID = 'ses_observability';
@@ -104,5 +108,76 @@ export function completedPrimaryTurnEvents(
 export function completedProjectedTrace(): ProjectedTrace {
   const trace = projectCanonicalTurns(completedPrimaryTurnEvents())[0];
   if (trace === undefined) throw new Error('expected completed synthetic turn');
+  return trace;
+}
+
+/** Sibling native spawn/fork threads with distinct identity and self-only usage. */
+export function completedNativeChildTrace(mode: CaptureMode): ProjectedTrace {
+  const children = [
+    { kind: 'spawn', nativeId: '11111111-1111-4111-8111-111111111111' },
+    { kind: 'fork', nativeId: '22222222-2222-4222-8222-222222222222' },
+  ];
+  const events = [
+    event(
+      1,
+      'user.message',
+      { content: [{ type: 'text', text: 'root input' }] },
+      { producedBy: 'client' },
+    ),
+    event(2, 'session.user_event_processed', { user_event_id: 'evt_1' }),
+    ...children.flatMap(({ kind, nativeId }, index) => {
+      const subpath = 'subagents/' + nativeId;
+      const seq = 3 + index * 3;
+      return [
+        event(
+          seq,
+          'session.thread_created',
+          {
+            parent_subpath: '',
+            session_thread_id: 'sth_' + kind,
+            parent_thread_id: 'sth_root',
+          },
+          { subpath },
+        ),
+        event(
+          seq + 1,
+          'span.model_request_start',
+          {
+            model_observation_kind: 'turn_model_summary',
+            provider: 'anthropic',
+            model: 'claude-test',
+          },
+          { subpath },
+        ),
+        event(
+          seq + 2,
+          'span.model_request_end',
+          {
+            model_observation_kind: 'turn_model_summary',
+            model_request_start_id: 'evt_' + (seq + 1),
+            model_usage: {
+              input_tokens: index + 3,
+              output_tokens: index + 5,
+              cache_creation_input_tokens: index + 7,
+              cache_read_input_tokens: index + 11,
+            },
+          },
+          { subpath },
+        ),
+      ];
+    }),
+    event(9, 'agent.message', { content: [{ type: 'text', text: 'root output' }] }),
+    event(10, 'session.status_idle', { stop_reason: { type: 'end_turn' } }),
+  ];
+  const result = reduceCanonicalEventBatch(
+    initialCanonicalProjectionState(),
+    events,
+    new Set(),
+    undefined,
+    mode,
+  );
+  if (result.issues.length > 0) throw new Error('invalid native child fixture');
+  const trace = result.completedTraces[0];
+  if (trace === undefined) throw new Error('expected completed native child turn');
   return trace;
 }
