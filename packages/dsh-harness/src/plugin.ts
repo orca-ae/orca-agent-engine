@@ -5,6 +5,7 @@ import type { Context } from '@deepseek-ai/cordis';
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent';
 import type {} from '@deepseek-ai/dsh-session-projection';
 import type {} from '@deepseek-ai/dsh-session-query';
+import type {} from '@deepseek-ai/dsh-working-directory';
 import type { SubagentPromptRequestId } from '@deepseek-ai/dsh-subagent';
 import { apply as delegation } from '@deepseek-ai/dsh-tool-subagent';
 import { apply as control } from '@deepseek-ai/dsh-tool-subagent-control';
@@ -42,6 +43,7 @@ export const inject = [
   'sessionPersistence',
   'subagents',
   'sessionQuery',
+  'workingDirectory',
 ];
 const zero = (): SdkTerminalUsage => ({
   input_tokens: 0,
@@ -180,6 +182,10 @@ export function apply(ctx: Context): void {
     if (!input) throw new Error('DSH composition before initialization');
     if (agent.options.provider !== nativeProvider || agent.options.model !== input.model)
       throw new Error('DSH child model expansion rejected');
+    // dsh-working-directory@0.2.1-alpha.2 lib/index.js: ensure preserves valid cwd; recovery
+    // commits once and injects a non-waking notice (dsh-agent-loop AgentLoopMachine.inject).
+    // Await before tools/publication or lazy-child input; unrecoverable cwd rejects setup.
+    await ctx.workingDirectory.ensure(agent);
     for (const tool of input.tools) {
       if (orchestration.has(tool.name) || tool.name === 'web_fetch')
         throw new Error('Reserved DSH tool name');

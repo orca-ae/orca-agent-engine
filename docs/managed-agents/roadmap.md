@@ -30,7 +30,11 @@ Each item is proposed as an OIP pull request; the design is reviewed there befor
 
 - **DSH SDK colocated rollout.**
   Target-platform image validation, real-provider managed Session execution and sandbox
-  replacement validation remain prerequisites to enabling it in a deployment. Self-hosted
+  replacement validation remain prerequisites to enabling it in a deployment. Verify strict
+  reply-only output after workspace replacement and failed-tree checkpoint recovery against a
+  deployed real provider, correlating assistant messages to the accepted input and retaining
+  warm controls and legitimate cwd replies. Local native HTTP fixtures cover these paths,
+  including lazy child restore; they do not establish deployed model behavior. Self-hosted
   execution, external child runtimes and plugin management wait for a concrete caller; workspace backup or native-state blob
   offload waits for recovery or size requirements beyond the bounded native checkpoint.
   Native in-process children and flat thread observations are implemented, but nested cold
