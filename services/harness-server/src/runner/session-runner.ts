@@ -297,6 +297,14 @@ export class SessionRunner {
     return this.opts.harness.supportsNativeThreadInterrupt ?? false;
   }
 
+  hasSettledFailure(): boolean {
+    return this.opts.harness.hasSettledFailure?.() ?? false;
+  }
+
+  async waitForFailedTurnSettlement(): Promise<void> {
+    await this.opts.harness.waitForFailedTurnSettlement?.();
+  }
+
   hasPendingGuardrailUsage(): boolean {
     return (
       this.usageStateFailure !== null ||

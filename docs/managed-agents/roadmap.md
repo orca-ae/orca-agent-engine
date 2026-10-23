@@ -44,6 +44,13 @@ Each item is proposed as an OIP pull request; the design is reviewed there befor
   it. Primary-thread archive currently fails closed by retiring the DSH tree rather than providing
   native root archive acknowledgement; complete that path before claiming full thread-control
   parity. File writes and remote MCP business effects are not transactionally rolled back.
+  Active-root interrupt and deadline settlement require deployed acceptance through the public
+  API and real transcript backend: confirm process exit and absence of delayed side effects,
+  persist the terminal outcome, then restore the prior committed checkpoint on explicit input
+  without replaying the command. Trigger these checks when deploying the bounded cancellation
+  path. Local process-group and receipt fixtures do not establish deployed behavior. Native
+  child settlement diagnostics distinguish missing terminal facts while preserving fail-closed
+  accounting; historical failures still require evidence from the affected execution.
 - **DSH model catalog and provider acceptance.** The static catalog uses the pinned official
   plugin's chat models; managed transport/raw usage covers Messages, Chat Completions,
   Responses and Google Generative AI with local published-runtime fixtures. Remaining catalog

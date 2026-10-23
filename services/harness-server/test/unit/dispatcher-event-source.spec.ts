@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { turnStoreFixture } from '../support/codex-turn-store.js';
+import { CodexSdkHarness } from '../../src/harness/codex-sdk/index.js';
+import { captureCheckpoint } from '../../../../packages/dsh-harness/src/checkpoint.js';
+import type { WorkerCommand } from '@orca/sdk-harness';
 import { Readable } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -44,16 +47,352 @@ import type {
   ToolCall,
   ToolResult,
 } from '../../src/sandbox/sandbox-runtime.js';
-import { RegistryInvalidRuntimeBindingError } from '../../src/clients/registry.js';
+import { RegistryClient, RegistryInvalidRuntimeBindingError } from '../../src/clients/registry.js';
 import type {
   AgentRecord,
   PreparedExecutionV2,
-  RegistryClient,
   SessionRecord,
   SkillDescriptor,
 } from '../../src/clients/registry.js';
 
 describe('Dispatcher with custom SessionEventSource', () => {
+  it.each(
+    ['token', 'fetch', 'decode'].flatMap((stage) =>
+      ['timeout', 'abort-resolve', 'abort-reject'].map((outcome) => ({ stage, outcome })),
+    ),
+  )(
+    'bounds control ownership $stage on $outcome and ignores late results',
+    async ({ stage, outcome }) => {
+      vi.useFakeTimers();
+      let release!: () => void;
+      let fail!: (error: Error) => void;
+      const stalled = new Promise<void>((resolve, reject) => {
+        release = resolve;
+        fail = reject;
+      });
+      let waiting = false;
+      const wait = async () => {
+        waiting = true;
+        await stalled;
+      };
+      const registry = new RegistryClient('http://registry.test', async () => {
+        if (stage === 'token') await wait();
+        return 'test-token';
+      });
+      const fetch = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+        if (stage === 'fetch') await wait();
+        const response = Response.json({ owner: 'harness-server' });
+        if (stage === 'decode')
+          vi.spyOn(response, 'json').mockImplementation(async () => {
+            await wait();
+            return { owner: 'harness-server' };
+          });
+        return response;
+      });
+      const store = new RecordingStore();
+      const dispatcher = new Dispatcher({
+        store,
+        registry,
+        groupId: 'bounded-control-owner',
+        anthropicApiKey: 'unused',
+        modelDefault: 'fake',
+      });
+      const state = dispatcher as unknown as {
+        runners: Map<string, unknown>;
+        followRootInterrupts(
+          ws: string,
+          session: string,
+          turn: UserEvent,
+          signal: AbortSignal,
+          ready: () => void,
+        ): AsyncIterable<unknown>;
+      };
+      const ws = 'ws_pg_dispatcher',
+        session = 'ses_control_stall';
+      state.runners.set(ws + '/' + session, {});
+      let joined = false;
+      vi.spyOn(store, 'tail').mockImplementation(async function* () {
+        try {
+          yield { ...userMessage('evt_stalled_interrupt', ws, session), kind: 'user.interrupt' };
+        } finally {
+          joined = true;
+        }
+      });
+      const abort = new AbortController();
+      const iterator = state
+        .followRootInterrupts(
+          ws,
+          session,
+          { id: 'evt_turn', seq: 1, kind: 'user.message', payload: {} },
+          abort.signal,
+          () => {},
+        )
+        [Symbol.asyncIterator]();
+      try {
+        const next = iterator.next().catch((error: unknown) => error);
+        await vi.waitFor(() => expect(waiting).toBe(true));
+        if (outcome === 'timeout') {
+          await vi.advanceTimersByTimeAsync(5_000);
+          expect(await next).toBeInstanceOf(DurableHarnessStateError);
+        } else {
+          abort.abort();
+          expect(await next).toMatchObject({ done: true });
+        }
+        expect(joined).toBe(true);
+        if (outcome === 'abort-reject') fail(new Error('late ownership failure'));
+        else release();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(await iterator.next()).toMatchObject({ done: true });
+        expect(store.appended).toEqual([]);
+      } finally {
+        release();
+        abort.abort();
+        fetch.mockRestore();
+        state.runners.clear();
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it('tails active root controls from the source cursor without waiting for ordered delivery', async () => {
+    const source = new FakeEventSource();
+    const store = new RecordingStore();
+    const registry = new RecordingRegistry();
+    const harness = new TerminalEchoHarness();
+    const submit = vi.spyOn(harness, 'submit');
+    const ws = 'ws_pg_dispatcher',
+      session = 'ses_active_control';
+    const dispatcher = new Dispatcher({
+      eventSource: source,
+      store,
+      registry: registry as unknown as RegistryClient,
+      groupId: 'active-control',
+      anthropicApiKey: 'unused',
+      modelDefault: 'fake',
+      harnessFactory: () => harness,
+    });
+    const turn = userMessage('evt_active_source', ws, session, 'work', 41);
+    const control = {
+      ...turn,
+      id: 'evt_followed_interrupt',
+      seq: 42,
+      kind: 'user.interrupt',
+      payload: Buffer.from('{}'),
+    };
+    let followerStopped = false;
+    vi.spyOn(store, 'tail').mockImplementation(async function* (_ws, _session, opts) {
+      expect([_ws, _session, opts.fromCursor, opts.subpath]).toEqual([ws, session, '41', '']);
+      opts.onReady?.();
+      yield { ...control, id: 'evt_child_control', subpath: 'subagents/child' };
+      yield { ...control, id: 'evt_internal_control', producedBy: 'registry' };
+      yield control;
+      try {
+        if (!opts.signal?.aborted)
+          await new Promise<void>((resolve) =>
+            opts.signal!.addEventListener('abort', () => resolve(), { once: true }),
+          );
+      } finally {
+        followerStopped = true;
+      }
+    });
+    const state = dispatcher as unknown as {
+      followRootInterrupts(
+        ws: string,
+        session: string,
+        turn: UserEvent,
+        signal: AbortSignal,
+        ready: () => void,
+      ): AsyncIterable<{ event: UserEvent; hooks: SubmitHooks }>;
+      completionForTerminal(
+        ws: string,
+        session: string,
+        generation: number,
+        sourceIds: string[],
+      ): { events: Event[]; onPersisted(): void };
+      lifecycleGeneration: number;
+    };
+    await dispatcher.start();
+    const abort = new AbortController();
+    let release!: () => void;
+    const executing = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    try {
+      await source.emit({ ...turn, id: 'evt_warm_control_source', seq: 40 });
+      submit.mockImplementationOnce(async (_event, hooks) => {
+        await hooks?.onAccepted();
+        await executing;
+      });
+      const busy = source.emit(turn);
+      await vi.waitFor(() =>
+        expect(
+          store.appended.filter((e) => e.kind === 'session.user_event_processed').map(eventPayload),
+        ).toContainEqual({ user_event_id: turn.id }),
+      );
+      // The regular source remains parked on its current work; only the tail sees this append.
+      store.seed([control]);
+      const ready = vi.fn();
+      const iterator = state
+        .followRootInterrupts(
+          ws,
+          session,
+          { id: turn.id, seq: turn.seq, kind: turn.kind, payload: {} },
+          abort.signal,
+          ready,
+        )
+        [Symbol.asyncIterator]();
+      const followed = await iterator.next();
+      expect(followed.value.event.id).toBe(control.id);
+      expect(ready).toHaveBeenCalledTimes(1);
+      expect(submit).toHaveBeenCalledTimes(2);
+      await followed.value.hooks.onAccepted();
+      const completion = state.completionForTerminal(ws, session, state.lifecycleGeneration, [
+        turn.id,
+        control.id,
+      ]);
+      await store.append(ws, session, completion.events);
+      completion.onPersisted();
+      const draining = iterator.next();
+      abort.abort();
+      await draining;
+      expect(followerStopped).toBe(true);
+      release();
+      await busy;
+      await source.emit(control);
+      expect(submit).toHaveBeenCalledTimes(2);
+      expect(
+        store.appended.filter((e) => e.kind === 'session.user_event_completed').map(eventPayload),
+      ).toContainEqual({ user_event_id: control.id });
+    } finally {
+      release();
+      abort.abort();
+      await dispatcher.stop();
+    }
+  });
+
+  it.each(['found', 'missing'] as const)(
+    'resolves a source without an in-memory cursor: %s transcript input',
+    async (source) => {
+      const store = new RecordingStore();
+      const ws = 'ws_fallback',
+        session = 'ses_fallback';
+      const turn = userMessage('evt_deferred_source', ws, session, 'deferred', 41);
+      if (source === 'found') store.seed([turn]);
+      const abort = new AbortController();
+      const tail = vi.spyOn(store, 'tail').mockImplementation(async function* () {
+        abort.abort();
+        yield* [];
+      });
+      const dispatcher = new Dispatcher({
+        store,
+        groupId: 'source-cursor-fallback',
+        anthropicApiKey: 'unused',
+        modelDefault: 'fake',
+      });
+      const state = dispatcher as unknown as {
+        runners: Map<string, unknown>;
+        followRootInterrupts(
+          ws: string,
+          session: string,
+          turn: UserEvent,
+          signal: AbortSignal,
+          ready: () => void,
+        ): AsyncIterable<unknown>;
+      };
+      state.runners.set(ws + '/' + session, {});
+      const iterator = state
+        .followRootInterrupts(
+          ws,
+          session,
+          { id: turn.id, kind: turn.kind, payload: {} },
+          abort.signal,
+          () => {},
+        )
+        [Symbol.asyncIterator]();
+      try {
+        if (source === 'found') {
+          expect(await iterator.next()).toMatchObject({ done: true });
+          expect(tail).toHaveBeenCalledWith(
+            ws,
+            session,
+            expect.objectContaining({ fromCursor: '41', subpath: '' }),
+          );
+        } else {
+          await expect(iterator.next()).rejects.toThrow(
+            'DSH active control requires a runner and source cursor',
+          );
+          expect(tail).not.toHaveBeenCalled();
+        }
+        expect(store.readOptions).toEqual([{ fromCursor: '', maxEvents: 0, subpath: '*' }]);
+        expect(store.appended).toEqual([]);
+      } finally {
+        state.runners.clear();
+      }
+    },
+  );
+
+  it.each(['abort', 'runner', 'owner'])(
+    'fences %s while an active control ownership read is pending',
+    async (change) => {
+      const store = new RecordingStore();
+      const registry = new RecordingRegistry();
+      let release!: () => void;
+      const read = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      vi.spyOn(registry, 'getExecutionOwner').mockImplementation(async () => {
+        await read;
+        return change === 'owner' ? 'registry' : 'harness-server';
+      });
+      const dispatcher = new Dispatcher({
+        store,
+        registry: registry as unknown as RegistryClient,
+        groupId: 'active-control-fence',
+        anthropicApiKey: 'unused',
+        modelDefault: 'fake',
+      });
+      const ws = 'ws_pg_dispatcher',
+        session = 'ses_fence';
+      const state = dispatcher as unknown as {
+        runners: Map<string, unknown>;
+        followRootInterrupts(
+          ws: string,
+          session: string,
+          turn: UserEvent,
+          signal: AbortSignal,
+          ready: () => void,
+        ): AsyncIterable<unknown>;
+      };
+      state.runners.set(ws + '/' + session, {});
+      const abort = new AbortController();
+      vi.spyOn(store, 'tail').mockImplementation(async function* () {
+        yield {
+          ...userMessage('evt_late_interrupt', ws, session),
+          kind: 'user.interrupt',
+          payload: Buffer.from('{}'),
+        };
+      });
+      const iterator = state
+        .followRootInterrupts(
+          ws,
+          session,
+          { id: 'evt_turn', seq: 1, kind: 'user.message', payload: {} },
+          abort.signal,
+          () => {},
+        )
+        [Symbol.asyncIterator]();
+      const next = iterator.next();
+      const outcome = next.catch((error: unknown) => error);
+      await vi.waitFor(() => expect(registry.getExecutionOwner).toHaveBeenCalled());
+      if (change === 'abort') abort.abort();
+      if (change === 'runner') state.runners.set(ws + '/' + session, {});
+      release();
+      if (change === 'abort') expect(await outcome).toMatchObject({ done: true });
+      else expect(await outcome).toBeInstanceOf(DurableHarnessStateError);
+      state.runners.clear();
+    },
+  );
+
   it('uses one cold recovery scan and drains older deferred work before the new message', async () => {
     const source = new FakeEventSource();
     const store = new RecordingStore();
@@ -5784,6 +6123,232 @@ describe('Dispatcher with custom SessionEventSource', () => {
 
     await dispatcher.stop();
   });
+
+  it.each([
+    { rejectSettle: false, guarded: false },
+    { rejectSettle: true, guarded: false },
+    { rejectSettle: false, guarded: true },
+  ])(
+    'waits for background settle ACK before FIRST recovery input (reject=$rejectSettle, guarded=$guarded)',
+    async ({ rejectSettle, guarded }) => {
+      const source = new FakeEventSource();
+      const store = new RecordingStore();
+      const registry = new RecordingRegistry({
+        agentMetadata: { harness: 'dsh_sdk', mode: 'colocated' },
+      });
+      const nativeId = '12345678-1234-1234-1234-123456789abc';
+      const checkpoint = captureCheckpoint(nativeId, '', {
+        ['_no-cwd/' + nativeId + '/session.v4.jsonl']: Buffer.from(
+          JSON.stringify({
+            type: 'session',
+            version: 4,
+            id: nativeId,
+            createdAt: 0,
+            isSeeded: false,
+            delegationDepth: 0,
+          }) + String.fromCharCode(10),
+        ),
+      });
+      const turns = turnStoreFixture({ checkpoint });
+      let releaseSettle!: () => void;
+      let settling = false;
+      const settleResponse = new Promise<void>((resolve, reject) => {
+        releaseSettle = () => (rejectSettle ? reject(new Error('settle ACK lost')) : resolve());
+      });
+      const update = turns.store.update.bind(turns.store);
+      vi.spyOn(turns.store, 'update').mockImplementation(async (action) => {
+        const result = await update(action);
+        if (action.type === 'settle' && action.turnId === 'evt_deadline') {
+          settling = true;
+          await settleResponse;
+        }
+        return result;
+      });
+      const prepare = registry.prepareExecution.bind(registry);
+      vi.spyOn(registry, 'prepareExecution').mockImplementation(async (input) => ({
+        ...(await prepare(input))!,
+        archived_thread_subpaths: [],
+      }));
+      const commands: WorkerCommand[][] = [];
+      const harnesses: CodexSdkHarness[] = [];
+      const execute = vi.fn(async () => ({ content: 'forbidden' }));
+      const dispatcher = new Dispatcher({
+        eventSource: source,
+        store,
+        registry: registry as unknown as RegistryClient,
+        groupId: 'dsh-deadline-recovery',
+        anthropicApiKey: 'unused',
+        modelDefault: 'fake',
+        sessionIdleTimeoutMs: 60_000,
+        harnessFactory: () => {
+          const generation = commands.length;
+          const received: WorkerCommand[] = [];
+          commands.push(received);
+          const harness = new CodexSdkHarness({
+            harness: 'dsh_sdk',
+            apiKey: 'jwt',
+            dshGatewayUrl: 'http://gateway.test',
+            turnTimeoutMs: 50,
+            turns: turns.store,
+            onGuardrailState: async (updates) => {
+              registry.guardrailState ??= {};
+              for (const update of updates) {
+                if (update.action === 'set') registry.guardrailState[update.key] = update.value;
+                else if (update.action === 'delete') delete registry.guardrailState[update.key];
+              }
+            },
+            onUsage: vi.fn(async () => ({ total_tokens: 2 })),
+            llmGatewayJwtProvider: {
+              getValidToken: async () => ({ token: 'jwt' }) as never,
+              close: () => {},
+            },
+            createWorker: (emit) => ({
+              refreshOptions: () => {},
+              close: async () => {},
+              handle: async (command) => {
+                received.push(command);
+                if (command.type !== 'submit') return;
+                if (generation === 0) {
+                  emit({
+                    type: 'tool_call',
+                    id: 'pending_bash',
+                    name: 'bash',
+                    arguments: {},
+                    origin: { eventId: 'evt_pending_bash', subpath: '' },
+                  });
+                  await new Promise<void>(() => {});
+                } else {
+                  emit({
+                    type: 'event',
+                    event: {
+                      type: 'turn.completed',
+                      usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 },
+                    },
+                  });
+                  emit({ type: 'checkpoint', checkpoint });
+                }
+              },
+            }),
+          });
+          const start = harness.start.bind(harness);
+          vi.spyOn(harness, 'start').mockImplementation((input) =>
+            start({
+              ...input,
+              archivedThreadSubpaths: [],
+              supportsPerCallCancellation: true,
+              guardrails: guarded
+                ? [
+                    {
+                      id: 'budget',
+                      name: 'budget',
+                      tier: 'session',
+                      phases: ['request'],
+                      stateful: true,
+                      rule: {
+                        kind: 'builtin',
+                        builtin: 'token_budget',
+                        params: { max_total_tokens: 100 },
+                      },
+                    },
+                  ]
+                : [],
+              tools: [{ name: 'bash', description: '', input_schema: { type: 'object' }, execute }],
+              agentSnapshot: {
+                model_provider: 'deepseek',
+                model_id: 'deepseek-v4-flash',
+                allowed_tool_names: ['bash'],
+                tool_permission_policies: { mcp__orca__bash: 'always_ask' },
+              },
+            }),
+          );
+          harnesses.push(harness);
+          return harness;
+        },
+      });
+      try {
+        await dispatcher.start();
+        await source.emit(
+          userMessage('evt_deadline', 'ws_pg_dispatcher', 'ses_pg_dispatcher', 'forbidden'),
+        );
+        expect(harnesses[0]!.hasPendingRequiredAction()).toBe(true);
+        await vi.waitFor(() => expect(settling).toBe(true), {
+          timeout: 20_000,
+        });
+        expect(turns.snapshot.receipt?.error).toContain('timed out');
+        expect(store.appended.some((event) => event.kind === 'session.error')).toBe(true);
+        expect(
+          eventPayload(
+            store.appended.filter((event) => event.kind === 'session.status_idle').at(-1)!,
+          ),
+        ).toMatchObject({ stop_reason: { type: 'retries_exhausted' } });
+        expect(harnesses[0]!.hasSettledFailure()).toBe(false);
+        const waitForSettlement = vi.spyOn(harnesses[0]!, 'waitForFailedTurnSettlement');
+        const recovery = userMessage(
+          'evt_recover',
+          'ws_pg_dispatcher',
+          'ses_pg_dispatcher',
+          'remember baseline',
+          2,
+        );
+        const firstInput = source.emit(recovery).then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+        await vi.waitFor(() => expect(waitForSettlement).toHaveBeenCalledOnce());
+        const acceptedRecovery = () =>
+          store.appended.filter(
+            (event) =>
+              ['session.user_event_processed', 'session.user_event_completed'].includes(
+                event.kind,
+              ) && eventPayload(event).user_event_id === recovery.id,
+          );
+        expect(acceptedRecovery()).toEqual([]);
+        expect(commands).toHaveLength(1);
+        releaseSettle();
+        if (rejectSettle) {
+          expect(await firstInput).toMatchObject({
+            name: 'SessionConfigRefreshError',
+            cause: expect.any(DurableHarnessStateError),
+          });
+          expect(await firstInput).toBeInstanceOf(RetryableSessionEventError);
+          expect(acceptedRecovery()).toEqual([]);
+          expect(commands).toHaveLength(1);
+          await source.emit(recovery);
+        } else expect(await firstInput).toBeUndefined();
+        expect(commands).toHaveLength(2);
+        expect(commands[1]!.find((command) => command.type === 'start')).toMatchObject({
+          checkpoint,
+        });
+        if (guarded) {
+          expect(harnesses[1]!.hasPendingGuardrailUsage()).toBe(true);
+          expect(commands[1]!.filter((command) => command.type === 'submit')).toEqual([]);
+          expect(registry.guardrailState).toHaveProperty('codex_sdk_usage_pending:evt_deadline');
+          expect(
+            store.appended.some(
+              (event) =>
+                event.kind === 'session.error' &&
+                JSON.stringify(eventPayload(event)).includes('pending usage accounting'),
+            ),
+          ).toBe(true);
+          expect(turns.snapshot.receipt?.turnId).toBe('evt_deadline');
+        } else {
+          expect(commands[1]!.filter((command) => command.type === 'submit')).toEqual([
+            expect.objectContaining({ sourceEventId: 'evt_recover', text: 'remember baseline' }),
+          ]);
+          expect(turns.snapshot.receipt).toMatchObject({
+            turnId: 'evt_recover',
+            phase: 'settled',
+            error: null,
+          });
+        }
+        expect(execute).not.toHaveBeenCalled();
+      } finally {
+        releaseSettle();
+        await dispatcher.stop();
+      }
+    },
+    25_000,
+  );
 
   it('respawns warm runner when session-local overrides change before next turn', async () => {
     const source = new FakeEventSource();

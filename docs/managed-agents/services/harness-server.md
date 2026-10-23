@@ -49,6 +49,15 @@ unsupported harness IDs fail configuration loading. Helm renders them from
 values are numbers, not strings. Tool-confirmation waits, managed tools and
 DSH native children share the same turn deadline.
 
+DSH deadline cancellation joins worker interruption and active execution for at most
+15 seconds, followed by a separate retirement budget of at most 15 seconds. It then
+abandons the unfinished receipt, persists a timeout error and final non-pending idle,
+and settles accepted sources. Transcript and Registry persistence require available
+backends and are outside those cleanup budgets. The next explicit message replaces
+a failed warm runtime before acceptance and restores the last committed checkpoint;
+it does not replay the timed-out input. Unknown usage remains unknown and keeps
+usage-guarded admission fail-closed.
+
 For Gateway egress, each turn requires a JWT with more than the effective timeout
 plus 30 seconds remaining. Credentials refresh between turns, not mid-turn;
 an insufficient minted lifetime fails turn startup explicitly. Registry's
@@ -162,6 +171,14 @@ Session cost/token caps apply between turns, not inside a running turn. Daily
 budgets check recorded spend and do not reserve spend across concurrent Sessions.
 Soft approval thresholds are rejected. Unpriced spend denies at this request-only
 boundary unless `on_unpriced: "allow"` is explicit.
+
+For active DSH turns, an owner-local transcript follower delivers root `user.interrupt`
+without waiting for the same Session's active source handler to return. It follows from the
+current input cursor and joins before terminal settlement; it neither advances the ordered
+source's ACK nor changes backend ordering. Accepted interrupt sources join the current receipt,
+and the existing durable completion markers deduplicate subsequent source delivery. Runner,
+turn and ownership checks fence stale controls. Cleanup deadlines and the interruption error
+terminal are described in [DSH SDK](../harness-modes.md#dsh-sdk-colocated-execution).
 
 Direct LLM egress uses harness-server's `OPENAI_API_KEY` and optional
 `OPENAI_BASE_URL` (the SDK default is `https://api.openai.com/v1`). Separate

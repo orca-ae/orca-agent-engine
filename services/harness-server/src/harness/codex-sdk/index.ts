@@ -79,6 +79,12 @@ export interface CodexSdkHarnessOptions {
   llmGatewayJwtProvider?: Pick<SessionJwtProvider, 'getValidToken' | 'close'>;
   createWorker?: (emit: (event: WorkerEvent) => void, input: SessionStartInput) => Worker;
   turnTimeoutMs?: number;
+  /** Owner-local read path; the ordered source retains its own delivery/ACK. */
+  rootInterrupts?: (
+    turn: UserEvent,
+    signal: AbortSignal,
+    onReady: () => void,
+  ) => AsyncIterable<{ event: UserEvent; hooks?: SubmitHooks }>;
   onGuardrailState?: ClaudeHarnessOptions['onGuardrailState'];
   onUsage?: ClaudeHarnessOptions['onUsage'];
   refreshGuardrailSubjectWindow?: ClaudeHarnessOptions['refreshGuardrailSubjectWindow'];
@@ -120,6 +126,8 @@ export class CodexSdkHarness implements AgentHarness {
   private guarded = false;
   private accountingBlocked = false;
   private interruptVersion = 0;
+  private readonly rootControls = new Map<string, Promise<void>>();
+  private controlAbort: AbortController | undefined;
   private submitTail: Promise<unknown> = Promise.resolve();
   private usageEventId: string | undefined;
   private usageAcknowledged = false;
@@ -128,6 +136,7 @@ export class CodexSdkHarness implements AgentHarness {
   private turnStateTail: Promise<unknown> = Promise.resolve();
   private readonly persistenceWaiters = new Set<(error: unknown) => void>();
   private active: Promise<void> | undefined;
+  private execution: Promise<void> | undefined;
   private starting: Promise<void> | undefined;
   private stopPromise: Promise<void> | undefined;
   private abort: AbortController | undefined;
@@ -139,6 +148,8 @@ export class CodexSdkHarness implements AgentHarness {
   private readers: Array<(event: IteratorResult<AgentEvent>) => void> = [];
   private stopped = false;
   private failed = false;
+  private turnRetired = false;
+  private rootCancellation: Promise<void> | undefined;
   private turnFailure: string | undefined;
   private turnId: string | undefined;
   private usage: ModelUsageCounts = {
@@ -480,8 +491,14 @@ export class CodexSdkHarness implements AgentHarness {
     if (this.dshProjection) await this.eventTail;
   }
 
-  async submit(event: UserEvent, hooks?: SubmitHooks): Promise<UserEventSubmitResult> {
+  async submit(
+    event: UserEvent,
+    hooks?: SubmitHooks,
+    followedTurnId?: string,
+  ): Promise<UserEventSubmitResult> {
     if (this.stopped || !this.worker) throw new Error(`${this.sdkName} is unavailable`);
+    if (followedTurnId && (this.turnId !== followedTurnId || this.receipt?.phase !== 'pending'))
+      return 'submitted';
     let subpath = event.subpath ?? '';
     const payloadSubpath = object(event.payload).subpath;
     if (this.dshProjection && payloadSubpath !== undefined) {
@@ -564,6 +581,11 @@ export class CodexSdkHarness implements AgentHarness {
           });
         return 'submitted';
       }
+      if (event.id && this.rootControls.has(event.id)) {
+        await this.rootControls.get(event.id);
+        if (!followedTurnId) await this.active;
+        return 'submitted';
+      }
       if (this.receipt?.phase !== 'pending') {
         await this.active;
         await hooks?.onAccepted();
@@ -576,11 +598,8 @@ export class CodexSdkHarness implements AgentHarness {
         });
         return 'submitted';
       }
-      await this.acceptSource(event);
-      await hooks?.onAccepted();
-      this.turnFailure ??= `${this.sdkName} turn interrupted`;
-      await this.interrupt();
-      await this.active;
+      await this.interruptPendingTurn(event, hooks);
+      if (!followedTurnId) await this.active;
       return 'submitted';
     }
     if (event.kind === 'user.tool_confirmation' || event.kind === 'user.custom_tool_result') {
@@ -738,6 +757,7 @@ export class CodexSdkHarness implements AgentHarness {
     }
     this.abort = new AbortController();
     this.turnFailure = undefined;
+    this.turnRetired = false;
     this.eventTail = Promise.resolve();
     this.usage = {
       input_tokens: 0,
@@ -751,7 +771,9 @@ export class CodexSdkHarness implements AgentHarness {
     this.cancelledSubpaths.clear();
     this.orchestrationCalls.clear();
     this.uncertainCancellations.clear();
-    this.active = this.run(text, event.subpath ?? '').finally(() => {
+    this.rootControls.clear();
+    this.rootCancellation = undefined;
+    this.active = this.run(text, event.subpath ?? '', event).finally(() => {
       this.active = undefined;
       this.wakeIdle();
     });
@@ -764,7 +786,95 @@ export class CodexSdkHarness implements AgentHarness {
     return this.pending.size > 0;
   }
 
-  private async run(text: string, subpath: string): Promise<void> {
+  hasSettledFailure(): boolean {
+    // Dispatcher replaces this tree even when unknown spend still blocks guarded admission.
+    return this.opts.harness === 'dsh_sdk' && this.failed && this.receipt?.phase === 'settled';
+  }
+
+  async waitForFailedTurnSettlement(): Promise<void> {
+    if (this.opts.harness !== 'dsh_sdk' || !this.failed) return;
+    // Persistence ACKs are outside cancellation budgets; join their outcome before replacement.
+    try {
+      await this.active;
+    } catch (error) {
+      if (!(error instanceof SettledHarnessFailureError)) throw error;
+    }
+    if (!this.hasSettledFailure())
+      throw new DurableHarnessStateError('DSH failed turn settlement was not acknowledged');
+  }
+
+  private async interruptPendingTurn(event: UserEvent, hooks?: SubmitHooks): Promise<void> {
+    if (event.id && this.rootControls.has(event.id)) return this.rootControls.get(event.id);
+    const control = (async () => {
+      await this.acceptSource(event);
+      await hooks?.onAccepted();
+      this.turnFailure ??= `${this.sdkName} turn interrupted`;
+      await this.cancelRootTurn();
+    })();
+    if (event.id) this.rootControls.set(event.id, control);
+    return control;
+  }
+
+  private cancelRootTurn(): Promise<void> {
+    if (this.opts.harness !== 'dsh_sdk') return this.joinRootCancellation();
+    return (this.rootCancellation ??= this.joinRootCancellation());
+  }
+
+  private async joinRootCancellation(): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const interrupt = this.interrupt();
+      if (this.opts.harness !== 'dsh_sdk') await interrupt;
+      else {
+        await Promise.race([
+          Promise.all([interrupt, this.execution]),
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(
+              () => reject(new Error('DSH root interrupt cleanup timed out')),
+              15_000,
+            );
+          }),
+        ]);
+        if (this.uncertainCancellations.size)
+          throw new Error('Root tool termination could not be confirmed');
+      }
+    } catch (error) {
+      this.turnFailure += `; root interruption unconfirmed: ${error instanceof Error ? error.message : 'cleanup failed'}`;
+      throw error;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  private async followRootInterrupts(
+    turn: UserEvent,
+    signal: AbortSignal,
+    onReady: () => void,
+  ): Promise<void> {
+    for await (const { event, hooks } of this.opts.rootInterrupts!(turn, signal, onReady)) {
+      if (signal.aborted || this.stopped || this.turnId !== turn.id) return;
+      // The receipt stays pending through execution and follower join, until commit/abandon.
+      if (this.receipt?.phase !== 'pending') return;
+      await this.submit(event, hooks, turn.id);
+    }
+  }
+
+  private async run(text: string, subpath: string, turn: UserEvent): Promise<void> {
+    const controlAbort = new AbortController();
+    this.controlAbort = controlAbort;
+    let positioned!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      positioned = resolve;
+    });
+    const controls = this.opts.rootInterrupts
+      ? this.followRootInterrupts(turn, controlAbort.signal, positioned)
+      : undefined;
+    // Only failure wins this race; normal follower shutdown joins below.
+    const controlFailure = controls?.then(() => {
+      if (controlAbort.signal.aborted) throw new Error('DSH active control stopped');
+      return new Promise<never>(() => {});
+    });
+    void controlFailure?.catch(() => {});
     this.emit({ kind: SessionEventKind.statusRunning, payload: {} });
     const start =
       this.opts.harness === 'dsh_sdk'
@@ -776,11 +886,22 @@ export class CodexSdkHarness implements AgentHarness {
               model: this.input!.agentSnapshot.model_id!,
             }),
           });
+    let failDeadline!: (error: Error) => void;
+    const deadlineFailure = new Promise<never>((_, reject) => {
+      failDeadline = reject;
+    });
+    void deadlineFailure.catch(() => {});
     const timer = setTimeout(() => {
-      this.turnFailure = `${this.sdkName} turn timed out`;
-      void this.interrupt();
+      this.turnFailure ??= `${this.sdkName} turn timed out`;
+      if (this.opts.harness === 'dsh_sdk')
+        void this.cancelRootTurn().then(
+          () => failDeadline(new Error(this.turnFailure)),
+          () => failDeadline(new Error(this.turnFailure)),
+        );
+      else void this.interrupt().catch(() => {});
     }, this.opts.turnTimeoutMs ?? 600_000);
-    try {
+    const execution = (async () => {
+      if (controlFailure) await Promise.race([ready, controlFailure]);
       await this.worker!.refreshOptions({
         apiKey: await this.apiKey(),
         ...(this.opts.baseUrl ? { baseUrl: this.opts.baseUrl } : {}),
@@ -789,19 +910,35 @@ export class CodexSdkHarness implements AgentHarness {
           ? { piGatewayUrl: this.opts.piGatewayUrl }
           : {}),
       });
-      if (!this.abort?.signal.aborted)
-        await this.worker!.handle({
-          type: 'submit',
-          text,
-          ...(this.opts.harness === 'dsh_sdk'
-            ? {
-                sourceEventId: this.turnId!,
-                ...(nativeThreadId(subpath) ? { threadId: nativeThreadId(subpath)! } : {}),
-              }
-            : {}),
-        });
+      if (!this.abort?.signal.aborted) {
+        try {
+          await this.worker!.handle({
+            type: 'submit',
+            text,
+            ...(this.opts.harness === 'dsh_sdk'
+              ? {
+                  sourceEventId: this.turnId!,
+                  ...(nativeThreadId(subpath) ? { threadId: nativeThreadId(subpath)! } : {}),
+                }
+              : {}),
+          });
+        } catch (error) {
+          // An aborted SDK submit still needs the tool and event joins below.
+          if (
+            this.opts.harness !== 'dsh_sdk' ||
+            !this.abort?.signal.aborted ||
+            !(error instanceof Error) ||
+            error.name !== 'AbortError'
+          )
+            throw error;
+        }
+      }
       await Promise.all(this.toolCalls);
       await this.eventTail;
+    })();
+    this.execution = execution;
+    try {
+      await Promise.race([execution, deadlineFailure, ...(controlFailure ? [controlFailure] : [])]);
       if (this.guarded && !this.usageAcknowledged)
         this.turnFailure ??= `${this.sdkName} terminal usage was not acknowledged`;
     } catch (error) {
@@ -812,9 +949,17 @@ export class CodexSdkHarness implements AgentHarness {
           : `${this.sdkName} execution or durable usage failed`;
     } finally {
       clearTimeout(timer);
+      controlAbort.abort();
+      await controls?.catch(() => {
+        this.failed = true;
+        this.turnFailure ??= 'DSH active control failed; tree retired without replay';
+      });
+      if (this.controlAbort === controlAbort) this.controlAbort = undefined;
+      this.execution = undefined;
       this.abort?.abort();
       this.cancelActions();
     }
+    if (this.opts.harness === 'dsh_sdk') this.turnRetired = true;
     if (this.stopped) return;
     // FIFO acknowledgment proves every preceding response event is durable before
     // native history may advance. A rejected fence leaves the receipt pending.
@@ -972,17 +1117,20 @@ export class CodexSdkHarness implements AgentHarness {
 
   private receive(event: WorkerEvent): void {
     // Retirement cannot advance native history without the response/receipt fence.
-    if (this.stopped) return;
+    if (this.stopped || this.turnRetired) return;
     if (event.type === 'tool_call' || event.type === 'orchestration_request') {
       // Canonical declarations must finish validation before a managed tool runs.
       const call = (this.dshProjection ? this.eventTail : Promise.resolve())
         .then(() =>
-          event.type === 'orchestration_request'
-            ? this.authorizeOrchestration(event)
-            : this.callTool(event),
+          this.turnRetired || (this.dshProjection && this.abort?.signal.aborted)
+            ? undefined
+            : event.type === 'orchestration_request'
+              ? this.authorizeOrchestration(event)
+              : this.callTool(event),
         )
         .catch(() => {
-          this.turnFailure = `${this.sdkName} tool relay failed`;
+          if (this.turnRetired) return;
+          this.turnFailure ??= `${this.sdkName} tool relay failed`;
           return this.interrupt();
         })
         .finally(() => {
@@ -990,19 +1138,23 @@ export class CodexSdkHarness implements AgentHarness {
           this.inFlight.delete(event.id);
         });
       this.toolCalls.add(call);
+      void call.catch(() => {});
       this.inFlight.set(event.id, call);
     } else {
       this.eventTail = this.eventTail.then(async () => {
+        if (this.turnRetired) return;
         if (event.type === 'thread_tree') {
           if (!this.dshProjection || this.turnId)
             throw new Error('DSH lineage restore requires startup');
           this.dshProjection.restoreTree(event.threads);
         } else if (event.type === 'canonical_event') {
+          if (this.abort?.signal.aborted) return;
           if (!this.dshProjection || !this.turnId || this.receipt?.phase !== 'pending')
             throw new Error('Canonical worker events are DSH-only and require an active turn');
           this.emit(this.dshProjection.validate(event.event, this.turnId));
         } else if (event.type === 'checkpoint') {
-          this.checkpoint = event.checkpoint;
+          if (!this.dshProjection || !this.abort?.signal.aborted)
+            this.checkpoint = event.checkpoint;
         } else if (event.type === 'failure') {
           this.turnFailure ??= event.message;
           if (event.fatal) this.failed = true;
@@ -1010,6 +1162,7 @@ export class CodexSdkHarness implements AgentHarness {
           const sdk = event.event;
           if (sdk.type === 'thread.started') this.nativeRootId = sdk.thread_id;
           else if (sdk.type === 'item.completed' && sdk.item.type === 'agent_message') {
+            if (this.dshProjection && this.abort?.signal.aborted) return;
             const origin = this.dshProjection?.assertOrigin(event.origin);
             this.emit({
               ...(origin ? { id: origin.eventId, subpath: origin.subpath } : {}),
@@ -1067,12 +1220,12 @@ export class CodexSdkHarness implements AgentHarness {
             (sdk.type === 'turn.failed' || sdk.type === 'error') &&
             !this.abort?.signal.aborted
           )
-            this.turnFailure = sdk.type === 'error' ? sdk.message : sdk.error.message;
+            this.turnFailure ??= sdk.type === 'error' ? sdk.message : sdk.error.message;
           else if (
             sdk.type === 'item.started' &&
             ['command_execution', 'file_change', 'web_search'].includes(sdk.item.type)
           ) {
-            this.turnFailure = `${this.sdkName} attempted an unmediated native tool`;
+            this.turnFailure ??= `${this.sdkName} attempted an unmediated native tool`;
             this.failed = true;
             await this.interrupt();
           }
@@ -1081,7 +1234,7 @@ export class CodexSdkHarness implements AgentHarness {
       // The active turn observes the original rejected tail before emitting its terminal event.
       void this.eventTail.catch(() => {
         this.failed = true;
-        void this.interrupt();
+        if (!this.turnRetired) void this.interrupt().catch(() => {});
       });
     }
   }
@@ -1205,7 +1358,7 @@ export class CodexSdkHarness implements AgentHarness {
         content: [{ type: 'text', text: error instanceof Error ? error.message : 'Tool failed' }],
       };
     }
-    if (!this.stopped) {
+    if (!this.stopped && !this.turnRetired) {
       if (!binding?.custom)
         this.emit({
           subpath,
@@ -1551,6 +1704,7 @@ export class CodexSdkHarness implements AgentHarness {
   private async close(): Promise<void> {
     const alreadyFailed = this.failed;
     this.stopped = true;
+    this.controlAbort?.abort();
     for (const reject of this.persistenceWaiters) reject(new Error(`${this.sdkName} stopped`));
     this.persistenceWaiters.clear();
     this.opts.llmGatewayJwtProvider?.close();
