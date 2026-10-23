@@ -10,6 +10,7 @@ import { drizzle } from 'drizzle-orm/node-postgres';
 import { migrate } from 'drizzle-orm/node-postgres/migrator';
 import { Pool } from 'pg';
 import { describe, expect, it } from 'vitest';
+import { trackPoolShutdown } from '../helpers/pool-shutdown.js';
 
 const execFileAsync = promisify(execFile);
 const REGISTRY_DATABASE_URL =
@@ -36,10 +37,12 @@ describe('bootstrap observability settings', () => {
     const databaseUrl = new URL(REGISTRY_DATABASE_URL);
     databaseUrl.pathname = `/${databaseName}`;
     let pool: Pool | undefined;
+    let closePool: (() => Promise<void>) | undefined;
 
     try {
       await adminPool.query(`CREATE DATABASE "${databaseName}"`);
       pool = new Pool({ connectionString: databaseUrl.toString(), max: 2 });
+      closePool = trackPoolShutdown(pool);
       await migrate(drizzle(pool), { migrationsFolder: MIGRATIONS_FOLDER });
 
       const env = { ...process.env, DATABASE_URL: databaseUrl.toString() };
@@ -88,14 +91,12 @@ describe('bootstrap observability settings', () => {
         },
       ]);
     } finally {
-      await pool?.end().catch(() => {});
-      await adminPool
-        .query('SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1', [
-          databaseName,
-        ])
-        .catch(() => {});
-      await adminPool.query(`DROP DATABASE IF EXISTS "${databaseName}"`).catch(() => {});
-      await adminPool.end().catch(() => {});
+      try {
+        await closePool?.();
+        await adminPool.query(`DROP DATABASE IF EXISTS "${databaseName}"`);
+      } finally {
+        await adminPool.end();
+      }
     }
   }, 30_000);
 });

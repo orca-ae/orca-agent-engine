@@ -35,15 +35,15 @@ import { mkdtempSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { afterEach, beforeEach, describe, it, expect } from 'vitest';
-import { InMemorySandboxRuntime } from '@orca/sandbox-runtime';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
+import { InMemorySandboxRuntime, buildSandboxWritePolicy } from '@orca/sandbox-runtime';
 import { ProviderRegistry, buildSessionStartInput } from '../../src/harness/provider.js';
 import { registerPiProvider, PI_PROVIDER_NAME } from '../../src/harness/pi/provider.js';
 import { PiCliHarness } from '../../src/harness/pi/index.js';
 import type { SandboxHandle } from '../../src/sandbox/seam.js';
 import type { AgentEvent, ToolPermissionDecision } from '../../src/harness/agent-harness.js';
 import type { RunnerSnapshot } from '../../src/snapshot.js';
-import { failedNativeCli } from './support/failed-native-cli.js';
+import { failedNativeCli, scriptedNativeCliWithDeath } from './support/failed-native-cli.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FAKE_CLI = join(HERE, 'support', 'fake-pi-cli.mjs');
@@ -130,12 +130,195 @@ describe('pi provider — headless pi over RPC (fake CLI)', () => {
     rmSync(workdir, { recursive: true, force: true });
   });
 
+  it('waits for the native extension and RPC readiness before acknowledging startup', async () => {
+    const sandbox = await new InMemorySandboxRuntime().acquire({});
+    const child = scriptedNativeCliWithDeath();
+    const harness = new PiCliHarness(
+      fakeHarnessOptions(sandbox, { apiKey: 'fixture', launch: () => child.cli }),
+    );
+    let started = false;
+    const starting = harness
+      .start({
+        workspaceId: 'ws_1',
+        sessionId: 'ses_pi',
+        agentSnapshot: {},
+        sandboxResources: {
+          revision: 'a'.repeat(64),
+          executionId: 'exec_1',
+          placementId: 'placement_1',
+          policy: buildSandboxWritePolicy([]),
+        },
+      })
+      .then(() => {
+        started = true;
+      });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(started).toBe(false);
+    child.say(JSON.stringify({ type: 'orca.native_ready', version: 1 }));
+    await waitFor(() => child.frames.length === 1);
+    expect(started).toBe(false);
+    expect(JSON.parse(child.frames[0]!)).toMatchObject({
+      type: 'get_state',
+      id: 'orca_native_ready',
+    });
+    child.say(
+      JSON.stringify({
+        type: 'response',
+        command: 'get_state',
+        id: 'orca_native_ready',
+        success: true,
+      }),
+    );
+    await starting;
+    expect(started).toBe(true);
+    await harness.stop('replica.shutting_down');
+    await sandbox.destroy();
+  });
+
+  it.each(['always_allow', 'always_deny', 'always_ask'] as const)(
+    'uses Orca permission names for Native File tools (%s)',
+    async (policy) => {
+      const sandbox = await new InMemorySandboxRuntime().acquire({});
+      const child = scriptedNativeCliWithDeath();
+      const harness = new PiCliHarness(
+        fakeHarnessOptions(sandbox, { apiKey: 'fixture', launch: () => child.cli }),
+      );
+      const sink = collectEvents(harness);
+      const policyFor = vi.fn((name: string) =>
+        name === 'mcp__orca__read' ? policy : ('always_deny' as const),
+      );
+      const confirmTool = vi.fn(
+        async (): Promise<ToolPermissionDecision> => ({
+          behavior: 'allow',
+          updatedInput: {},
+        }),
+      );
+      try {
+        const starting = harness.start({
+          workspaceId: 'ws_1',
+          sessionId: 'ses_pi',
+          agentSnapshot: { allowed_tool_names: ['read'] },
+          toolPermissions: { policyFor },
+          confirmTool,
+          sandboxResources: {
+            revision: 'a'.repeat(64),
+            executionId: 'exec_1',
+            placementId: 'placement_1',
+            policy: buildSandboxWritePolicy([]),
+          },
+        });
+        await new Promise((resolve) => setImmediate(resolve));
+        child.say(JSON.stringify({ type: 'orca.native_ready', version: 1 }));
+        await waitFor(() => child.frames.length === 1);
+        child.say(JSON.stringify({ type: 'response', id: 'orca_native_ready', success: true }));
+        await starting;
+        const submitted = harness.submit({
+          kind: 'user.message',
+          payload: { native_turn_id: 'evt_policy', content: [{ type: 'text', text: 'Read' }] },
+        });
+        child.say(
+          JSON.stringify({
+            type: 'extension_ui_request',
+            id: 'ui_policy',
+            method: 'select',
+            title: 'ORCA_TOOL_APPROVAL\tcall_policy\tread',
+            options: ['Allow', 'Block'],
+          }),
+        );
+        await waitFor(() =>
+          child.frames.some((frame) => JSON.parse(frame).type === 'extension_ui_response'),
+        );
+        expect(policyFor).toHaveBeenCalledWith('mcp__orca__read');
+        expect(child.frames.map((frame) => JSON.parse(frame))).toContainEqual({
+          type: 'extension_ui_response',
+          id: 'ui_policy',
+          value: policy === 'always_deny' ? 'Block' : 'Allow',
+        });
+        expect(confirmTool).toHaveBeenCalledTimes(policy === 'always_ask' ? 1 : 0);
+        if (policy === 'always_ask')
+          expect(confirmTool).toHaveBeenCalledWith(
+            'mcp__orca__read',
+            {},
+            { toolUseId: 'call_policy' },
+          );
+        child.say(JSON.stringify({ type: 'agent_settled' }));
+        await submitted;
+      } finally {
+        await harness.stop('replica.shutting_down');
+        await sink.done;
+        await sandbox.destroy();
+      }
+    },
+  );
+
+  it.each(['launch', 'extension'] as const)(
+    'rejects native startup on %s failure',
+    async (failure) => {
+      const sandbox = await new InMemorySandboxRuntime().acquire({});
+      const child = scriptedNativeCliWithDeath({
+        initial: [JSON.stringify({ type: 'extension_error', error: 'fixture' })],
+      });
+      const harness = new PiCliHarness(
+        fakeHarnessOptions(sandbox, {
+          apiKey: 'fixture',
+          launch: () =>
+            failure === 'launch' ? failedNativeCli(new Error('fixture launch failure')) : child.cli,
+        }),
+      );
+      await expect(
+        harness.start({
+          workspaceId: 'ws_1',
+          sessionId: 'ses_pi',
+          agentSnapshot: {},
+          sandboxResources: {
+            revision: 'a'.repeat(64),
+            executionId: 'exec_1',
+            placementId: 'placement_1',
+            policy: buildSandboxWritePolicy([]),
+          },
+        }),
+      ).rejects.toThrow(/readiness|extension/);
+      await sandbox.destroy();
+    },
+  );
+
   it('registers under the `pi` key on the provider registry', () => {
     const registry = new ProviderRegistry();
     registerPiProvider(registry, { modelDefault: 'claude-sonnet-4-5' });
     expect(PI_PROVIDER_NAME).toBe('pi');
     expect(registry.has('pi')).toBe(true);
     expect(registry.providerNames()).toContain('pi');
+  });
+
+  it('rejects native direct startup without a credential before launching Pi', async () => {
+    const sandbox = await new InMemorySandboxRuntime().acquire({});
+    let launches = 0;
+    const harness = new PiCliHarness(
+      fakeHarnessOptions(sandbox, {
+        launch: () => {
+          launches++;
+          return scriptedNativeCliWithDeath().cli;
+        },
+      }),
+    );
+    try {
+      await expect(
+        harness.start({
+          workspaceId: 'ws_1',
+          sessionId: 'ses_pi',
+          agentSnapshot: {},
+          sandboxResources: {
+            revision: 'a'.repeat(64),
+            executionId: 'exec_1',
+            placementId: 'placement_1',
+            policy: buildSandboxWritePolicy([]),
+          },
+        }),
+      ).rejects.toThrow('credential');
+      expect(launches).toBe(0);
+    } finally {
+      await sandbox.destroy();
+    }
   });
 
   it('drives a chat turn: normalizes assistant text → turn_completed', async () => {

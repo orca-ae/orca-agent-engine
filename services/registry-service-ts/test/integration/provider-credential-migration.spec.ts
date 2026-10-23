@@ -10,6 +10,7 @@ import { drizzle } from 'drizzle-orm/node-postgres';
 import { migrate } from 'drizzle-orm/node-postgres/migrator';
 import { Pool } from 'pg';
 import { describe, expect, it } from 'vitest';
+import { trackPoolShutdown } from '../helpers/pool-shutdown.js';
 
 const REGISTRY_DATABASE_URL =
   process.env['DATABASE_URL'] ?? 'postgres://orca:orca@localhost:5432/registry';
@@ -51,10 +52,12 @@ describe('provider credential migration', () => {
     databaseUrl.pathname = `/${databaseName}`;
     const tempDir = await mkdtemp(join(tmpdir(), 'orca-registry-provider-migration-'));
     let pool: Pool | undefined;
+    let closePool: (() => Promise<void>) | undefined;
 
     try {
       await adminPool.query(`CREATE DATABASE "${databaseName}"`);
       pool = new Pool({ connectionString: databaseUrl.toString(), max: 2 });
+      closePool = trackPoolShutdown(pool);
       const pre0044Folder = await createPre0044MigrationsFolder(tempDir);
       await migrate(drizzle(pool), { migrationsFolder: pre0044Folder });
 
@@ -151,14 +154,12 @@ describe('provider credential migration', () => {
         `),
       ).rejects.toMatchObject({ code: '23514' });
     } finally {
-      await pool?.end().catch(() => {});
-      await adminPool
-        .query('SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1', [
-          databaseName,
-        ])
-        .catch(() => {});
-      await adminPool.query(`DROP DATABASE IF EXISTS "${databaseName}"`).catch(() => {});
-      await adminPool.end().catch(() => {});
+      try {
+        await closePool?.();
+        await adminPool.query(`DROP DATABASE IF EXISTS "${databaseName}"`);
+      } finally {
+        await adminPool.end();
+      }
       await rm(tempDir, { recursive: true, force: true });
     }
   }, 30_000);

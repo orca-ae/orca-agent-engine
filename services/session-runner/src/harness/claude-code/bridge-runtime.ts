@@ -29,9 +29,14 @@
 
 import { serveNativeCliBridge } from '../../mcp/native-cli-bridge.js';
 import { reattachSessionSandbox } from './reattach-sandbox.js';
+import { readFileSync, realpathSync, statSync } from 'node:fs';
+import { join } from 'node:path';
+import { nativeFileToolSandbox } from '../pi/file-policy.js';
+import { NATIVE_FILE_TOOLS } from '../../sandbox/seam.js';
 
 /** The `--root` flag: the session sandbox work-dir the bridge binds its tools to. */
 export const BRIDGE_ROOT_FLAG = '--root';
+export const BRIDGE_NATIVE_FILE_POLICY_FLAG = '--native-file-policy';
 /** The `--tmux-socket` flag: the socket for a tmux-backed (local-attach) session. */
 export const BRIDGE_TMUX_SOCKET_FLAG = '--tmux-socket';
 /**
@@ -92,10 +97,32 @@ export async function runBridgeEntry(argv: string[] = process.argv.slice(2)): Pr
   const tmuxSocket = argValue(argv, BRIDGE_TMUX_SOCKET_FLAG);
   const allowedLogicalNames = parseAllowedToolsFlag(argv);
 
-  const sandbox = reattachSessionSandbox({
+  let sandbox = reattachSessionSandbox({
     root,
     ...(tmuxSocket !== undefined && tmuxSocket.length > 0 ? { tmuxSocket } : {}),
   });
+  const nativePolicy = argValue(argv, BRIDGE_NATIVE_FILE_POLICY_FLAG);
+  if (nativePolicy !== undefined) {
+    if (
+      tmuxSocket ||
+      !allowedLogicalNames ||
+      allowedLogicalNames.some((name) => !(NATIVE_FILE_TOOLS as readonly string[]).includes(name))
+    )
+      throw new Error('Native completion requires the exact file-only tool surface');
+    const policyPath = realpathSync(nativePolicy);
+    const canonicalRoot = realpathSync(root);
+    if (
+      policyPath !== join(canonicalRoot, '.orca/native-file-policy.json') ||
+      !statSync(policyPath).isFile() ||
+      statSync(policyPath).size > 1024 * 1024
+    )
+      throw new Error('Native file policy is not a protected session file');
+    sandbox = nativeFileToolSandbox(
+      sandbox,
+      canonicalRoot,
+      JSON.parse(readFileSync(policyPath, 'utf8')),
+    );
+  }
 
   const bridge = await serveNativeCliBridge(sandbox, {
     ...(allowedLogicalNames !== undefined ? { allowedLogicalNames } : {}),

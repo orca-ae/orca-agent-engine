@@ -27,6 +27,10 @@
  *   claude_code       the native Claude Code CLI. Needs `claude` on the runner's PATH.
  *                     Works from the CLI's OWN credentials when no ANTHROPIC_API_KEY
  *                     is set, which is how a developer runs this without a key.
+ *   pi                controlled Pi 0.87.1, Darwin Local, Node 22.21+ within Node 22.
+ *                     Selects the File-only native completion test below; the worker
+ *                     needs ANTHROPIC_API_KEY for the start script's sidecar Environment.
+ *                     Gateway Environments instead supply the scoped LLM URL/JWT.
  *
  * That second mode is not a convenience — it is what makes this file verifiable by
  * someone whose only Claude credential is a Claude Code install.
@@ -41,6 +45,15 @@
  * Prerequisite: `bash services/dev/scripts/start-self-hosted.sh`, with the credential
  * the chosen harness needs available to the WORKER at start time (it forwards an
  * allowlist to the runner, not its whole environment). Run via `pnpm e2e:self-hosted:real`.
+ *
+ * For `pi`, run the worker and runner on Darwin with SRT installed and Node 22.21+
+ * within Node 22. Export ANTHROPIC_API_KEY, then start the stack with:
+ *   SANDBOX_RUNTIME=local \
+ *   ORCA_RUNNER_ENV_PASSTHROUGH=SANDBOX_RUNTIME,ANTHROPIC_API_KEY \
+ *     bash services/dev/scripts/start-self-hosted.sh
+ * Run the suite with `ORCA_E2E_COLOCATED_HARNESS=pi pnpm e2e:self-hosted:real`.
+ * Naming SANDBOX_RUNTIME in the passthrough is required: setting it only on the
+ * worker leaves its child runner on the default InMemory runtime.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { apiCall, buildClientFromConfig, ensureStackReachable } from '../src/client.js';
@@ -99,7 +112,7 @@ function agentBody(name: string, system: string, extra: Record<string, unknown> 
   };
 }
 
-describe(`self-hosted capabilities — real provider (${HARNESS})`, () => {
+describe.skipIf(HARNESS === 'pi')(`self-hosted capabilities — real provider (${HARNESS})`, () => {
   let cfg: OrcaClientConfig;
   let workerEnvId: string;
   const sessionIds: string[] = [];
@@ -225,7 +238,8 @@ describe(`self-hosted capabilities — real provider (${HARNESS})`, () => {
   // Counterparts: `real-agent-loop.spec.ts` scenario 1, and
   // `sandbox-harness-agent.spec.ts` "reads and writes attached resources…".
 
-  // COMMENTED OUT — resource materialization is tracked in the roadmap's colocated parity gaps.
+  // The legacy Claude path lacks native resource placement. The negotiated Pi test below
+  // exercises actual-path guidance and completion-gated capture on Darwin Local.
   //
   // A colocated sandbox has no `/mnt` tree at all: reading an attached resource returns
   // "File does not exist", and writing under it returns
@@ -481,3 +495,122 @@ async function advertisedTools(cfg: OrcaClientConfig, sessionId: string): Promis
 
 // Referenced by the type-only imports above so the file stays honest about what it uses.
 export type { SseFrame, TranscriptEvent };
+
+// Explicit opt-in selects the controlled native capability, not the legacy Claude tool surface.
+describe.runIf(HARNESS === 'pi')('self-hosted native Pi File completion', () => {
+  it(
+    'reads an attached File using verified guidance and publishes scoped outputs and usage before completion',
+    async () => {
+      const cfg = buildClientFromConfig({ apiKey: readSelfHostedApiKey() });
+      await ensureStackReachable(cfg);
+      const environmentId = readWorkerAttachedEnvironmentId();
+      await waitForWorkerConnected(cfg, environmentId);
+      const marker = 'native-file-' + Date.now().toString(36);
+      let agentId: string | undefined, sessionId: string | undefined, fileId: string | undefined;
+      try {
+        const form = new FormData();
+        form.append('file', new Blob([marker], { type: 'text/plain' }), 'context.txt');
+        const upload = await apiCall(cfg, '/v1/files', { method: 'POST', body: form });
+        expect(upload.status, upload.text).toBe(200);
+        fileId = upload.json<{ id: string }>().id;
+        agentId = await createAgent(cfg, {
+          name: 'native-files-' + Date.now(),
+          model: { provider: 'anthropic', id: MODEL_ID },
+          system:
+            'Use the verified executable paths in your session guidance. Read the attached File and copy its entire contents to report.txt under the instructed outputs directory, then quote the contents. Use only read and write.',
+          tools: [
+            {
+              type: 'agent_toolset_20260401',
+              default_config: { enabled: false, permission_policy: { type: 'always_allow' } },
+              configs: { read: { enabled: true }, write: { enabled: true } },
+            },
+          ],
+          metadata: { harness: 'pi', mode: 'colocated' },
+        });
+        const session = await createSession(cfg, agentId, environmentId, {
+          resources: [
+            { type: 'file', file_id: fileId, mount_path: '/mnt/context.txt', access: 'read_only' },
+          ],
+        });
+        sessionId = session.id;
+        const frames = await runTurn(
+          cfg,
+          sessionId,
+          'Read the attached context File, save its complete contents as report.txt, and quote them.',
+          TURN_DEADLINE_MS,
+        );
+        expect(frames.map(textOf).join('\n')).toContain(marker);
+        const outputIndex = frames.findIndex((frame) => frame.type === 'session.output_indexed');
+        const terminalIndex = frames.findIndex((frame) => frame.type === 'agent.turn_completed');
+        expect(outputIndex).toBeGreaterThanOrEqual(0);
+        expect(terminalIndex).toBeGreaterThan(outputIndex);
+        expect(frames.map((frame) => frame.type)).not.toContain('agent.usage');
+        // Files and usage must already be visible when the live terminal arrives.
+        const [listing, result] = await Promise.all([
+          apiCall(cfg, '/v1/sessions/' + sessionId + '/files', { method: 'GET' }),
+          apiCall(cfg, '/v1/sessions/' + sessionId, {
+            method: 'GET',
+            headers: { 'orca-beta': 'true' },
+          }),
+        ]);
+        expect(listing.status, listing.text).toBe(200);
+        const output = listing
+          .json<{ data: Array<{ id: string; filename: string }> }>()
+          .data.find((file) => file.filename.endsWith('report.txt'));
+        expect(output).toBeDefined();
+        const content = await apiCall(
+          cfg,
+          '/v1/sessions/' + sessionId + '/files/' + output!.id + '/content',
+          { method: 'GET' },
+        );
+        expect(content.status, content.text).toBe(200);
+        expect(content.text.trim()).toBe(marker);
+        expect(result.status, result.text).toBe(200);
+        const usage = result.json<{ usage: { input_tokens: number; output_tokens: number } }>()
+          .usage;
+        expect(usage.input_tokens).toBeGreaterThan(0);
+        expect(usage.output_tokens).toBeGreaterThan(0);
+        const events = await pollEventsUntil(
+          cfg,
+          sessionId,
+          (page) =>
+            page.some((event) => event.type === 'agent.turn_completed') &&
+            page.some((event) => event.type === 'session.output_indexed'),
+          20_000,
+        );
+        const mounted = events.find((event) => event.type === 'session.resource_mounted');
+        expect(mounted).toMatchObject({ mount_path: '/mnt/context.txt', file_id: fileId });
+        const resolved = mounted?.resolved_path;
+        expect(typeof resolved).toBe('string');
+        expect(resolved).not.toBe('/mnt/context.txt');
+        const indexedOutput = events.findIndex((event) => event.type === 'session.output_indexed');
+        expect(indexedOutput).toBeGreaterThanOrEqual(0);
+        expect(events.findIndex((event) => event.type === 'agent.turn_completed')).toBeGreaterThan(
+          indexedOutput,
+        );
+        expect(events.map((event) => event.type)).not.toContain('agent.usage');
+        const nextFrames = await runTurn(
+          cfg,
+          sessionId,
+          'Read /mnt/session/outputs/report.txt and quote its complete contents without changing it.',
+          TURN_DEADLINE_MS,
+        );
+        expect(nextFrames.map(textOf).join('\n')).toContain(marker);
+        expect(nextFrames.map((frame) => frame.type)).not.toContain('agent.usage');
+        const nextResult = await apiCall(cfg, '/v1/sessions/' + sessionId, {
+          method: 'GET',
+          headers: { 'orca-beta': 'true' },
+        });
+        expect(nextResult.status, nextResult.text).toBe(200);
+        expect(
+          nextResult.json<{ usage: { output_tokens: number } }>().usage.output_tokens,
+        ).toBeGreaterThan(usage.output_tokens);
+      } finally {
+        if (sessionId) await apiCall(cfg, '/v1/sessions/' + sessionId, { method: 'DELETE' });
+        if (agentId) await apiCall(cfg, '/v1/agents/' + agentId, { method: 'DELETE' });
+        if (fileId) await apiCall(cfg, '/v1/files/' + fileId, { method: 'DELETE' });
+      }
+    },
+    TEST_TIMEOUT_MS,
+  );
+});

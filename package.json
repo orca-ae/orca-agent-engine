@@ -10,7 +10,7 @@
   },
   "scripts": {
     "build": "pnpm -r build",
-    "test": "pnpm -r --filter=!@orca/e2e-tests test",
+    "test": "pnpm -r --filter=!@orca/e2e-tests run test",
     "coverage": "node scripts/merge-coverage.mjs",
     "coverage:report": "node scripts/merge-coverage.mjs --report-only",
     "coverage:update": "node scripts/merge-coverage.mjs --update",

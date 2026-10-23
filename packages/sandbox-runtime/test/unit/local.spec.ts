@@ -149,7 +149,9 @@ describe('LocalSandboxRuntime', () => {
     const sb = await rt.acquire({});
     try {
       await sb.files.write('/mnt/session/outputs/.keep', Buffer.alloc(0));
+      await sb.files.write('/mnt/input.txt', Buffer.from('readonly'));
       const policy = buildSandboxWritePolicy([
+        { path: '/mnt/input.txt', kind: 'file', access: 'read_only' },
         { path: '/mnt/memory/notes', kind: 'memory_store', access: 'read_write' },
       ]);
       await sb.prepareWritePolicy!(policy);
@@ -164,8 +166,14 @@ describe('LocalSandboxRuntime', () => {
       ]);
       expect(config.filesystem.allowWrite).not.toContain(root);
       expect(config.filesystem.allowRead).toEqual(
-        expect.arrayContaining([root, realpathSync('/bin'), realpathSync('/usr')]),
+        expect.arrayContaining([realpathSync('/bin'), realpathSync('/usr')]),
       );
+      if (process.platform === 'linux') {
+        expect(config.filesystem.allowRead).not.toContain(root);
+        expect(config.filesystem.allowRead).toContain(join(root, 'mnt/input.txt'));
+      } else {
+        expect(config.filesystem.allowRead).toContain(root);
+      }
 
       const result = await sb.runWithWritePolicy!(
         { tool: 'bash', args: { command: 'printf %s "$TMPDIR"' } },

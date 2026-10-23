@@ -85,6 +85,82 @@ const WORKSPACE_ID = 'ws_acme';
 const SESSION_ID = 'ses_bridge_1';
 const RUNNER_ID = 'runner_token_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 
+it('reattaches a native turn, delegates dedup to its authority and refuses clean EOF without a receipt', async () => {
+  const store = new InMemoryTranscriptStore();
+  const appendNativeEvent = vi.fn(async (_turnId: string, event: Event) => {
+    if (!store.snapshot(WORKSPACE_ID, SESSION_ID).some((existing) => existing.id === event.id))
+      await store.append(WORKSPACE_ID, SESSION_ID, [event]);
+  });
+  const { bridge, runner } = buildBridge({
+    store,
+    resources: { native: true, commit: async () => {}, appendNativeEvent },
+  });
+  runner.connect();
+  const user = await appendUserMessage(store, 'original native request', 'uint8array');
+  const prefix = {
+    type: 'agent.message',
+    id: 'evt_native_prefix',
+    content: [{ type: 'text', text: 'working' }],
+    source_event_id: user.id,
+  };
+  await store.append(WORKSPACE_ID, SESSION_ID, [
+    httpEventToProto({
+      workspaceId: WORKSPACE_ID,
+      sessionId: SESSION_ID,
+      producedBy: AGENT_EVENT_PRODUCED_BY,
+      idempotencyKey: '',
+      input: prefix,
+    }),
+  ]);
+  runner.scriptTurn(user.id, {
+    lines: [
+      prefix,
+      prefix,
+      {
+        type: 'agent.message',
+        id: 'evt_native_after',
+        content: [{ type: 'text', text: 'continued' }],
+      },
+    ],
+  });
+  bridge.start();
+  try {
+    await waitFor(() =>
+      store.snapshot(WORKSPACE_ID, SESSION_ID).some((event) => event.id === 'evt_native_after'),
+    );
+    await appendUserMessage(store, 'must wait for receipt recovery');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(runner.turns).toHaveLength(1);
+    expect(appendNativeEvent).toHaveBeenCalledTimes(3);
+    expect(
+      store
+        .snapshot(WORKSPACE_ID, SESSION_ID)
+        .some((event) => event.kind === 'agent.turn_completed'),
+    ).toBe(false);
+    expect(
+      store.snapshot(WORKSPACE_ID, SESSION_ID).filter((event) => event.id === 'evt_native_prefix'),
+    ).toHaveLength(1);
+  } finally {
+    await bridge.stop();
+  }
+});
+
+it('restores native confirmation and interrupt controls even after later nonterminal output', async () => {
+  const { bridge, store, runner } = buildBridge({
+    resources: { native: true, commit: async () => {} },
+  });
+  runner.connect();
+  await appendToolConfirmation(store, 'native_waiter', 'allow');
+  await appendUserInterrupt(store);
+  await appendAgentEvent(store, 'agent.message');
+  bridge.start();
+  try {
+    await waitFor(() => runner.confirmations.length === 1 && runner.interrupts.length === 1);
+  } finally {
+    await bridge.stop();
+  }
+});
+
 // ── In-memory transcript store with REAL append/tail ordering ──
 
 /**
@@ -727,7 +803,11 @@ function decodeNdjsonBody(frame: RequestFrame): Array<Record<string, unknown>> {
 let userEventCounter = 0;
 
 /** Append a `user.message` event the way the existing client POST path does. */
-async function appendUserMessage(store: TranscriptStore, text: string): Promise<Event> {
+async function appendUserMessage(
+  store: TranscriptStore,
+  text: string,
+  payloadType: 'buffer' | 'uint8array' = 'buffer',
+): Promise<Event> {
   userEventCounter += 1;
   const proto = httpEventToProto({
     workspaceId: WORKSPACE_ID,
@@ -740,6 +820,7 @@ async function appendUserMessage(store: TranscriptStore, text: string): Promise<
       content: [{ type: 'text', text: text }],
     },
   });
+  if (payloadType === 'uint8array') proto.payload = Uint8Array.from(proto.payload);
   const [id] = await store.append(WORKSPACE_ID, SESSION_ID, [proto]);
   return { ...proto, id: id ?? proto.id };
 }

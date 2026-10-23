@@ -277,6 +277,21 @@ Enabling the Gateway Registry usage sink selects the existing gateway
 writer for applicable pinned harnesses; that flag describes sink configuration,
 not a constraint on direct model egress.
 
+For negotiated [native File completion](./services/session-runner.md#native-file-completion-capability),
+Registry is the persisted sole usage writer for the Registry-owned execution,
+including direct model routes. The pinned Pi reporting adapter captures actual
+Anthropic Messages usage and model identity for every main, compaction and internal
+retry attempt as distinct stable deltas. It never prices the snapshot model by
+assumption or assigns unknown cache-write TTL to the five-minute bucket. Unknown
+prices remain unpriced; missing usage or model evidence makes completion incomplete.
+
+The receipt retains canonical reports and the expected report set. Registry resolves
+the accepted driving event's principal and uses the shared `persistUsage` transaction
+for Session/thread, guardrail and dedup counters. Gateway and internal harness usage
+writes are rejected for that authority, including shared-token callers. Reports retry
+until durable receipt acknowledgment; conflicting payloads under one identity fail.
+This accounting capability does not grant native stateful budget enforcement.
+
 Historical usage visibility is maintained with:
 
 ```bash

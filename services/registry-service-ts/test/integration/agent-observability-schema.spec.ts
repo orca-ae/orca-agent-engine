@@ -8,6 +8,7 @@ import { drizzle } from 'drizzle-orm/node-postgres';
 import { migrate } from 'drizzle-orm/node-postgres/migrator';
 import { Pool } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { trackPoolShutdown } from '../helpers/pool-shutdown.js';
 
 const REGISTRY_DATABASE_URL =
   process.env['DATABASE_URL'] ?? 'postgres://orca:orca@localhost:5432/registry';
@@ -23,6 +24,7 @@ const MIGRATIONS_FOLDER = resolve(
 
 describe('agent observability schema constraints', () => {
   let pool: Pool | undefined;
+  let closePool: (() => Promise<void>) | undefined;
   let adminPool: Pool | undefined;
   const databaseName = `registry_agent_observability_schema_${process.pid}_${randomBytes(4).toString('hex')}`;
   const suffix = `${process.pid}_${Date.now()}`;
@@ -38,6 +40,7 @@ describe('agent observability schema constraints', () => {
     databaseUrl.pathname = `/${databaseName}`;
     await adminPool.query(`CREATE DATABASE "${databaseName}"`);
     pool = new Pool({ connectionString: databaseUrl.toString(), max: 2 });
+    closePool = trackPoolShutdown(pool);
     await migrate(drizzle(pool), { migrationsFolder: MIGRATIONS_FOLDER });
     await pool.query(
       `INSERT INTO organizations (id, name) VALUES ($1, 'Observability schema A'), ($2, 'Observability schema B')`,
@@ -82,14 +85,12 @@ describe('agent observability schema constraints', () => {
   });
 
   afterAll(async () => {
-    await pool?.end().catch(() => {});
-    await adminPool
-      ?.query('SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1', [
-        databaseName,
-      ])
-      .catch(() => {});
-    await adminPool?.query(`DROP DATABASE IF EXISTS "${databaseName}"`).catch(() => {});
-    await adminPool?.end().catch(() => {});
+    try {
+      await closePool?.();
+      await adminPool?.query(`DROP DATABASE IF EXISTS "${databaseName}"`);
+    } finally {
+      await adminPool?.end();
+    }
   });
 
   function requirePool(): Pool {

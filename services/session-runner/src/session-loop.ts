@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { PendingCustomToolResults } from './pending-custom-tool-results.js';
+import { createHash } from 'node:crypto';
 import type { CustomToolResult } from './custom-tools.js';
 // The runner core loop — the heart that holds one session's harness and serves
 // the snapshot / turn / replay the registry pushes over the tunnel.
@@ -75,6 +76,16 @@ import {
 } from './skills-materialize.js';
 import { RunnerResources } from './resources.js';
 import { composeSkillsCatalog } from './sandbox/seam.js';
+import {
+  sessionSandboxRuntime,
+  supportsNativeFileCompletion,
+  nativeSnapshotFingerprint,
+  parseNativeUsage,
+  NATIVE_USAGE_SOURCE,
+  NATIVE_MAX_REPORTS,
+} from './sandbox/seam.js';
+import { readGatewayLlmEgress } from './harness/claude/provider.js';
+import type { NativeCompletion, NativeUsageReport } from './sandbox/seam.js';
 import { managedSkillIsBlocked } from './guardrails.js';
 import { PendingApprovals } from './pending-approvals.js';
 import { tmpdir } from 'node:os';
@@ -316,6 +327,20 @@ export class SessionLoop {
   private skillsPluginDir: string | undefined;
   private skillsPush: ParsedSkillsPush | undefined;
   private readonly resources: RunnerResources;
+  private nativeResources = false;
+  private nativeInterrupted = false;
+  private nativeWork: Promise<unknown> | undefined;
+  private nativeJob:
+    | {
+        turnId: string;
+        body: string;
+        lines: Uint8Array[];
+        done: boolean;
+        error?: unknown;
+        wake: Set<() => void>;
+      }
+    | undefined;
+  private nativeFingerprint: string | undefined;
   private resourceSessionId: string | undefined;
   private configuring = false;
   private configurationEpoch = 0;
@@ -410,7 +435,18 @@ export class SessionLoop {
     this.skillsWorkspaceDir =
       opts.skillsWorkspaceDir ?? join(tmpdir(), 'orca-session-runner-skills');
     this.resources =
-      opts.resources ?? new RunnerResources({ workspaceDir: this.skillsWorkspaceDir });
+      opts.resources ??
+      new RunnerResources({
+        workspaceDir: this.skillsWorkspaceDir,
+        ...(sessionSandboxRuntime(this.sandboxRuntime, this.providers.sessionSandboxReadPaths())
+          ? {
+              sessionSandbox: sessionSandboxRuntime(
+                this.sandboxRuntime,
+                this.providers.sessionSandboxReadPaths(),
+              )!,
+            }
+          : {}),
+      });
     this.now = opts.now ?? (() => performance.now() / 1000);
     this.lastActivityAt = this.now();
   }
@@ -435,7 +471,7 @@ export class SessionLoop {
 
   /** Whether a turn is currently in flight (the idle watchdog's active-work gate). */
   hasActiveWork(): boolean {
-    return this.activeTurns > 0;
+    return this.activeTurns > 0 || this.nativeWork !== undefined;
   }
 
   /** The provider names this runner can serve (for the tunnel hello advertise). */
@@ -501,6 +537,8 @@ export class SessionLoop {
 
   async applyResources(sessionId: string, body: unknown): Promise<unknown> {
     this.assertResourceSession(sessionId);
+    if ((body as { type?: unknown })?.type === 'status')
+      return this.resources.push(sessionId, body);
     if (this.snapshotBinding && this.snapshotBinding.sessionId !== sessionId)
       throw new Error('resource session mismatch');
     if (this.hasActiveWork()) throw new Error('cannot configure resources during a turn');
@@ -544,6 +582,13 @@ export class SessionLoop {
    * @param body The raw skills push body (NDJSON: one manifest line, then one per file).
    */
   async applySkills(sessionId: string, body: Uint8Array): Promise<void> {
+    if (this.nativeResources) {
+      this.assertResourceSession(sessionId);
+      const push = parseSkillsPushBody(body);
+      if (push.skills.length || push.descriptors?.length)
+        throw new Error('Native completion does not support Skills');
+      return;
+    }
     return this.configure(() => this.applySkillsNow(sessionId, body));
   }
 
@@ -584,6 +629,29 @@ export class SessionLoop {
    * @param body The raw snapshot push body (one NDJSON line).
    */
   async applySnapshot(sessionId: string, body: Uint8Array): Promise<void> {
+    const snapshot = parseSnapshotBody(body);
+    if (
+      snapshot.sandbox_resources &&
+      supportsNativeFileCompletion(snapshot) &&
+      this.harness &&
+      this.nativeFingerprint === nativeSnapshotFingerprint(snapshot)
+    ) {
+      this.assertResourceSession(sessionId);
+      if (
+        this.stopped ||
+        this.configuring ||
+        this.snapshotBinding?.sessionId !== sessionId ||
+        this.resources.placement?.id !== snapshot.sandbox_resources.placement_id ||
+        this.resources.revision !== snapshot.sandbox_resources.revision ||
+        !this.harness.refreshCredentials
+      )
+        throw new Error('Native snapshot cannot reuse this execution');
+      const { apiKey } = readGatewayLlmEgress(snapshot);
+      if ((snapshot.egress as { mode?: string } | null)?.mode === 'gateway' && !apiKey)
+        throw new Error('Native scoped credential is unavailable');
+      await this.harness.refreshCredentials(apiKey);
+      return;
+    }
     return this.configure(() => this.applySnapshotNow(sessionId, body));
   }
 
@@ -593,7 +661,27 @@ export class SessionLoop {
     if (this.hasActiveWork()) throw new Error('cannot configure snapshot during a turn');
     const snapshot = parseSnapshotBody(body);
     const managed = snapshot.managed_resources;
-    if (managed !== undefined || this.resources.revision !== undefined) {
+    const native = snapshot.sandbox_resources;
+    const fingerprint = native ? nativeSnapshotFingerprint(snapshot) : undefined;
+    if (native) {
+      const placement = this.resources.placement;
+      if (
+        !supportsNativeFileCompletion(snapshot) ||
+        !this.providers.supportsSessionSandbox(snapshot.provider) ||
+        !placement ||
+        placement.id !== native.placement_id ||
+        native.revision !== this.resources.revision ||
+        !this.resources.readyForSnapshot
+      )
+        throw new Error('Native sandbox placement is not committed or supported');
+      snapshot.system +=
+        '\nSession files (logical path => verified execution path):\n' +
+        placement.guidance +
+        '\nWrite downloadable outputs under ' +
+        placement.outputs +
+        '. File tools accept these paths.';
+    }
+    if (!native && (managed !== undefined || this.resources.revision !== undefined)) {
       if (
         !managed ||
         managed.revision !== this.resources.revision ||
@@ -637,6 +725,7 @@ export class SessionLoop {
     // re-materialized the tree, so `this.skillsPluginDir` is the current path.
     if (
       !managed &&
+      !native &&
       snapshot.skills_plugin_dir === undefined &&
       this.skillsPluginDir !== undefined
     ) {
@@ -649,12 +738,12 @@ export class SessionLoop {
       this.harness?.preserveSandboxOnRefresh === true &&
       this.snapshotBinding?.sessionId === sessionId &&
       this.snapshotBinding.provider === snapshot.provider &&
-      this.snapshotBinding.revision === managed?.revision;
+      this.snapshotBinding.revision === (managed ?? native)?.revision;
     await this.teardownHarness('replica.shutting_down', keepSandbox);
     this.snapshotBinding = {
       sessionId,
       provider: snapshot.provider,
-      ...(managed ? { revision: managed.revision } : {}),
+      ...((managed ?? native) ? { revision: (managed ?? native)!.revision } : {}),
     };
 
     // ACQUIRE the per-session sandbox for a REAL provider (before building the harness
@@ -666,7 +755,10 @@ export class SessionLoop {
     // runtime into a per-session handle the claude providers bind their `orca` tool server
     // + SDK `cwd` to. Skipped for the LLM-free `mock` provider and when no runtime is
     // wired — those stay sandbox-free. Reuse is limited to the same provider and session.
-    this.sandbox ??= await this.acquireSandbox(snapshot.provider);
+    this.sandbox ??= native
+      ? this.resources.placement!.sandbox
+      : await this.acquireSandbox(snapshot.provider);
+    this.nativeResources = native !== undefined;
 
     // Hand the runner's sandbox runtime AND the acquired per-session handle to the
     // provider via the context: the handle gives the in-process claude providers their
@@ -678,6 +770,16 @@ export class SessionLoop {
     const ctx: ProviderSessionContext = {
       workspaceId: this.workspaceId,
       sessionId,
+      ...(native
+        ? {
+            sandboxResources: {
+              revision: native.revision,
+              placementId: native.placement_id,
+              executionId: this.resources.executionId,
+              policy: this.resources.placement!.policy,
+            },
+          }
+        : {}),
       ...(managed
         ? {
             toolSandbox: this.resources.toolSandbox!,
@@ -722,6 +824,7 @@ export class SessionLoop {
     // `start` the (possibly-wrapped) harness with the confirm-gated boot context. For a
     // coordinator, `start` injects the `delegate` seam and starts the base underneath.
     await harness.start(startInput);
+    this.nativeFingerprint = fingerprint;
     this.guardrails = guardrails;
     this.harness = harness;
     // One shared iterator over the harness's event stream; serial turns read it.
@@ -831,6 +934,53 @@ export class SessionLoop {
    */
   runTurn(sessionId: string, body: Uint8Array, signal: AbortSignal): AsyncIterable<Uint8Array> {
     this.lastActivityAt = this.now();
+    if (this.nativeResources) {
+      this.assertResourceSession(sessionId);
+      const userEvent = parseUserEvent(body);
+      const turnId = (userEvent.payload as { native_turn_id?: unknown }).native_turn_id;
+      const serialized = JSON.stringify({
+        ...userEvent,
+        payload: {
+          ...(userEvent.payload as Record<string, unknown>),
+          native_skip_execution: undefined,
+        },
+      });
+      if (this.nativeJob && this.nativeJob.turnId === turnId) {
+        if (this.stopped || this.nativeJob.body !== serialized)
+          throw new Error('Native reattach payload differs');
+        return this.attachNativeJob(this.nativeJob, signal);
+      }
+      this.assertTurnReady(sessionId, this.harness, this.configurationEpoch);
+      if (!this.harness || typeof turnId !== 'string')
+        throw new Error('Native harness or accepted turn is unavailable');
+      const job: NonNullable<SessionLoop['nativeJob']> = {
+        turnId,
+        body: serialized,
+        lines: [] as Uint8Array[],
+        done: false,
+        wake: new Set<() => void>(),
+      };
+      this.nativeInterrupted = false;
+      this.nativeJob = job;
+      const harness = this.harness;
+      const work = (async () => {
+        try {
+          for await (const line of this.driveNativeTurn(harness, sessionId, userEvent)) {
+            job.lines.push(line);
+            for (const wake of job.wake) wake();
+          }
+        } catch (error) {
+          job.error = error;
+        } finally {
+          job.done = true;
+          for (const wake of job.wake) wake();
+          this.nativeWork = undefined;
+          this.lastActivityAt = this.now();
+        }
+      })();
+      this.nativeWork = work;
+      return this.attachNativeJob(job, signal);
+    }
     // Parse EAGERLY (outside the returned generator) so a bad body throws here and
     // the handler maps it to a 400 before any streaming response is framed. The
     // harness is captured at call time so a teardown between call + iteration does
@@ -840,6 +990,34 @@ export class SessionLoop {
     this.assertTurnReady(sessionId, harness, epoch);
     const userEvent = parseUserEvent(body);
     return this.streamTurn(harness, sessionId, userEvent, signal, epoch);
+  }
+
+  private async *attachNativeJob(
+    job: NonNullable<SessionLoop['nativeJob']>,
+    signal: AbortSignal,
+  ): AsyncIterable<Uint8Array> {
+    let cursor = 0;
+    while (!signal.aborted) {
+      if (cursor < job.lines.length) {
+        yield job.lines[cursor++]!;
+        continue;
+      }
+      if (job.done) {
+        if (job.error) throw job.error;
+        return;
+      }
+      await new Promise<void>((resolve) => {
+        const wake = () => {
+          job.wake.delete(wake);
+          signal.removeEventListener('abort', wake);
+          resolve();
+        };
+        job.wake.add(wake);
+        signal.addEventListener('abort', wake, { once: true });
+        if (signal.aborted || job.done || cursor < job.lines.length) wake();
+      });
+    }
+    throw new Error('Native turn stream detached before completion', { cause: signal.reason });
   }
 
   /** Recheck when the deferred body is consumed, before occupying the turn slot. */
@@ -1063,6 +1241,7 @@ export class SessionLoop {
     if (harness === undefined) {
       return false;
     }
+    if (this.nativeResources) this.nativeInterrupted = true;
     harness.interrupt();
     // Release any gate the interrupted turn parked on: the turn is gone, so the
     // verdict is moot. Denies outstanding approvals so `hasPendingApproval` clears now.
@@ -1078,6 +1257,10 @@ export class SessionLoop {
   async stop(reason: TerminationReason = 'replica.shutting_down'): Promise<void> {
     this.stopped = true;
     await this.configurationDone;
+    if (this.nativeWork) {
+      await this.harness?.stop(reason);
+      await this.nativeWork;
+    }
     await this.teardownHarness(reason);
     await this.resources.close();
   }
@@ -1149,6 +1332,174 @@ export class SessionLoop {
       'session runner denied a turn at the request phase',
     );
     return reason;
+  }
+
+  private async *driveNativeTurn(
+    harness: AgentHarness,
+    sessionId: string,
+    userEvent: UserEvent,
+  ): AsyncIterable<Uint8Array> {
+    const turnId = (userEvent.payload as { native_turn_id?: unknown }).native_turn_id;
+    if (typeof turnId !== 'string') throw new Error('Native accepted turn identity is unavailable');
+    await this.resources.beginNativeTurn(turnId);
+    const skipped =
+      (userEvent.payload as { native_skip_execution?: unknown }).native_skip_execution === true ||
+      this.nativeInterrupted;
+    const requestDenial = skipped
+      ? 'Turn interrupted before model submission'
+      : this.evaluateRequestGuardrails(sessionId, userEvent);
+    if (requestDenial !== undefined) {
+      const frozen = await this.resources.freezeNativeTurn({
+        version: 1,
+        source: NATIVE_USAGE_SOURCE,
+        turn_id: turnId,
+        execution_id: this.resources.executionId,
+        placement_id: this.resources.placement!.id,
+        outcome: skipped ? 'interrupted' : 'failed',
+        report_set_sealed: true,
+        error: requestDenial.slice(0, 4096),
+        expected_reports: [],
+        reports: [],
+      });
+      yield encodeAgentEventLine({
+        kind: 'orca.native_completion',
+        payload: { checkpoint_id: frozen.checkpoint.checkpoint_id, manifest_sha256: frozen.digest },
+      });
+      return;
+    }
+    const reports = new Map<string, NativeUsageReport>();
+    const expected = new Set<string>();
+    const events: Array<Record<string, unknown>> = [];
+    let outcome: NativeCompletion['outcome'] = 'failed';
+    let error: string | undefined;
+    let sawSet = false;
+    const submit = harness.submit(userEvent).catch(async (failure: unknown) => {
+      error =
+        failure instanceof Error ? failure.message.slice(0, 4096) : 'Native submission failed';
+      await harness.stop('replica.shutting_down');
+    });
+    try {
+      while (true) {
+        const next = await this.resolvePull(this.takeNext());
+        this.pendingNext = undefined;
+        if (next.done) {
+          sawSet = false;
+          error ??= 'Native provider ended without completion evidence';
+          break;
+        }
+        const event = next.value;
+        const payload = event.payload as Record<string, unknown>;
+        const retained: Parameters<RunnerResources['retainNativeReports']>[0] = {};
+        if (event.kind === 'orca.native_usage_started') {
+          if (
+            sawSet ||
+            payload.turn_id !== turnId ||
+            typeof payload.id !== 'string' ||
+            !/^[A-Za-z0-9_-]{1,128}$/.test(payload.id) ||
+            expected.size >= NATIVE_MAX_REPORTS
+          )
+            throw new Error('Invalid native report start');
+          expected.add(payload.id);
+          retained.expected = [payload.id];
+        } else if (event.kind === 'orca.native_usage') {
+          if (sawSet || payload.turn_id !== turnId)
+            throw new Error('Native report belongs to another turn');
+          const report = parseNativeUsage(payload.report);
+          if (
+            !expected.has(report.id) ||
+            (reports.has(report.id) &&
+              JSON.stringify(reports.get(report.id)) !== JSON.stringify(report))
+          )
+            throw new Error('Native report identity differs');
+          reports.set(report.id, report);
+          retained.reports = [report];
+        } else if (event.kind === 'orca.native_usage_set') {
+          if (
+            sawSet ||
+            !['completed', 'aborted', 'failed'].includes(String(payload.outcome)) ||
+            payload.turn_id !== turnId ||
+            !Array.isArray(payload.expected_reports) ||
+            payload.expected_reports.length !== expected.size ||
+            new Set(payload.expected_reports).size !== expected.size ||
+            payload.expected_reports.some((id) => typeof id !== 'string' || !expected.has(id))
+          )
+            throw new Error('Native expected report set differs');
+          sawSet = true;
+          retained.closed = true;
+          outcome =
+            payload.outcome === 'completed'
+              ? 'success'
+              : payload.outcome === 'aborted'
+                ? 'interrupted'
+                : 'failed';
+        } else if (event.kind === 'agent.turn_completed') break;
+        else if (event.kind === 'agent.usage') continue;
+        else {
+          if (event.kind === 'agent.error') {
+            error =
+              typeof payload.message === 'string'
+                ? payload.message.slice(0, 4096)
+                : 'Native provider failed';
+            outcome = 'failed';
+          }
+          if (event.terminal) continue;
+          const id =
+            'evt_' +
+            createHash('sha256')
+              .update(
+                JSON.stringify([this.resources.executionId, turnId, events.length, event.kind]),
+              )
+              .digest('hex')
+              .slice(0, 32);
+          const line = encodeAgentEventLine({
+            ...event,
+            id,
+            payload: this.resources.projectNativePublicValue(event.payload) as Record<
+              string,
+              unknown
+            >,
+          });
+          if (events.length >= 10000) throw new Error('Native public event limit exceeded');
+          const publicEvent = JSON.parse(Buffer.from(line).toString('utf8')) as Record<
+            string,
+            unknown
+          >;
+          await this.resources.retainNativeReports({ events: [publicEvent] });
+          events.push(publicEvent);
+          yield line;
+          continue;
+        }
+        await this.resources.retainNativeReports({ ...retained, outcome });
+      }
+      await submit;
+    } catch (failure) {
+      error = failure instanceof Error ? failure.message.slice(0, 4096) : 'Native evidence failed';
+      sawSet = false;
+      await harness.stop('replica.shutting_down');
+      await submit;
+    }
+    // agent_settled has joined all file tools; this admitted surface cannot spawn background writers.
+    const completion: NativeCompletion = {
+      version: 1,
+      source: NATIVE_USAGE_SOURCE,
+      turn_id: turnId,
+      execution_id: this.resources.executionId,
+      placement_id: this.resources.placement!.id,
+      outcome: this.nativeInterrupted ? 'interrupted' : error ? 'failed' : outcome,
+      report_set_sealed: sawSet,
+      events,
+      ...(error ? { error: this.resources.projectNativePublicValue(error) as string } : {}),
+      expected_reports: [...expected],
+      reports: [...reports.values()],
+    };
+    const frozen = await this.resources.freezeNativeTurn(completion);
+    yield encodeAgentEventLine({
+      kind: 'orca.native_completion',
+      payload: {
+        checkpoint_id: frozen.checkpoint.checkpoint_id,
+        manifest_sha256: frozen.digest,
+      },
+    });
   }
 
   private async *driveTurn(
@@ -1453,7 +1804,7 @@ export class SessionLoop {
     // Release the per-session sandbox AFTER the harness has stopped: the harness may
     // still touch it while draining its final events, so destroying it first could
     // fault an in-flight tool call. Providers can opt into preserving the handle on refresh.
-    if (!keepSandbox) await this.releaseSandbox();
+    if (!keepSandbox && !this.nativeResources) await this.releaseSandbox();
   }
 }
 

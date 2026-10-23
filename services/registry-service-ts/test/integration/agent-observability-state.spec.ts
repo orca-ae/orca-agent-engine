@@ -9,6 +9,7 @@ import { migrate } from 'drizzle-orm/node-postgres/migrator';
 import type { FastifyInstance } from 'fastify';
 import { Pool } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { trackPoolShutdown } from '../helpers/pool-shutdown.js';
 import {
   fingerprintAdminApiKey,
   generateAdminApiKey,
@@ -40,6 +41,7 @@ const MIGRATIONS_FOLDER = resolve(
 describe('agent observability admin state reads', () => {
   let db: DbClient;
   let pool: Pool;
+  let closePool: (() => Promise<void>) | undefined;
   let adminPool: Pool | undefined;
   let app: FastifyInstance | undefined;
   let adminUrl: string;
@@ -77,6 +79,7 @@ describe('agent observability admin state reads', () => {
     databaseUrl.pathname = `/${databaseName}`;
     await adminPool.query(`CREATE DATABASE "${databaseName}"`);
     pool = new Pool({ connectionString: databaseUrl.toString(), max: 5 });
+    closePool = trackPoolShutdown(pool);
     db = drizzle(pool, { schema });
     await migrate(db, { migrationsFolder: MIGRATIONS_FOLDER });
     await createOrganization(db, zeroOrganizationId, 'Zero-state organization');
@@ -200,14 +203,12 @@ describe('agent observability admin state reads', () => {
 
   afterAll(async () => {
     await app?.close();
-    await pool?.end().catch(() => {});
-    await adminPool
-      ?.query('SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1', [
-        databaseName,
-      ])
-      .catch(() => {});
-    await adminPool?.query(`DROP DATABASE IF EXISTS "${databaseName}"`).catch(() => {});
-    await adminPool?.end().catch(() => {});
+    try {
+      await closePool?.();
+      await adminPool?.query(`DROP DATABASE IF EXISTS "${databaseName}"`);
+    } finally {
+      await adminPool?.end();
+    }
   });
 
   it('returns default disabled organization and workspace state with opaque ETags', async () => {

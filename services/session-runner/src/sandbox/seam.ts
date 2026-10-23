@@ -41,6 +41,7 @@
 // difference from the harness-server, which hard-fails at boot on a missing `srt`.
 
 import { execFileSync } from 'node:child_process';
+export { SandboxManager } from '@orca/sandbox-runtime';
 import {
   InMemorySandboxRuntime,
   LocalSandboxRuntime,
@@ -76,10 +77,27 @@ export type {
   ResourceCheckpoint,
   ChangedResourceFile,
   DeletedResourceFile,
+  NativeCompletion,
+  NativeUsageReport,
 } from '@orca/sandbox-runtime';
 
 export {
   hasWritePolicyEnforcement,
+  canonicalAbsolutePath,
+  canonicalizeVirtualPathUnderRoot,
+  validateSandboxWritePolicy,
+  writablePathFor,
+  readablePathFor,
+  NATIVE_USAGE_SOURCE,
+  NATIVE_COMPLETION_EVENT,
+  NATIVE_REPORT_EVENT,
+  NATIVE_MAX_REPORTS,
+  NATIVE_FILE_TOOLS,
+  parseNativeUsage,
+  parseNativeCompletion,
+  nativeCompletionIsComplete,
+  nativeSnapshotFingerprint,
+  supportsNativeFileCompletion,
   resolveOpenedDescriptorPath,
   buildSandboxWritePolicy,
   createPolicyEnforcedSandbox,
@@ -130,6 +148,18 @@ export function createManagedToolSandboxRuntime(opts: {
  * {@link createRunnerSandboxRuntime}).
  */
 export const SANDBOX_RUNTIME_ENV_VAR = 'SANDBOX_RUNTIME';
+
+/** An in-memory fallback cannot advertise verified native placement. */
+export function sessionSandboxRuntime(
+  runtime: SandboxRuntime | undefined,
+  readPaths: readonly string[],
+): SandboxRuntime | undefined {
+  return (process.platform === 'darwin' || process.platform === 'linux') &&
+    runtime instanceof LocalSandboxRuntime &&
+    readPaths.length > 0
+    ? runtime.withReadOnlyRuntimePaths(readPaths)
+    : undefined;
+}
 
 /** Options for {@link createRunnerSandboxRuntime}. */
 export interface CreateRunnerSandboxRuntimeOptions {

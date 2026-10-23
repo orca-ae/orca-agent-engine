@@ -244,7 +244,7 @@ export async function postUserMessage(
   cfg: OrcaClientConfig,
   sessionId: string,
   text: string,
-): Promise<void> {
+): Promise<string> {
   const res = await apiCall(cfg, `/v1/sessions/${sessionId}/events`, {
     method: 'POST',
     body: JSON.stringify({
@@ -253,6 +253,7 @@ export async function postUserMessage(
     }),
   });
   expect(res.status, `post user.message failed: ${res.status} ${res.text}`).toBe(200);
+  return res.json<{ data: Array<{ id: string }> }>().data[0]!.id;
 }
 
 /** Append an arbitrary session event (interrupt, tool confirmation, custom tool result). */
@@ -478,8 +479,8 @@ export function assertNoTurnFailure(frames: SseFrame[]): void {
 /**
  * Post a turn and drain it to its terminal frame.
  *
- * Returns every frame the tail saw, having already asserted the turn did not fail —
- * so a caller's own assertions run against a turn that is known to have completed.
+ * Returns frames after the submitted user event through its correlated terminal.
+ * Historical terminals and failures cannot finish or poison this turn.
  */
 export async function runTurn(
   cfg: OrcaClientConfig,
@@ -487,14 +488,39 @@ export async function runTurn(
   prompt: string,
   deadlineMs: number,
 ): Promise<SseFrame[]> {
-  await postUserMessage(cfg, sessionId, prompt);
-  const frames = await collectSseFrames(cfg, sessionId, {
-    until: (fs) => fs.some((f) => (TERMINAL_FRAMES as readonly string[]).includes(f.type)),
+  const userEventId = await postUserMessage(cfg, sessionId, prompt);
+  const completesTurn = (frame: SseFrame) =>
+    frame.type === 'agent.turn_completed' &&
+    !frame['subpath'] &&
+    (frame['turn_event_id'] === userEventId || frame['source_event_id'] === userEventId);
+  const turnFrames = (frames: SseFrame[]) => {
+    const start = frames.findIndex((frame) => frame['id'] === userEventId);
+    if (start < 0) return [];
+    return frames.slice(start + 1).filter((frame) => {
+      if (
+        frame['subpath'] ||
+        (!(TERMINAL_FRAMES as readonly string[]).includes(frame.type) &&
+          frame.type !== 'agent.error')
+      )
+        return true;
+      const source = frame['turn_event_id'] ?? frame['source_event_id'];
+      // Ignore identified other turns; unattributed errors must still fail this run.
+      return typeof source !== 'string' || source.length === 0 || source === userEventId;
+    });
+  };
+  const history = await collectSseFrames(cfg, sessionId, {
+    until: (fs) =>
+      turnFrames(fs).some((frame) =>
+        frame.type === 'agent.turn_completed'
+          ? completesTurn(frame)
+          : (TERMINAL_FRAMES as readonly string[]).includes(frame.type),
+      ),
     deadlineMs,
   });
+  const frames = turnFrames(history);
   assertNoTurnFailure(frames);
   expect(
-    frames.some((f) => f.type === 'agent.turn_completed'),
+    frames.some(completesTurn),
     `no agent.turn_completed within ${deadlineMs}ms; saw ${JSON.stringify(frames.map((f) => f.type))}`,
   ).toBe(true);
   return frames;

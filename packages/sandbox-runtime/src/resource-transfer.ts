@@ -4,6 +4,7 @@
 import { createHash } from 'node:crypto';
 import { posix as path } from 'node:path';
 import { OUTPUT_WRITABLE_PATH, SKILLS_ROOT } from './write-policy.js';
+import { parseNativeCompletion, type NativeCompletion } from './native-completion.js';
 
 /** Bounds shared by Registry producers and credential-free runner consumers. */
 export const RESOURCE_CHUNK_BYTES = 1024 * 1024;
@@ -25,6 +26,7 @@ export interface DeletedResourceFile {
 }
 export interface ResourceCheckpoint {
   version: 1;
+  completion?: NativeCompletion;
   checkpoint_id: string;
   revision: string;
   files: ChangedResourceFile[];
@@ -318,7 +320,14 @@ export function parseResourceCheckpoint(value: unknown): ResourceCheckpoint {
       ancestor = path.dirname(ancestor);
     }
   }
-  return { version: 1, checkpoint_id: raw.checkpoint_id, revision: raw.revision, files, deleted };
+  return {
+    version: 1,
+    checkpoint_id: raw.checkpoint_id,
+    revision: raw.revision,
+    files,
+    deleted,
+    ...(raw.completion === undefined ? {} : { completion: parseNativeCompletion(raw.completion) }),
+  };
 }
 
 export function resourceCheckpointDigest(checkpoint: ResourceCheckpoint): string {

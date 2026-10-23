@@ -76,7 +76,12 @@ Each item is proposed as an OIP pull request; the design is reviewed there befor
   session-runner, and retire harness-server's in-sandbox bridge. The OIP has to settle how the
   Codex SDK and Pi SDK harnesses, which use that bridge today, move over. OIP pending.
 - **Colocated parity over the tunnel.** Materialize session resources, capture outputs and roll up
-  usage for colocated sessions over the runner tunnel. OIP pending.
+  usage for runner sessions, and hide runtime usage events consistently.
+  The first native capability is controlled Pi 0.87.1 on Darwin/Linux Local with File-only tools,
+  completion receipts and Registry accounting. Broader providers/runtimes, live gateway
+  acceptance and deployed rollout/rollback exercises remain pending. Trigger expansion on complete
+  per-attempt reporting and proven Files-to-execution mapping for the requested tool surface.
+  The native-provider local test matrix remains independent test infrastructure.
 
 ## Ideas
 
@@ -772,8 +777,12 @@ exercises the public API with no services running.
 
 `packages/e2e-tests/test/self-hosted-capabilities.spec.ts` covers the Claude runner path
 against the capabilities the `separate` suite establishes. Resource, output and accounting
-assertions remain commented out pending the capabilities described below. The runtime usage
-visibility assertion is enabled. Additional parity scenarios are listed under
+assertions remain commented out for legacy Claude. The runtime usage-visibility
+assertion is enabled. Selecting
+`ORCA_E2E_COLOCATED_HARNESS=pi` enables the native File/outputs/usage assertions for the
+supported Darwin/Linux Local capability, including terminal-time Files and usage reads
+and next-turn admission. Live gateway and deployed release acceptance remain pending.
+Additional parity scenarios are listed under
 [Colocated coverage the minimal stack cannot reach](#colocated-coverage-the-minimal-stack-cannot-reach).
 
 **The legacy Claude runner sandbox has no `/mnt` resource tree.** A read of an attached resource
@@ -824,7 +833,7 @@ The self-hosted stack is Postgres + RustFS by design, which puts four further pa
 out of reach without growing it. Recorded so they are deferrals rather than oversights:
 
 - **Remote MCP through ai-gateway.** No gateway in this stack. `ai-gateway-mcp.spec.ts`
-  proves the gateway with a hand-minted JWT; nothing proves a *colocated runner* mints one
+  proves the gateway with a hand-minted JWT; nothing proves a _colocated runner_ mints one
   and drives it. **Trigger:** when the colocated path is expected to reach remote MCP.
 - **Cron triggers on a colocated agent.** Whether the distributor routes trigger-created
   sessions in colocated mode is unverified, and worth answering before a test is written.

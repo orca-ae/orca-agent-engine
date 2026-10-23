@@ -27,7 +27,7 @@ export async function createNativeProxyFixture(
         res.writeHead(403).end();
         return;
       }
-      paths.push(req.url);
+      paths.push(req.url ?? '/');
       const chunks: Buffer[] = [];
       for await (const chunk of req) chunks.push(chunk);
       const body = Buffer.concat(chunks);

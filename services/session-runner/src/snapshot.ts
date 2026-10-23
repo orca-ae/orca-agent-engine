@@ -46,6 +46,7 @@ export interface RunnerSnapshot {
   request_guardrails_owner?: 'registry';
   skills?: MaterializableSkillDescriptor[];
   managed_resources?: { version: 1; revision: string };
+  sandbox_resources?: { version: 1; revision: string; placement_id: string };
   harness_state?: unknown;
   /** The LLM the agent runs (provider + model id). */
   model: SnapshotModel;
@@ -301,6 +302,26 @@ export function parseSnapshotBody(body: Uint8Array): RunnerSnapshot {
       throw new SnapshotParseError('invalid managed_resources');
     }
     snapshot.managed_resources = { version: 1, revision: resources.revision };
+  }
+  if (obj.sandbox_resources !== undefined) {
+    const resources = obj.sandbox_resources as Record<string, unknown> | null;
+    if (
+      !resources ||
+      typeof resources !== 'object' ||
+      Array.isArray(resources) ||
+      resources.version !== 1 ||
+      typeof resources.revision !== 'string' ||
+      !/^[a-f0-9]{64}$/.test(resources.revision) ||
+      typeof resources.placement_id !== 'string' ||
+      !/^[A-Za-z0-9_-]{1,128}$/.test(resources.placement_id) ||
+      snapshot.managed_resources
+    )
+      throw new SnapshotParseError('invalid sandbox_resources');
+    snapshot.sandbox_resources = {
+      version: 1,
+      revision: resources.revision,
+      placement_id: resources.placement_id,
+    };
   }
   if (obj.request_guardrails_owner !== undefined) {
     if (

@@ -36,6 +36,7 @@
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { readFileSync } from 'node:fs';
 
 /** Env var carrying the bridge child executable the extension spawns (e.g. `node`). */
 const BRIDGE_COMMAND_ENV = 'ORCA_PI_BRIDGE_COMMAND';
@@ -96,6 +97,101 @@ function toParameters(inputSchema) {
  * @param {{ registerTool: (tool: object) => void }} pi The pi extension API.
  */
 export default async function orcaBridgeExtension(pi) {
+  let emitNative;
+  if (process.env.ORCA_PI_NATIVE_COMPLETION === '1') {
+    const { nativePiReportingStream, nativePiInstallation } = await import('@orca/pi-harness');
+    const { pathToFileURL } = await import('node:url');
+    // Pinned Pi RPC owns stdout and redirects ordinary extension writes to stderr.
+    const { writeRawStdout } = await import(
+      new URL('./core/output-guard.js', pathToFileURL(nativePiInstallation().cli)).href
+    );
+    if (typeof writeRawStdout !== 'function') throw new Error('Native Pi RPC writer unavailable');
+    let turn;
+    const emit = (value) => writeRawStdout(JSON.stringify(value) + '\n');
+    emitNative = emit;
+    const active = () => {
+      if (!turn || turn.closed) throw new Error('No accepted native turn owns this model request');
+      return turn;
+    };
+    pi.registerProvider('orca', {
+      api: 'anthropic-messages',
+      streamSimple: nativePiReportingStream(
+        (report) => {
+          const current = active();
+          const u = report.usage;
+          emit({
+            type: 'orca.native_usage',
+            turn_id: current.id,
+            report: {
+              id: report.id,
+              provider: report.provider,
+              semantics: 'delta',
+              complete: report.complete,
+              ...(report.model ? { model: report.model } : {}),
+              ...(u
+                ? {
+                    usage: {
+                      input_tokens: u.input_tokens - u.cached_input_tokens,
+                      output_tokens: u.output_tokens,
+                      cache_read_input_tokens: u.cached_input_tokens,
+                      cache_creation: {
+                        ephemeral_5m_input_tokens:
+                          (u.cache_write_input_tokens ?? 0) - (u.cache_write_input_tokens_1h ?? 0),
+                        ephemeral_1h_input_tokens: u.cache_write_input_tokens_1h ?? 0,
+                      },
+                    },
+                  }
+                : {}),
+            },
+          });
+        },
+        (url, options) => {
+          // Read the protected credential on every attempt, including compaction and retry.
+          const config = JSON.parse(
+            readFileSync(process.env.PI_CODING_AGENT_DIR + '/models.json', 'utf8'),
+          );
+          const { apiKey: key, authHeader } = config.providers.orca;
+          if (typeof key !== 'string' || !key)
+            throw new Error('Native model credential unavailable');
+          const headers = new globalThis.Headers(options?.headers);
+          headers.delete('x-api-key');
+          headers.delete('authorization');
+          if (authHeader) headers.set('authorization', 'Bearer ' + key);
+          else headers.set('x-api-key', key);
+          return globalThis.fetch(url, { ...options, headers });
+        },
+        (id) => {
+          const current = active();
+          current.expected.push(id);
+          emit({ type: 'orca.native_usage_started', turn_id: current.id, id });
+        },
+      ),
+    });
+    pi.on('input', (event) => {
+      const prefix = 'ORCA_NATIVE_TURN ';
+      const newline = event.text.indexOf('\n');
+      if (!event.text.startsWith(prefix) || newline < 0 || (turn && !turn.closed))
+        throw new Error('Native input has no accepted turn identity');
+      const id = event.text.slice(prefix.length, newline);
+      if (!/^[A-Za-z0-9_-]{1,128}$/.test(id)) throw new Error('Invalid native turn identity');
+      turn = { id, expected: [], closed: false };
+      return { action: 'transform', text: event.text.slice(newline + 1) };
+    });
+    pi.on('cache_warming_decision', () => ({ action: 'stop' }));
+    pi.on('agent_before_settle', (event) => {
+      active().outcome = event.outcome;
+    });
+    pi.on('agent_settled', () => {
+      const current = active();
+      current.closed = true;
+      emit({
+        type: 'orca.native_usage_set',
+        turn_id: current.id,
+        expected_reports: current.expected,
+        outcome: current.outcome,
+      });
+    });
+  }
   const launch = readBridgeLaunch(process.env);
   if (launch === null) {
     // No bridge wired (a chat-only launch) — nothing to register. Pi keeps its built-in tools.
@@ -168,6 +264,11 @@ export default async function orcaBridgeExtension(pi) {
 
   // Best-effort teardown when pi shuts the session down, so the bridge child is not orphaned.
   if (typeof pi.on === 'function') {
+    if (process.env.ORCA_PI_NATIVE_COMPLETION === '1') {
+      pi.on('session_start', () => {
+        emitNative({ type: 'orca.native_ready', version: 1 });
+      });
+    }
     pi.on('session_shutdown', async () => {
       await client.close().catch(() => {});
     });

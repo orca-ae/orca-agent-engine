@@ -819,6 +819,7 @@ function buildSurfaceApp(
       resolver: buildBoundSessionResolver(opts.db),
       resourcesFactory: buildRunnerResourcesFactory({
         db: opts.db,
+        ...(opts.agentSnapshotProvider ? { snapshotProvider: opts.agentSnapshotProvider } : {}),
         jwtMinter: opts.jwtMinter,
         ...(opts.registryBaseUrl ? { registryBaseUrl: opts.registryBaseUrl } : {}),
         ...(opts.registryLocalBaseUrl ? { registryLocalBaseUrl: opts.registryLocalBaseUrl } : {}),

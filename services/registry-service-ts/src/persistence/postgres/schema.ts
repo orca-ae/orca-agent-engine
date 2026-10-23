@@ -1452,6 +1452,30 @@ export const sessionHarnessStates = pgTable(
   ],
 );
 
+// Native tunnel authority and completion evidence survive runner ACK and process loss.
+export const sessionNativeCompletions = pgTable(
+  'session_native_completions',
+  {
+    workspaceId: text('workspace_id').notNull(),
+    sessionId: text('session_id').notNull(),
+    turnId: text('turn_id').notNull(),
+    phase: text('phase').notNull(),
+    record: jsonb('record').notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.sessionId, t.turnId] }),
+    foreignKey({
+      name: 'session_native_completions_workspace_session_fk',
+      columns: [t.workspaceId, t.sessionId],
+      foreignColumns: [sessions.workspaceId, sessions.id],
+    }).onDelete('cascade'),
+    check(
+      'session_native_completions_phase_check',
+      sql`${t.phase} in ('authority', 'running', 'prepared', 'completed', 'incomplete')`,
+    ),
+  ],
+);
+
 // Internal occurrence ledger. A fire becomes `enqueued` in the same database
 // transaction that inserts its Session and initial-event outbox row.
 export const agentTriggerFires = pgTable(

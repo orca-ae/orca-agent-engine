@@ -6,9 +6,9 @@ import { defineConfig } from 'vitest/config';
 /**
  * Vitest config for `@orca/e2e-tests`.
  *
- * Drives the local stack started by `make stack-up`. There are no mocks; every
- * spec is a true black-box call against the running services. The longer
- * timeout reflects two slow-but-correct paths:
+ * Stack suites drive the services started by `make stack-up`. Helper regression
+ * tests use HTTP/SSE fixtures and run without a stack. The longer timeout
+ * reflects two slow-but-correct paths in the stack suites:
  *
  *  1. SSE handshakes — opening a stream + waiting for the heartbeat or the
  *     first transcript event takes the full heartbeat interval (~5s default

@@ -43,6 +43,17 @@ here. `harness-server` keeps its own copies of the runtimes (see
   work-dirs; powers the local stack. Timeouts and kills signal the whole
   detached process group so wrapper chains cannot orphan the real command.
 
+Controlled CLIs add read-only installation paths through `withReadOnlyRuntimePaths`.
+On Linux, commands in that derived runtime use a separate SRT proxy process; `NO_PROXY` and
+`no_proxy` are empty so loopback model requests use the filtered proxy. Policy-wrapped
+commands bind declared read-only resources and writable roots separately. Model tools
+retain their own resource roots.
+
+Linux Local-backed unit tests and native-completion integration tests require Node 22,
+`@anthropic-ai/sandbox-runtime@0.0.50` installed as the `srt` CLI, `bubblewrap`,
+`ripgrep`, `socat`, and permission to create unprivileged user namespaces. Missing
+isolation prerequisites fail those tests.
+
 The Local runtime's opt-in `managedToolFilesystem` mode requires Linux. Its
 policy shell maps the handle's private tool directory to `/` read-only, overlays
 only declared writable resources and `/mnt/session/outputs`, and exposes a
