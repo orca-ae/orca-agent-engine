@@ -99,6 +99,38 @@ fits within the host's 15-second wait; an unknown termination result is an error
 File operations have pre-dispatch cancellation checks, not transactional rollback. Other harness
 call sites carry explicit TODOs; this is not uniform cancellation support for every runtime.
 
+During an active DSH turn, harness-server independently tails root `user.interrupt` inputs from
+that turn's source cursor. The follower is ready before model execution, validates current
+ownership, and uses the same input validation, acceptance and turn receipt as ordered source
+delivery. Duplicate controls share one cancellation; durable source completion suppresses later
+broker redelivery. The follower stops and joins before the turn's checkpoint/terminal settlement,
+so a delayed read cannot cancel a subsequent turn. A follower failure retires the tree.
+Each control ownership lookup has a five-second deadline covering token acquisition, HTTP and
+response decoding. Follower cancellation stops waiting immediately; late lookup results cannot
+admit a control. An ownership lookup timeout takes the same follower failure path.
+After source acceptance, root worker interruption and the active execution join share a 15-second
+host cleanup deadline. An interrupted SDK submit's `AbortError` still joins tool cleanup and
+event delivery; it does not by itself mean termination is unconfirmed. Interrupt failures, unknown
+tool termination and cleanup timeouts enter failure settlement and the existing separate
+15-second retirement budget. Execd cleanup retains its 10-second deadline. Terminal
+transcript/Registry persistence follows cleanup and is outside these budgets.
+An interrupted turn emits `session.error` (`processing_error`, `will_retry=false`), then
+`session.status_idle` with `retries_exhausted`; it does not emit normal turn success.
+The next explicit input uses the last committed checkpoint without replaying the interrupted input.
+
+The whole-turn deadline uses the same bounded root cancellation and retirement path,
+including while approval is pending. Deadline and explicit root interrupts in the same
+turn share one cancellation promise and its original 15-second budget; each accepted
+interrupt still joins the receipt's sources. The first failure cause is preserved: a deadline
+does not replace an earlier explicit interruption or worker failure, and unconfirmed cleanup
+appends its diagnostic to that cause. No synthetic user interrupt is added to the receipt.
+After retirement, events cannot advance checkpoints, launch tools or append late success. A failed warm
+runtime is replaced before accepting the first subsequent explicit message, including
+when its original submit returned at a required-action pause. If final idle is already
+persisted while the receipt settle response is pending, the new message waits without
+acceptance. Failed settlement leaves that message retryable. Terminal settlement does
+not invent missing usage or clear the corresponding guarded-admission block.
+
 Registry execution snapshots include `archived_thread_subpaths`, required for DSH. Startup
 registers the runner behind an input-admission barrier, rereads Registry state and installs
 monotonic native fences before the first model input. Warm refresh also applies them. Dispatcher
@@ -149,6 +181,13 @@ authoritative checkpoint. Lost commit acknowledgements are
 resolved by inspecting the receipt before abandoning a turn. Missing usage is recorded as
 unknown rather than zero and does not prevent durable failure settlement. A parent-handled
 child failure may still commit if the root succeeds and terminal accounting is known.
+This includes native `interrupt_agent` after the child's provider response has fully terminated:
+an aborted child with matched provider request counts does not by itself fail the root.
+The tree-settlement guard appends bounded reason labels to its failure message:
+`root_interrupted`, `no_usage`, `root_terminal_unsuccessful`, `missing_terminal`, and
+`provider_requests_unmatched`. Multiple labels can apply; they contain no native IDs,
+prompts or tool arguments. Canceling a provider request before validated terminal usage
+keeps accounting unknown, even if earlier requests from that child completed.
 
 Child native UUIDs address `subagents/<uuid>` transcript subpaths. Public thread IDs retain the
 existing workspace/Session/subpath-derived `sth_` form. The bridge carries the accepted root

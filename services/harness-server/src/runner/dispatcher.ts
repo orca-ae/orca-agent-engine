@@ -61,6 +61,7 @@ import {
   type RemoteMcpToolsetPolicy,
   type SubmitHooks,
   type SessionGuardrail,
+  type UserEvent,
 } from '../harness/agent-harness.js';
 import {
   resolveHarnessAnnotation,
@@ -387,6 +388,7 @@ interface StatusRunningLatencyEvent {
   producedAtMs: number;
 }
 const GUARDRAIL_STATE_WRITE_TIMEOUT_MS = 5_000;
+const DSH_CONTROL_OWNER_TIMEOUT_MS = 5_000;
 
 interface DeferredUserMessage {
   subpath?: string;
@@ -912,7 +914,100 @@ export class Dispatcher {
         session.runtime_revision,
         session.harness_ownership_revision ?? 0,
       ),
+      ...(harness === 'dsh_sdk'
+        ? { rootInterrupts: this.followRootInterrupts.bind(this, workspaceId, sessionId) }
+        : {}),
     });
+  }
+
+  private async *followRootInterrupts(
+    workspaceId: string,
+    sessionId: string,
+    turn: UserEvent,
+    signal: AbortSignal,
+    onReady: () => void,
+  ): AsyncIterable<{ event: UserEvent; hooks?: SubmitHooks }> {
+    const generation = this.lifecycleGeneration;
+    const key = runnerKeyFor(workspaceId, sessionId);
+    const runner = this.runners.get(key);
+    let cursor = turn.seq;
+    // Deferred inputs retain their identity even when their source cursor is no longer in memory.
+    if (cursor === undefined) {
+      for await (const event of this.opts.store.read(workspaceId, sessionId, {
+        fromCursor: '',
+        maxEvents: 0,
+        subpath: '*',
+      })) {
+        if (signal.aborted) return;
+        if (event.id === turn.id) {
+          cursor = event.seq;
+          break;
+        }
+      }
+    }
+    if (!runner || cursor === undefined)
+      throw new DurableHarnessStateError('DSH active control requires a runner and source cursor');
+    for await (const event of this.opts.store.tail(workspaceId, sessionId, {
+      fromCursor: String(cursor),
+      subpath: '',
+      signal,
+      onReady,
+    })) {
+      if (signal.aborted) return;
+      this.assertLifecycleCurrent(generation);
+      if (this.runners.get(key) !== runner)
+        throw new DurableHarnessStateError('DSH control runner generation retired');
+      if (event.workspaceId !== workspaceId || event.sessionId !== sessionId)
+        throw new DurableHarnessStateError('DSH control transcript scope mismatch');
+      if (event.producedBy !== 'client' || event.kind !== 'user.interrupt' || event.subpath)
+        continue;
+      if (await this.isCompletedUserEvent(workspaceId, sessionId, event.id)) continue;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let cancelLookup: () => void = () => {};
+      let owner: 'registry' | 'harness-server' | null;
+      try {
+        // Bound the entire client promise: token acquisition and body decoding also await I/O.
+        owner = await new Promise<'registry' | 'harness-server' | null>((resolve, reject) => {
+          cancelLookup = () => reject(signal.reason);
+          signal.addEventListener('abort', cancelLookup, { once: true });
+          if (signal.aborted) {
+            cancelLookup();
+            return;
+          }
+          timer = setTimeout(
+            () => reject(new DurableHarnessStateError('DSH control ownership lookup timed out')),
+            DSH_CONTROL_OWNER_TIMEOUT_MS,
+          );
+          void this.opts
+            .registry!.getExecutionOwner({ workspaceId, sessionId })
+            .then(resolve, reject);
+        });
+      } catch (error) {
+        if (signal.aborted) return;
+        throw error;
+      } finally {
+        if (timer) clearTimeout(timer);
+        signal.removeEventListener('abort', cancelLookup);
+      }
+      if (signal.aborted) return;
+      this.assertLifecycleCurrent(generation);
+      if (owner !== 'harness-server' || this.runners.get(key) !== runner)
+        throw new DurableHarnessStateError('DSH control execution ownership changed');
+      const hooks = this.acceptanceHooks(
+        workspaceId,
+        sessionId,
+        event.kind,
+        event.id,
+        undefined,
+        generation,
+      );
+      if (!hooks) throw new DurableHarnessStateError('DSH control source identity unavailable');
+      yield {
+        event: { id: event.id, kind: event.kind, payload: parseJsonPayload(event.payload) },
+        hooks,
+      };
+    }
+    if (!signal.aborted) throw new DurableHarnessStateError('DSH control follower ended');
   }
 
   private resolveLlmEgress(session?: SessionRecord | null, colocated = false): LlmEgress {
@@ -2467,6 +2562,9 @@ export class Dispatcher {
       const submitResult = await runner.submit(
         {
           ...(source?.userEventId ? { id: source.userEventId } : {}),
+          ...(runner.supportsNativeThreadInterrupt && source?.seq !== undefined
+            ? { seq: source.seq }
+            : {}),
           ...(source?.subpath ? { subpath: source.subpath } : {}),
           kind,
           payload: harnessPayload,
@@ -2886,11 +2984,14 @@ export class Dispatcher {
     }
     let prepared: PreparedExecutionV2 | null = null;
     try {
+      await runner.waitForFailedTurnSettlement();
+      this.assertLifecycleCurrent(lifecycleGeneration);
       prepared = await this.opts.registry.prepareExecution({ workspaceId, sessionId });
       this.assertLifecycleCurrent(lifecycleGeneration);
       if (prepared) {
         prepared = validatePreparedExecution(workspaceId, sessionId, prepared);
-        await runner.applyArchivedThreadSubpaths(prepared.archived_thread_subpaths);
+        if (!runner.hasSettledFailure())
+          await runner.applyArchivedThreadSubpaths(prepared.archived_thread_subpaths);
         this.assertLifecycleCurrent(lifecycleGeneration);
         if (this.runners.get(runnerKey) !== runner)
           throw new RetryableSessionEventError('Runner generation changed during control refresh');
@@ -2958,7 +3059,7 @@ export class Dispatcher {
     }
     const nextKey = preparedExecutionRuntimeConfigKey(prepared);
     const currentKey = this.runnerSessionConfigKeys.get(runnerKey);
-    if (currentKey === undefined || currentKey === nextKey) {
+    if (!runner.hasSettledFailure() && (currentKey === undefined || currentKey === nextKey)) {
       // prepareExecution is the authoritative pre-turn snapshot. Refresh a
       // reused runner before submit() evaluates request guardrails. A changed
       // configuration starts a fresh runner with this same prepared state.

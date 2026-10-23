@@ -25,6 +25,7 @@ import { boundedLines } from './bounds.js';
 import { gatewayBase, installManagedFetch } from './transport.js';
 import { orchestration, orchestrationArguments, type DshStartCommand } from './orchestration.js';
 import { archivedSubpaths, assertNotArchived } from './archive.js';
+import { settlementFailures } from './settlement.js';
 import {
   catalogName,
   turnEndPayload,
@@ -669,14 +670,9 @@ export function apply(ctx: Context): void {
       await waitTree();
       quiesced = true;
       if (failed) throw failed;
-      if (
-        interrupted ||
-        !usage.size ||
-        (usage.has(String(handle.agent.id)) &&
-          terminals.get(String(handle.agent.id)) !== 'completed') ||
-        [...usage].some(([id, value]) => value.started !== value.completed || !terminals.has(id))
-      )
-        throw new Error('DSH tree incomplete or terminal usage unavailable');
+      const reasons = settlementFailures(interrupted, String(handle.agent.id), usage, terminals);
+      if (reasons.length)
+        throw new Error('DSH tree incomplete or terminal usage unavailable: ' + reasons.join(', '));
       const total = zero();
       for (const value of usage.values())
         for (const key of Object.keys(value.counts) as Array<keyof SdkTerminalUsage>)

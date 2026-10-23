@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { expect } from 'vitest';
-import { createServer } from 'node:http';
+import { createServer, type ServerResponse } from 'node:http';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -19,6 +19,57 @@ type ThreadTree = {
   threads: Array<{ subpath: string; parentSubpath: string }>;
 };
 type FixtureEvent = DshWorkerEvent | Canonical | ThreadTree;
+
+export function replyMessages(
+  res: ServerResponse,
+  model: string,
+  blocks: Array<Record<string, unknown>> = [{ type: 'text', text: 'OK' }],
+  stop = 'end_turn',
+): void {
+  const frames: Array<Record<string, unknown>> = [
+    {
+      type: 'message_start',
+      message: {
+        id: 'fixture',
+        type: 'message',
+        role: 'assistant',
+        content: [],
+        model,
+        usage: { input_tokens: 4, output_tokens: 0, cache_read_input_tokens: 3 },
+      },
+    },
+  ];
+  blocks.forEach((block, index) => {
+    frames.push({
+      type: 'content_block_start',
+      index,
+      content_block: block.type === 'tool_use' ? { ...block, input: {} } : block,
+    });
+    if (block.type === 'tool_use')
+      frames.push({
+        type: 'content_block_delta',
+        index,
+        delta: { type: 'input_json_delta', partial_json: JSON.stringify(block.input) },
+      });
+    frames.push({ type: 'content_block_stop', index });
+  });
+  frames.push(
+    {
+      type: 'message_delta',
+      delta: {
+        stop_reason: blocks.some((block) => block.type === 'tool_use') ? 'tool_use' : stop,
+        stop_sequence: null,
+      },
+      usage: { output_tokens: 2 },
+    },
+    { type: 'message_stop' },
+  );
+  res.end(
+    frames
+      .map((frame) => 'event: ' + frame.type + '\ndata: ' + JSON.stringify(frame) + '\n\n')
+      .join(''),
+  );
+}
 
 export async function exerciseNativeTree(
   observe: (event: DshWorkerEvent) => void = () => {},
@@ -115,49 +166,7 @@ export async function exerciseNativeTree(
       const reply = (
         blocks: Array<Record<string, unknown>> = [{ type: 'text', text: 'OK' }],
         stop = 'end_turn',
-      ) => {
-        const tool = blocks.some((block) => block.type === 'tool_use');
-        const frames: Array<Record<string, unknown>> = [
-          {
-            type: 'message_start',
-            message: {
-              id: 'fixture',
-              type: 'message',
-              role: 'assistant',
-              content: [],
-              model: body.model,
-              usage: { input_tokens: 4, output_tokens: 0, cache_read_input_tokens: 3 },
-            },
-          },
-        ];
-        blocks.forEach((block, index) => {
-          frames.push({
-            type: 'content_block_start',
-            index,
-            content_block: block.type === 'tool_use' ? { ...block, input: {} } : block,
-          });
-          if (block.type === 'tool_use')
-            frames.push({
-              type: 'content_block_delta',
-              index,
-              delta: { type: 'input_json_delta', partial_json: JSON.stringify(block.input) },
-            });
-          frames.push({ type: 'content_block_stop', index });
-        });
-        frames.push(
-          {
-            type: 'message_delta',
-            delta: { stop_reason: tool ? 'tool_use' : stop, stop_sequence: null },
-            usage: { output_tokens: 2 },
-          },
-          { type: 'message_stop' },
-        );
-        res.end(
-          frames
-            .map((frame) => 'event: ' + frame.type + '\ndata: ' + JSON.stringify(frame) + '\n\n')
-            .join(''),
-        );
-      };
+      ) => replyMessages(res, body.model, blocks, stop);
       const call = (name: string, input: object) => ({
         type: 'tool_use',
         id: 'native-' + name + '-' + ++callSequence,

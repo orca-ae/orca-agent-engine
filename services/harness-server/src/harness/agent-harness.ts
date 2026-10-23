@@ -175,6 +175,8 @@ export function runtimeAgentToolNameUnion(snapshot: SessionStartInput['agentSnap
 }
 
 export interface UserEvent {
+  /** Private source cursor for owner-local active-turn control following. */
+  seq?: number;
   /** Persisted thread address; public sth_ IDs are never native worker IDs. */
   subpath?: string;
   /** Stable transcript event id, used to resolve Registry-authenticated turn context. */
@@ -294,6 +296,10 @@ export interface AgentHarness {
    * `user.tool_confirmation` or `user.custom_tool_result`.
    */
   hasPendingRequiredAction?(): boolean;
+  /** A durable failed turn requires a fresh runtime before accepting new work. */
+  hasSettledFailure?(): boolean;
+  /** Join background failure settlement before deciding whether to reuse the runtime. */
+  waitForFailedTurnSettlement?(): Promise<void>;
   /** True while an unacknowledged usage delta keeps stateful guardrails fail-closed. */
   hasPendingGuardrailUsage?(): boolean;
   /** Replace usage-backed shared guardrail facts with Registry's acknowledged totals. */
