@@ -18,6 +18,7 @@ import {
   type ResourceManifest,
 } from '@orca/sandbox-runtime';
 import type { Event, TranscriptStore } from '@orca/transcript-store';
+import type { NativeCompletionCoordinator } from '../../src/domain/native-completion.js';
 import {
   SessionResourcesDelivery,
   RUNNER_RESOURCES_PATH,
@@ -29,6 +30,112 @@ import {
 const workspaceId = 'ws_resources';
 const sessionId = 'ses_resources';
 const hash = (value: string | Buffer) => createHash('sha256').update(value).digest('hex');
+
+it('reattaches a running native placement without restaging files or losing executable mappings', async () => {
+  const f = await fixture();
+  const binding = { executionId: 'exec_1', placementId: 'placement_1', revision: hash('native') };
+  const manifest: ResourceManifest = { version: 1, revision: binding.revision, resources: [] };
+  const coordinator = {
+    hasAuthority: vi.fn(async () => true),
+    claim: vi.fn(async () => {}),
+    pending: vi.fn(async () => [{ turnId: 'evt_turn', phase: 'running', record: binding }]),
+    begin: vi.fn(async () => {}),
+    markLost: vi.fn(async () => {
+      throw new Error('lost');
+    }),
+  };
+  const request = vi.fn(async (_path: string, body: unknown) => {
+    if (
+      (body as { type: string }).type !== 'pending' &&
+      (body as { type: string }).type !== 'status'
+    )
+      throw new Error('must not reconfigure a running turn');
+    return { checkpoint: null, committed: true, revision: binding.revision };
+  });
+  const delivery = new SessionResourcesDelivery({
+    workspaceId,
+    sessionId,
+    fileStore: f.files,
+    store: f.store,
+    prepare: async () => ({
+      manifest,
+      memoryStores: new Map(),
+      networkAllowedDomains: [],
+      close: async () => {},
+      open: async () => {
+        throw new Error('unused');
+      },
+    }),
+    isCurrent: async () => true,
+    request,
+    native: {
+      coordinator: coordinator as unknown as NativeCompletionCoordinator,
+      probe: async () => ({
+        ...binding,
+        resolvedPaths: {},
+        outputs: '/verified/outputs',
+        turn: { turnId: 'evt_turn', phase: 'running' },
+      }),
+    },
+  });
+  expect(await delivery.deliver()).toEqual({ version: 1, revision: binding.revision });
+  expect(await delivery.deliver()).toEqual({ version: 1, revision: binding.revision });
+  expect(delivery.snapshotResources()).toEqual({
+    sandbox_resources: {
+      version: 1,
+      revision: binding.revision,
+      placement_id: binding.placementId,
+    },
+  });
+  expect(coordinator.markLost).not.toHaveBeenCalled();
+  expect(coordinator.claim).toHaveBeenCalledTimes(2);
+});
+
+it.each([
+  [false, false],
+  [true, false],
+  [false, true],
+  [true, true],
+])(
+  'does not newly claim native authority when placement fails (existing authority %s, committed %s)',
+  async (existing, committed) => {
+    const f = await fixture();
+    const coordinator = {
+      hasAuthority: vi.fn(async () => existing),
+      claim: vi.fn(async () => {}),
+      pending: vi.fn(async () => []),
+    };
+    const delivery = new SessionResourcesDelivery({
+      workspaceId,
+      sessionId,
+      fileStore: f.files,
+      store: f.store,
+      prepare: async () => ({
+        manifest: { version: 1, revision: hash('native'), resources: [] },
+        memoryStores: new Map(),
+        networkAllowedDomains: [],
+        open: async () => {
+          throw new Error('unused');
+        },
+        close: async () => {},
+      }),
+      isCurrent: async () => true,
+      request: async (_path, body) => {
+        if ((body as { type: string }).type === 'pending') return { checkpoint: null };
+        if (committed) return { committed: true };
+        throw new Error('placement failed');
+      },
+      native: {
+        coordinator: coordinator as unknown as NativeCompletionCoordinator,
+        probe: async () => ({ executionId: 'exec_unplaced' }),
+      },
+    });
+    await expect(delivery.deliver()).rejects.toThrow(
+      committed ? 'Native executable mapping missing' : 'placement failed',
+    );
+    expect(coordinator.claim).toHaveBeenCalledTimes(existing ? 1 : 0);
+  },
+);
 
 async function fixture() {
   const files = new LocalFileStore({

@@ -62,6 +62,7 @@ const ALLOWED_SNAPSHOT_KEYS = new Set([
   'guardrail_state',
   'harness_state',
   'managed_resources',
+  'sandbox_resources',
   'custom_tools',
   'tool_permissions',
   'default_tool_permission',
@@ -320,6 +321,24 @@ function assertSnapshotCredentialFreeAt(snapshot: AgentSnapshot, path: PathStep)
     )
       throw new EgressNotCredentialFreeError('invalid managed resource revision');
     assertNoExtraKeys(managed, new Set(['version', 'revision']), `${path}.managed_resources`);
+  }
+  if (snapshot.sandbox_resources !== undefined) {
+    const resources = snapshot.sandbox_resources;
+    if (
+      !isPlainObject(resources) ||
+      resources.version !== 1 ||
+      typeof resources.revision !== 'string' ||
+      !/^[a-f0-9]{64}$/.test(resources.revision) ||
+      typeof resources.placement_id !== 'string' ||
+      !/^[A-Za-z0-9_-]{1,128}$/.test(resources.placement_id) ||
+      snapshot.managed_resources !== undefined
+    )
+      throw new EgressNotCredentialFreeError('invalid sandbox resource revision');
+    assertNoExtraKeys(
+      resources,
+      new Set(['version', 'revision', 'placement_id']),
+      `${path}.sandbox_resources`,
+    );
   }
   if (snapshot.tool_permissions !== undefined) {
     if (

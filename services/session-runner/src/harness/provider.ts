@@ -48,6 +48,7 @@ export interface ProviderSessionContext {
   sandbox?: SandboxHandle;
   toolSandbox?: SandboxHandle;
   runToolWithResources?: SessionStartInput['runToolWithResources'];
+  sandboxResources?: SessionStartInput['sandboxResources'];
   /**
    * The runner's per-process {@link SandboxRuntime} (from `@orca/sandbox-runtime`),
    * or `undefined` when the runner wired none. A provider that launches a real
@@ -87,6 +88,15 @@ export class UnknownProviderError extends Error {
  * `snapshot.provider` at snapshot-apply time.
  */
 export class ProviderRegistry {
+  private readonly sandboxProviders = new Map<string, readonly string[]>();
+
+  sessionSandboxReadPaths(): string[] {
+    return [...new Set([...this.sandboxProviders.values()].flat())];
+  }
+
+  supportsSessionSandbox(provider: string): boolean {
+    return this.sandboxProviders.has(provider);
+  }
   private readonly managedProviders = new Set<string>();
   private readonly customToolProviders = new Set<string>();
 
@@ -105,12 +115,18 @@ export class ProviderRegistry {
   register(
     provider: string,
     factory: ProviderFactory,
-    capabilities: { managedResources?: boolean; customTools?: boolean } = {},
+    capabilities: {
+      managedResources?: boolean;
+      customTools?: boolean;
+      sessionSandboxReadPaths?: readonly string[];
+    } = {},
   ): this {
     if (this.factories.has(provider)) {
       throw new Error(`a harness provider is already registered for '${provider}'`);
     }
     this.factories.set(provider, factory);
+    if (capabilities.sessionSandboxReadPaths)
+      this.sandboxProviders.set(provider, capabilities.sessionSandboxReadPaths);
     if (capabilities.managedResources) this.managedProviders.add(provider);
     if (capabilities.customTools) this.customToolProviders.add(provider);
     return this;
@@ -202,6 +218,7 @@ export function buildSessionStartInput(
     input.sandbox = ctx.sandbox;
   }
   if (ctx.toolSandbox !== undefined) input.toolSandbox = ctx.toolSandbox;
+  if (ctx.sandboxResources !== undefined) input.sandboxResources = ctx.sandboxResources;
   if (ctx.runToolWithResources !== undefined) input.runToolWithResources = ctx.runToolWithResources;
   const mcpServers = readGatewayMcpServers(snapshot);
   if (mcpServers !== undefined) {

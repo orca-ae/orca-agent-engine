@@ -437,6 +437,13 @@ exemptions:
   # wired-elsewhere — real variables consumed outside the two scanned configs.
   # ---------------------------------------------------------------------------
 
+  - name: NO_PROXY
+    reason: wired-elsewhere
+    site: packages/sandbox-runtime/src/local/runtime.ts
+    note: >-
+      The Linux trusted CLI wrapper sets an empty value for sandboxed proxy clients.
+      This generated subprocess environment is not an operator configuration input.
+
   - name: HOME
     reason: wired-elsewhere
     site: services/harness-server/src/sandbox/local/runtime.ts

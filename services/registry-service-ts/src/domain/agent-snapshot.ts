@@ -185,6 +185,7 @@ export interface AgentSnapshot {
   request_guardrails_owner?: 'registry';
   /** Committed resource revision acknowledged before this snapshot. */
   managed_resources?: { version: 1; revision: string };
+  sandbox_resources?: { version: 1; revision: string; placement_id: string };
   harness_state?: unknown;
   /** The LLM the agent runs (provider + model id). */
   model: AgentModel;
@@ -334,7 +335,7 @@ export function buildAgentSnapshot(input: AgentSnapshotInput): AgentSnapshot {
     model: { ...agent.model },
     provider,
     system,
-    allowed_tool_names: expandAllowedToolNames(intersectedToolNames),
+    allowed_tool_names: expandAllowedToolNames(intersectedToolNames, agent.tools ?? []),
     allowed_mcp_server_names: [...allowedMcpServers],
     egress,
     // The session-wide Skill-bundle union rides the snapshot ONLY for a colocated

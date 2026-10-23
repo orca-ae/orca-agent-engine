@@ -11,7 +11,7 @@
     "typecheck": "tsc --noEmit",
     "test:wire": "bash ../../services/dev/scripts/with-dev-env.sh vitest run test/wire-conformance.spec.ts test/trigger-wire.spec.ts test/multi-workspace-isolation.spec.ts test/transcript-visibility.spec.ts test/session-threads.spec.ts test/apicall.spec.ts test/internal-auth.spec.ts test/guardrails-wire.spec.ts test/model-prices-wire.spec.ts test/budget-wire.spec.ts",
     "test:gateway": "bash ../../services/dev/scripts/with-dev-env.sh vitest run test/ai-gateway-mcp.spec.ts",
-    "test:self-hosted": "bash ../../services/dev/scripts/with-dev-env.sh vitest run test/self-hosted-e2e.spec.ts",
+    "test:self-hosted": "bash ../../services/dev/scripts/with-dev-env.sh vitest run test/self-hosted-helpers.spec.ts test/self-hosted-e2e.spec.ts",
     "test:self-hosted:real": "bash ../../services/dev/scripts/with-dev-env.sh vitest run test/self-hosted-capabilities.spec.ts",
     "test:agent": "bash ../../services/dev/scripts/with-dev-env.sh bash scripts/run-agent-tests.sh",
     "test:agent:sandbox": "ORCA_E2E_SANDBOX_HARNESS=1 bash ../../services/dev/scripts/with-dev-env.sh bash scripts/run-agent-tests.sh --sandbox",

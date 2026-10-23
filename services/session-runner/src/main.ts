@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { registerPiSdkProvider } from './harness/pi-sdk/provider.js';
-import { RunnerResources } from './resources.js';
 import { registerCodexSdkProvider } from './harness/codex-sdk/provider.js';
 // Entry point for @orca/session-runner — the runner-role glue, wired together.
 //
@@ -491,7 +490,6 @@ function defaultCreateLoop(
     // The runner materializes the owner-pod-pushed Skill bundles as a `--plugin-dir`
     // plugin under its host workspace root (`config.workspace`).
     skillsWorkspaceDir: config.workspace,
-    resources: new RunnerResources({ workspaceDir: config.workspace }),
     logger: console,
   });
 }

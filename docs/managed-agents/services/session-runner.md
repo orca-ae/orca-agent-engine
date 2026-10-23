@@ -12,6 +12,94 @@
 > [`../harness-modes.md`](../harness-modes.md),
 > [`../deployment-topologies.md`](../deployment-topologies.md).
 
+## Native File completion capability
+
+The negotiated `session_sandbox` placement and completion version 1 support the
+following execution surface. Provider registration alone does not establish parity.
+
+| Provider/runtime                                                                                                           | File placement and outputs                                      | Usage/completion authority                                 |
+| -------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- | ---------------------------------------------------------- |
+| Controlled Pi 0.87.1 CLI and Pi AI dependency, Darwin/Linux Local with SRT, Node 22.21+ within Node 22, Anthropic Messages | Read-only Files; turn-end output freeze                         | Registry, one normalized delta per actual provider attempt |
+| Managed `codex-sdk` / `pi-sdk`                                                                                             | Existing managed File/Memory/Git tools and per-tool checkpoints | Existing managed accounting and native checkpoint recovery |
+| Other native providers, runtimes, uncontrolled Pi installations or tool surfaces                                           | Legacy behavior; no negotiated native File completion guarantee | No complete native reporting claim                         |
+
+Native admission examines the complete requested surface: only Orca `read`,
+`write`, `edit`, `glob`, `grep`, and `list`; no shell, terminals, MCP servers,
+custom tools, Skills, custom spec or multiagent. It never removes requested tools
+to qualify a Session. Managed guardrail admission is unchanged. A capability probe
+failure blocks preparation; explicit unsupported capability selects legacy behavior.
+Toolset defaults and per-tool `enabled` overrides define the requested tool set.
+An enabled tool remains in that set even when its permission policy denies it.
+Wildcard and unknown toolset selectors retain the legacy surface and do not qualify for native completion.
+Native File approvals use canonical `mcp__orca__*` tool names; Pi built-ins are disabled.
+
+The validated Linux Docker profile runs as a non-root user with `--init`,
+`--security-opt seccomp=unconfined` and `--security-opt systempaths=unconfined`.
+These outer Docker settings permit nested user/PID namespaces and `/proc` mounts.
+SRT applies the process filesystem and network policies inside that container.
+
+Registry uses the existing chunked resources routes and a separate
+`sandbox_resources` snapshot field. Before snapshot acknowledgment, the runner
+verifies Files-to-process readability and output visibility, installs the File-only
+policy, supplies logical-to-executable path guidance, and waits for extension and
+RPC readiness. Binding revision and placement incarnation identify reuse. An
+unchanged effective configuration refreshes the gateway scoped JWT or retains the
+runner's direct Anthropic credential without restarting Pi. Gateway snapshots use
+their LLM base URL and Bearer JWT. Direct/sidecar snapshots use
+`https://api.anthropic.com` and the runner's `ANTHROPIC_API_KEY` fallback via
+`x-api-key`; the upstream key stays in the runner's private model configuration.
+Missing native model credentials reject startup before Pi launches. Both routes
+use the same per-attempt reporting hook, including compaction and retries.
+The extension uses the controlled Pi installation's internal RPC output writer;
+that dependency is part of the exact 0.87.1 pin and is checked before readiness.
+
+Public events stream live with retained stable IDs, including approval requests.
+The private append-only NDJSON journal retains each event and report delta before
+forwarding, with a 10,000-event limit and an 8 MiB limit on the entire serialized
+journal, including framing and report metadata. Recovery accepts the prior JSON
+report format as incomplete evidence; truncated or malformed journals remain private
+and require recovery. A detached stream does not end its job. A stream ending without
+a completion receipt retires its bridge generation and holds subsequent turns.
+Reconnect attaches the original job and restores controls without another model
+submission. Ordinary public event paths are projected to logical sandbox paths;
+the agent retains executable paths and authorized Orca mount extensions carry
+`resolved_path`. Private control and reporting files are outside File tool roots.
+
+After all admitted file tools settle, the runner retains the sealed report set and
+outcome, freezes changed outputs privately, and holds terminal events and the next
+turn. Registry commits Files, output events and usage before preparing a durable
+receipt. Prepared ACK releases frozen bytes; completed ACK follows durable terminal
+and completion markers. Reports remain until completed ACK. Cleanup keeps one small
+completed ACK tombstone until the next turn and resumes after restart. Failed and
+interrupted turns use the same ordering. Missing usage or lost unfrozen outputs
+remain explicitly incomplete and block subsequent turns for operator recovery.
+
+### Native capability upgrade and rollback
+
+Apply additive migration `0063_runner_native_completions` before enabling compatible
+Registry and runner writers. It adds workspace/Session/turn-scoped receipts with
+authority, running, prepared, completed and incomplete phases; existing tables are
+unchanged. Fence and drain old bridges and gateway/harness usage writers before
+activating Registry authority for an affected Session. Initial authority is claimed
+only after verified executable placement; failed initial placement does not claim it.
+An existing authority is taken over before receipt reconciliation and stays selected
+even if replacement preparation fails. The persisted authority survives reconnect and rejects internal usage writes, including shared-token writes.
+An unrestricted mixed Registry deployment is not a safe authority transition.
+
+For rollback, stop new turn admission, reconcile prepared receipts and outstanding
+File/report commits, and retain unacknowledged checkpoints and incomplete evidence.
+Keep compatible receipt readers and the additive table until affected Sessions
+finish, or pause those Sessions for operator recovery. Do not drop the table or
+interpret a retained running receipt as permission to replay the model. Historical
+usage visibility migration belongs to the separate visibility change; drain old
+writers, resume its bounded backfill, and verify no public usage rows remain before
+removing rollout fences. No historical monetary usage is reconstructed.
+
+The local Messages fixture integration runs controlled Pi through a real WebSocket
+tunnel and the Registry resource delivery/accounting coordinator. It checks attached
+File consumption, actual-path guidance, captured bytes and completion ordering.
+Fixture results do not establish live-provider or deployment rollout acceptance.
+
 ## A client, not a listener
 
 The runner holds **no listener**. It dials `WS /v1/tunnels/runners/:runnerId` on

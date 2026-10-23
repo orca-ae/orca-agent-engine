@@ -153,3 +153,4 @@ export {
   rejectUnsupportedCancellation,
 } from './opensandbox-cancellation.js';
 export type { SandboxCallOptions } from './opensandbox-cancellation.js';
+export * from './native-completion.js';

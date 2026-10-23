@@ -71,10 +71,11 @@ import {
   ORCA_APPROVAL_ALLOW,
   ORCA_APPROVAL_BLOCK,
 } from './protocol.js';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync, realpathSync, renameSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
   BRIDGE_ROOT_FLAG,
+  BRIDGE_NATIVE_FILE_POLICY_FLAG,
   BRIDGE_TMUX_SOCKET_FLAG,
   pushAllowedToolsFlag,
 } from '../claude-code/bridge-runtime.js';
@@ -163,6 +164,9 @@ interface TurnState {
  * snapshot then `submit`s each user turn against the SAME live pi process.
  */
 export class PiCliHarness implements AgentHarness {
+  get preserveSandboxOnRefresh(): boolean {
+    return this.input?.sandboxResources !== undefined;
+  }
   private readonly launch: typeof launchNativeCli;
   private input: SessionStartInput | undefined;
   private sandbox: SandboxHandle | undefined;
@@ -184,6 +188,7 @@ export class PiCliHarness implements AgentHarness {
   private readonly pendingApprovals = new Map<string, AbortController>();
   /** Per-session monotonically increasing counter for command ids + signal ids. */
   private seq = 0;
+  private nativeReady: ((frame: Record<string, unknown>) => void) | undefined;
 
   /** Bound on how long one turn may park on pi's terminal frame (see {@link submit}). */
   private readonly turnTimeoutMs: number;
@@ -205,9 +210,19 @@ export class PiCliHarness implements AgentHarness {
     this.sandbox = sandbox;
 
     // Render the managed models.json (pi authenticates from it) before booting pi.
-    const root = requireSandboxRootDir(sandbox);
+    const root = input.sandboxResources
+      ? realpathSync(requireSandboxRootDir(sandbox))
+      : requireSandboxRootDir(sandbox);
     const agentDir = `${root}/.pi-agent-home`;
     this.writeModelsConfig(agentDir, input);
+    if (input.sandboxResources) {
+      mkdirSync(root + '/.orca', { recursive: true, mode: 0o700 });
+      writeFileSync(
+        root + '/.orca/native-file-policy.json',
+        JSON.stringify(input.sandboxResources.policy),
+        { mode: 0o600 },
+      );
+    }
 
     const bridge = this.buildBridgeCommand(sandbox, input);
     const config = buildPiLaunchConfig(this.buildLaunchInput(sandbox, input, agentDir, bridge));
@@ -217,11 +232,60 @@ export class PiCliHarness implements AgentHarness {
       ...(config.env ?? {}),
       ORCA_PI_BRIDGE_COMMAND: bridge.command,
       ORCA_PI_BRIDGE_ARGS: JSON.stringify(bridge.args),
+      ORCA_PI_NATIVE_COMPLETION: input.sandboxResources ? '1' : '0',
+      ...(input.sandboxResources ? { PATH: '/usr/bin:/bin:/usr/sbin:/sbin' } : {}),
     };
 
     // Boot pi inside the sandbox and start reading its RPC stdout.
     this.cli = this.launch(sandbox, config);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const ready = input.sandboxResources
+      ? new Promise<void>((resolve, reject) => {
+          let extensionReady = false;
+          timer = setTimeout(() => reject(new Error('Native Pi readiness timed out')), 15000);
+          this.nativeReady = (frame) => {
+            if (frame.type === 'orca.native_ready' && frame.version === 1) {
+              extensionReady = true;
+              this.cli?.write(
+                JSON.stringify({ type: 'get_state', id: 'orca_native_ready' }) +
+                  String.fromCharCode(10),
+              );
+            }
+            if (frame.type === 'extension_error') reject(new Error('Native Pi extension failed'));
+            if (extensionReady && frame.type === 'response' && frame.id === 'orca_native_ready') {
+              if (frame.success === true) resolve();
+              else reject(new Error('Native Pi startup state is unavailable'));
+            }
+          };
+        })
+      : undefined;
     this.readerDone = this.readLoop(this.cli);
+    if (ready) {
+      try {
+        await Promise.race([
+          ready,
+          this.readerDone.then(() => {
+            throw new Error('Native Pi exited before readiness');
+          }),
+        ]);
+      } catch (error) {
+        await this.stop('replica.shutting_down');
+        throw error;
+      } finally {
+        clearTimeout(timer);
+        this.nativeReady = undefined;
+      }
+    }
+  }
+
+  async refreshCredentials(apiKey = this.opts.apiKey): Promise<void> {
+    if (!this.input?.sandboxResources || !this.sandbox || this.terminated || !apiKey)
+      throw new Error('Native Pi credential refresh is unavailable');
+    this.opts.apiKey = apiKey;
+    this.writeModelsConfig(
+      realpathSync(requireSandboxRootDir(this.sandbox)) + '/.pi-agent-home',
+      this.input,
+    );
   }
 
   async submit(event: UserEvent): Promise<void> {
@@ -246,7 +310,16 @@ export class PiCliHarness implements AgentHarness {
       turn = { resolve, abort: new AbortController() };
       this.turn = turn;
     });
-    this.sendCommand({ type: 'prompt', message: text });
+    const sourceId = (event.payload as { native_turn_id?: unknown }).native_turn_id;
+    if (
+      this.input?.sandboxResources &&
+      (typeof sourceId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(sourceId))
+    )
+      throw new Error('Native turn has no Registry driving identity');
+    this.sendCommand({
+      type: 'prompt',
+      message: this.input?.sandboxResources ? 'ORCA_NATIVE_TURN ' + sourceId + '\n' + text : text,
+    });
     // BOUNDED (see DEFAULT_TURN_DEADLINE_MS): a CLI that took the command and went MUTE says
     // nothing on any channel, so an unbounded park here never ends — `submit` never
     // resolves, the loop parks on both legs of its turn race, and the consumer never gets a
@@ -297,7 +370,7 @@ export class PiCliHarness implements AgentHarness {
     // Best-effort: ask pi to abort the in-flight turn over the control channel.
     this.sendCommand({ type: 'abort' });
     // Also settle the turn locally in case pi does not emit a fresh terminal `agent_end`.
-    turn.resolve();
+    if (!this.input?.sandboxResources) turn.resolve();
   }
 
   async stop(reason: TerminationReason): Promise<void> {
@@ -379,6 +452,24 @@ export class PiCliHarness implements AgentHarness {
         } catch {
           continue; // a non-JSON diagnostic line — skip.
         }
+        if (this.input?.sandboxResources && parsed && typeof parsed === 'object') {
+          const frame = parsed as Record<string, unknown>;
+          this.nativeReady?.(frame);
+          if (frame.type === 'extension_error') throw new Error('Native Pi extension failed');
+          if (
+            frame.type === 'orca.native_usage_started' ||
+            frame.type === 'orca.native_usage' ||
+            frame.type === 'orca.native_usage_set'
+          ) {
+            this.emit({ kind: frame.type, payload: frame });
+            continue;
+          }
+          if (frame.type === 'agent_end') continue;
+          if (frame.type === 'agent_settled') {
+            this.turn?.resolve();
+            continue;
+          }
+        }
         const result = this.protocol.map(parsed);
         if (result.kind === 'events') {
           for (const ev of result.events) {
@@ -394,6 +485,9 @@ export class PiCliHarness implements AgentHarness {
         }
         // `response` / `ignore` → drop.
       }
+    } catch {
+      this.emit(terminalError('Native Pi event stream failed'));
+      cli.kill();
     } finally {
       // pi's stdout ended — which looks IDENTICAL for a clean finish, a crash, and the kill
       // `stop()` issues. Ask the exit status which it was, and when it was a CRASH put that on
@@ -507,7 +601,11 @@ export class PiCliHarness implements AgentHarness {
     cancelSignal: AbortSignal,
   ): Promise<ToolPermissionDecision> {
     const toolPermissions: ToolPermissionResolver | undefined = this.input?.toolPermissions;
-    const policy = toolPermissions ? toolPermissions.policyFor(request.toolName) : 'always_ask';
+    // The admitted Native File tools are Orca bridge tools; Pi built-ins are disabled.
+    const toolName = this.input?.sandboxResources
+      ? `mcp__orca__${request.toolName}`
+      : request.toolName;
+    const policy = toolPermissions ? toolPermissions.policyFor(toolName) : 'always_ask';
     if (policy === 'always_deny')
       return { behavior: 'deny', message: 'Tool use denied by policy.' };
     const confirmTool: ToolConfirmer | undefined = this.input?.confirmTool;
@@ -529,10 +627,10 @@ export class PiCliHarness implements AgentHarness {
     const signal: RequiresActionSignal = {
       action: 'tool_confirmation',
       tool_use_id: toolUseId,
-      tool_name: request.toolName,
+      tool_name: toolName,
     };
     this.emit({ kind: 'agent.requires_action', id: toolUseId, payload: signal });
-    const verdict = confirmTool(request.toolName, {}, { toolUseId });
+    const verdict = confirmTool(toolName, {}, { toolUseId });
     // Race the parked verdict against the turn's abort AND this request's cancel so an interrupt /
     // stop releases the gate as a deny.
     const races: Array<Promise<ToolPermissionDecision>> = [verdict];
@@ -593,7 +691,10 @@ export class PiCliHarness implements AgentHarness {
    */
   private writeModelsConfig(agentDir: string, input: SessionStartInput): void {
     const apiKey = this.opts.apiKey;
-    const baseURL = this.opts.baseURL;
+    const baseURL =
+      this.opts.baseURL ?? (input.sandboxResources ? 'https://api.anthropic.com' : undefined);
+    if (input.sandboxResources && !apiKey)
+      throw new Error('Native Pi model credential is unavailable');
     if (
       apiKey === undefined ||
       apiKey.length === 0 ||
@@ -610,15 +711,17 @@ export class PiCliHarness implements AgentHarness {
           baseUrl: baseURL,
           api: 'anthropic-messages',
           apiKey,
-          authHeader: true,
+          authHeader: this.opts.baseURL !== undefined,
           models,
         },
       },
     };
     mkdirSync(agentDir, { recursive: true });
-    writeFileSync(`${agentDir}/models.json`, `${JSON.stringify(config, null, 2)}\n`, {
+    writeFileSync(`${agentDir}/models.json.tmp`, `${JSON.stringify(config, null, 2)}\n`, {
       encoding: 'utf8',
+      mode: 0o600,
     });
+    renameSync(agentDir + '/models.json.tmp', agentDir + '/models.json');
   }
 
   /** Build the launch input for {@link buildPiLaunchConfig} from the boot context. */
@@ -666,8 +769,12 @@ export class PiCliHarness implements AgentHarness {
    */
   private buildBridgeCommand(sandbox: SandboxHandle, input: SessionStartInput): PiBridgeCommand {
     const args = [...(this.opts.bridgePrefixArgs ?? [resolveBridgeEntryPath()])];
-    const root = requireSandboxRootDir(sandbox);
+    const root = input.sandboxResources
+      ? realpathSync(requireSandboxRootDir(sandbox))
+      : requireSandboxRootDir(sandbox);
     args.push(BRIDGE_ROOT_FLAG, root);
+    if (input.sandboxResources)
+      args.push(BRIDGE_NATIVE_FILE_POLICY_FLAG, root + '/.orca/native-file-policy.json');
     const socket = tmuxSocketOf(sandbox);
     if (socket !== undefined) {
       args.push(BRIDGE_TMUX_SOCKET_FLAG, socket);
@@ -739,7 +846,8 @@ function effectiveModel(
 function resolveBridgeEntryPath(): string {
   const sibling = new URL('./bridge-entry.js', import.meta.url);
   const bundled = new URL('./harness/pi/bridge-entry.js', import.meta.url);
-  for (const candidate of [bundled, sibling]) {
+  const sourceBuild = new URL('../../../dist/harness/pi/bridge-entry.js', import.meta.url);
+  for (const candidate of [bundled, sibling, sourceBuild]) {
     const path = fileURLToPath(candidate);
     if (existsSync(path)) {
       return path;

@@ -3,6 +3,22 @@
 > Git credential helper routes and `git_cred://` references are Orca extensions; see [`orca-extensions.md`](./orca-extensions.md).
 > How session `resources[]` (Files, MemoryStores, GitHub repos) are surfaced inside the agent sandbox at `mount_path` so the standard file tools (bash, read, write, edit, glob, grep) work transparently.
 
+## Runner-native File placement
+
+The [native completion capability](./services/session-runner.md#native-file-completion-capability)
+places File-only manifests through the existing 1 MiB chunk protocol with size and
+SHA-256 validation. It uses `sandbox_resources`, separately from managed SDK resources.
+Files are read-only; Memory/Git and managed Skills semantics are unchanged.
+
+`mount_path` remains logical. Status returns verified executable `resolved_paths`
+and the actual output directory for one sandbox incarnation. The runner supplies
+the same mapping to the agent before execution; authorized Orca
+`session.resource_mounted` events include `resolved_path`. Mount event identity
+includes revision and incarnation, so recreated sandboxes publish refreshed paths.
+A failed execution probe or missing mapping blocks preparation. Ordinary public
+events project executable paths back to logical paths. The supported provider,
+runtime and complete requested tool surface are listed in the capability matrix.
+
 ## Strategy interface
 
 The harness owns mount lifecycle. We define a `MountStrategy` interface inspired by OpenAI Agents SDK's [`MountStrategyBase`](https://github.com/openai/openai-agents-python/blob/main/src/agents/extensions/sandbox/e2b/mounts.py):

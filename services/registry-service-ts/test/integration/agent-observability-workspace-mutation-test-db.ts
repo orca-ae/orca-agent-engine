@@ -9,6 +9,7 @@ import { migrate } from 'drizzle-orm/node-postgres/migrator';
 import { Pool } from 'pg';
 import type { DbClient } from '../../src/persistence/postgres/client.js';
 import * as schema from '../../src/persistence/postgres/schema.js';
+import { trackPoolShutdown } from '../helpers/pool-shutdown.js';
 
 const REGISTRY_DATABASE_URL =
   process.env['DATABASE_URL'] ?? 'postgres://orca:orca@localhost:5432/registry';
@@ -35,31 +36,27 @@ export async function createFreshWorkspaceMutationTestDb(
   databaseUrl.pathname = `/${databaseName}`;
   const adminPool = new Pool({ connectionString: adminUrl.toString(), max: 1 });
   let pool: Pool | undefined;
+  let closePool: (() => Promise<void>) | undefined;
   try {
     await adminPool.query(`CREATE DATABASE "${databaseName}"`);
     pool = new Pool({ connectionString: databaseUrl.toString(), max: 5 });
+    closePool = trackPoolShutdown(pool);
     const db = drizzle(pool, { schema });
     await migrate(db, { migrationsFolder: MIGRATIONS_FOLDER });
     return {
       db,
       pool,
       async close() {
-        await pool?.end().catch(() => {});
-        // Staging writers intentionally detach a bounded heartbeat drain after
-        // a request has settled. Let it release its checked-out client before
-        // force-dropping this isolated database.
-        await new Promise((resolve) => setTimeout(resolve, 250));
-        await adminPool
-          .query('SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1', [
-            databaseName,
-          ])
-          .catch(() => {});
-        await adminPool.query(`DROP DATABASE IF EXISTS "${databaseName}"`).catch(() => {});
-        await adminPool.end().catch(() => {});
+        try {
+          await closePool?.();
+          await adminPool.query(`DROP DATABASE IF EXISTS "${databaseName}"`);
+        } finally {
+          await adminPool.end();
+        }
       },
     };
   } catch (error) {
-    await pool?.end().catch(() => {});
+    await closePool?.().catch(() => {});
     await adminPool.query(`DROP DATABASE IF EXISTS "${databaseName}"`).catch(() => {});
     await adminPool.end().catch(() => {});
     throw error;

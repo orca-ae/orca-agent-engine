@@ -9,6 +9,7 @@ import { drizzle } from 'drizzle-orm/node-postgres';
 import { migrate } from 'drizzle-orm/node-postgres/migrator';
 import { Pool } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { trackPoolShutdown } from '../helpers/pool-shutdown.js';
 import {
   AGENT_OBSERVABILITY_SECRET_CLEANUP_LEASE_MS,
   AgentObservabilityMutationValidationError,
@@ -62,6 +63,7 @@ const MIGRATIONS_FOLDER = resolve(
 
 describe('agent observability mutation persistence kernel (fresh PostgreSQL)', () => {
   let pool: Pool | undefined;
+  let closePool: (() => Promise<void>) | undefined;
   let adminPool: Pool | undefined;
   let db: DbClient | undefined;
   const suffix = `${process.pid}_${randomBytes(4).toString('hex')}`;
@@ -80,6 +82,7 @@ describe('agent observability mutation persistence kernel (fresh PostgreSQL)', (
       `ALTER DATABASE "${databaseName}" SET default_transaction_isolation TO 'repeatable read'`,
     );
     pool = new Pool({ connectionString: databaseUrl.toString(), max: 8 });
+    closePool = trackPoolShutdown(pool);
     db = drizzle(pool, { schema });
     await migrate(drizzle(pool), { migrationsFolder: MIGRATIONS_FOLDER });
     const now = new Date();
@@ -100,14 +103,12 @@ describe('agent observability mutation persistence kernel (fresh PostgreSQL)', (
   });
 
   afterAll(async () => {
-    await pool?.end().catch(() => {});
-    await adminPool
-      ?.query('SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1', [
-        databaseName,
-      ])
-      .catch(() => {});
-    await adminPool?.query(`DROP DATABASE IF EXISTS "${databaseName}"`).catch(() => {});
-    await adminPool?.end().catch(() => {});
+    try {
+      await closePool?.();
+      await adminPool?.query(`DROP DATABASE IF EXISTS "${databaseName}"`);
+    } finally {
+      await adminPool?.end();
+    }
   });
 
   it('migrates 0055 idempotently with durable writer and cleanup tombstone columns', async () => {

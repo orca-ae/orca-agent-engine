@@ -97,6 +97,14 @@ jobs:
       - run: pnpm test:chart:render
       - run: node --test .github/scripts/*.test.mjs scripts/render-pi-gateway-config.test.mjs scripts/check-license-headers.test.mjs
       - run: node packages/pi-harness/scripts/generate-catalog.mjs --check
+      - name: Install Local sandbox probe prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap ripgrep socat
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          npm install -g @anthropic-ai/sandbox-runtime@0.0.50
       # Use the root `test` script (which filters out @orca/e2e-tests). The
       # e2e package needs a running stack; it has its own dedicated workflow
       # at `.github/workflows/e2e-stack.yml`.
@@ -104,9 +112,11 @@ jobs:
       # COVERAGE=1 switches on the v8 provider (see `vitest.shared.mjs`).
       # These reports cover only the unit suites; the `coverage` job merges
       # them with the integration job's before checking the ratchet.
-      - run: pnpm test
+      - run: pnpm run test --maxWorkers=2 --minWorkers=1
         env:
           COVERAGE: '1'
+          # Linux sandbox probes must not starve the existing timed filesystem tests.
+          npm_config_workspace_concurrency: '1'
       # `if: always()` so a failing suite still contributes its partial report.
       # The `coverage` job downgrades to report-only when that happens, so a
       # red test run never produces a second, confusing threshold failure.
@@ -275,6 +285,16 @@ jobs:
           S3_ACCESS_KEY: minioadmin
           S3_SECRET_KEY: minioadmin
         run: pnpm -F @orca/skill-store test:integration
+      - name: Install OS prereqs (srt sandbox deps)
+        # Registry native-Pi and harness Local tests both run real Linux probes.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap ripgrep socat
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+      - name: Install srt (sandbox-runtime CLI)
+        run: npm install -g @anthropic-ai/sandbox-runtime@0.0.50
       - env:
           KAFKA_BROKERS: localhost:9092
           DATABASE_URL: postgres://orca:orca@localhost:5432/registry
@@ -287,22 +307,6 @@ jobs:
           S3_KEY_PREFIX: managed-agents/
           SESSION_JWT_PRIVATE_KEY_PEM: services/registry-service-ts/test/fixtures/session-jwt-private.pem
         run: pnpm -F @orca/registry-service-ts test:integration
-      - name: Install OS prereqs (srt sandbox deps)
-        # The `local-sandbox-runtime.spec.ts` integration spec drives the
-        # real `srt` binary against `bubblewrap`; without those the
-        # spec hard-fails (per the locked "no skips" rule).
-        # ripgrep + socat are sandbox-runtime initialize prereqs;
-        # AppArmor sysctl unblocks bwrap's loopback config in a
-        # netns. Same set as `.github/workflows/e2e-stack.yml`.
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            bubblewrap \
-            ripgrep \
-            socat
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
-      - name: Install srt (sandbox-runtime CLI)
-        run: npm install -g @anthropic-ai/sandbox-runtime
       - env:
           KAFKA_BROKERS: localhost:9092
           DATABASE_URL: postgres://orca:orca@localhost:5432/registry

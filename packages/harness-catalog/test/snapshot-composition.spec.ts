@@ -109,6 +109,89 @@ describe('expandAllowedToolNames', () => {
   it('is empty for an empty input', () => {
     expect(expandAllowedToolNames([])).toEqual([]);
   });
+
+  it.each([undefined, {}, { read: { enabled: false } }])(
+    'denies all tools when the default is disabled and no override enables one (%j)',
+    (configs) => {
+      expect(
+        expandAllowedToolNames(
+          ['agent_toolset'],
+          [{ type: 'agent_toolset', default_config: { enabled: false }, configs }],
+        ),
+      ).toEqual([]);
+    },
+  );
+
+  it('applies per-tool enablement without removing enabled-but-denied tools', () => {
+    expect(
+      expandAllowedToolNames(
+        ['agent_toolset'],
+        [
+          {
+            type: 'agent_toolset',
+            default_config: { enabled: false },
+            configs: {
+              read: { enabled: true },
+              bash: { enabled: true, permission_policy: 'always_deny' },
+              write: { enabled: false },
+            },
+          },
+        ],
+      ),
+    ).toEqual(['bash', 'read']);
+  });
+
+  it('inherits enabled defaults and honors explicit disable overrides', () => {
+    expect(
+      expandAllowedToolNames(
+        ['agent_toolset'],
+        [{ type: 'agent_toolset', configs: { bash: { enabled: false } } }],
+      ),
+    ).toEqual(['read', 'write', 'edit', 'glob', 'grep', 'list', 'delete']);
+  });
+
+  it('combines dated and canonical declarations and accepts array configs', () => {
+    expect(
+      expandAllowedToolNames(
+        ['agent_toolset'],
+        [
+          { type: 'mcp_toolset', mcp_server_name: 'other' },
+          {
+            type: 'agent_toolset_20260401',
+            default_config: { enabled: false },
+            configs: [{ name: 'read', enabled: true }],
+          },
+          {
+            type: 'agent_toolset',
+            default_config: { enabled: false },
+            configs: { write: { enabled: true } },
+          },
+        ],
+      ),
+    ).toEqual(['read', 'write']);
+  });
+
+  it('does not invent a toolset missing from the supplied declarations', () => {
+    expect(expandAllowedToolNames(['agent_toolset'], [])).toEqual([]);
+  });
+
+  it.each(['*', 'web_fetch', 'Read', 'mcp__orca__read'])(
+    'preserves the legacy surface for unsupported selector %s',
+    (selector) => {
+      expect(
+        expandAllowedToolNames(
+          ['agent_toolset'],
+          [
+            {
+              type: 'agent_toolset',
+              default_config: { enabled: false },
+              configs: { read: { enabled: true }, [selector]: { enabled: true } },
+            },
+          ],
+        ),
+      ).toEqual([...AGENT_TOOLSET_LOGICAL_TOOLS]);
+    },
+  );
 });
 
 describe('managedToolPermissionPolicyName', () => {

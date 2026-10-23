@@ -123,7 +123,11 @@ import type { AgentSnapshot } from '../domain/agent-snapshot.js';
 import { SessionSkillsDelivery, type SkillsProvider } from './session-skills-delivery.js';
 import type { SkillStore } from '@orca/skill-store';
 import { TunnelRegistry } from './tunnel-registry.js';
-import { RESOURCE_CHECKPOINT_EVENT } from '@orca/sandbox-runtime';
+import {
+  RESOURCE_CHECKPOINT_EVENT,
+  NATIVE_COMPLETION_EVENT,
+  nativeSnapshotFingerprint,
+} from '@orca/sandbox-runtime';
 import type { SessionResourcesDelivery } from './session-resources-delivery.js';
 import {
   RunnerRequestDenied,
@@ -241,7 +245,8 @@ export interface SessionEventBridgeOptions {
   /** Recheck before forwarding turns or control events; unset only in isolated tests. */
   ownsSession?: () => Promise<boolean>;
   saveHarnessState?: (state: unknown) => Promise<void>;
-  resources?: Pick<SessionResourcesDelivery, 'commit'>;
+  resources?: Pick<SessionResourcesDelivery, 'commit'> &
+    Partial<Pick<SessionResourcesDelivery, 'appendNativeEvent'>> & { readonly native?: boolean };
   /** Owning workspace (the tenant scope) for the transcript + tunnel owner. */
   workspaceId: string;
   /** Session id this bridge serves, e.g. `"ses_a1b2..."`. */
@@ -568,14 +573,16 @@ export class SessionEventBridge {
         const sourceTurnId =
           claimedSource && pendingIds.has(claimedSource) ? claimedSource : undefined;
         if (sourceTurnId) {
-          answered.add(sourceTurnId);
+          if (!this.resources?.native || event.kind === 'agent.turn_completed')
+            answered.add(sourceTurnId);
           // Older bridges stamped only callbacks/completions. Their preceding
           // unlinked stream prefix belongs to this same serial turn, too.
           unlinkedPrefixSeq = -1;
         } else if (event.kind === 'agent.turn_completed' || event.kind === 'response.completed') {
           legacyLastAgentSeq = Math.max(legacyLastAgentSeq, event.seq);
           unlinkedPrefixSeq = -1;
-        } else unlinkedPrefixSeq = Math.max(unlinkedPrefixSeq, event.seq);
+        } else if (!this.resources?.native)
+          unlinkedPrefixSeq = Math.max(unlinkedPrefixSeq, event.seq);
         if (event.kind === 'agent.custom_tool_use') {
           orphanCallback = { id: event.id, sourceTurnId };
         }
@@ -722,7 +729,10 @@ export class SessionEventBridge {
       if (event.seq > head) {
         head = event.seq;
       }
-      if (isAgentEvent(event)) {
+      if (
+        isAgentEvent(event) &&
+        (!this.resources?.native || event.kind === 'agent.turn_completed')
+      ) {
         if (event.seq > lastAgentSeq) {
           lastAgentSeq = event.seq;
         }
@@ -933,7 +943,10 @@ export class SessionEventBridge {
       if (event.seq > head) {
         head = event.seq;
       }
-      if (isAgentEvent(event)) {
+      if (
+        isAgentEvent(event) &&
+        (!this.resources?.native || event.kind === 'agent.turn_completed')
+      ) {
         if (event.seq > lastAgentSeq) {
           lastAgentSeq = event.seq;
         }
@@ -1070,11 +1083,11 @@ export class SessionEventBridge {
       await this.beforeTurn?.(userEvent);
     } catch (err) {
       if (signal.aborted) return;
-      if (this.latestInterruptSeq > userEvent.seq) {
+      if (!this.resources?.native && this.latestInterruptSeq > userEvent.seq) {
         await this.persistPreparationInterrupted(userEventId, signal);
         return;
       }
-      if (err instanceof RunnerRequestDenied) {
+      if (!this.resources?.native && err instanceof RunnerRequestDenied) {
         await this.persistRequestDenied(err, userEventId, signal);
         return;
       }
@@ -1090,7 +1103,7 @@ export class SessionEventBridge {
       return;
     }
     if (!(await this.stillOwnsSession(signal))) return;
-    if (this.latestInterruptSeq > userEvent.seq) {
+    if (!this.resources?.native && this.latestInterruptSeq > userEvent.seq) {
       await this.persistPreparationInterrupted(userEventId, signal);
       return;
     }
@@ -1100,7 +1113,15 @@ export class SessionEventBridge {
         method: 'POST',
         path: RUNNER_TURN_PATH,
         headers: [[RUNNER_SESSION_HEADER, this.sessionId]],
-        body: userEvent.payload,
+        body: this.resources?.native
+          ? Buffer.from(
+              JSON.stringify({
+                ...JSON.parse(Buffer.from(userEvent.payload).toString('utf8')),
+                native_turn_id: userEventId,
+                native_skip_execution: this.latestInterruptSeq > userEvent.seq,
+              }),
+            )
+          : userEvent.payload,
         contentType: 'application/json',
       });
     } catch (err) {
@@ -1170,6 +1191,7 @@ export class SessionEventBridge {
     signal: AbortSignal,
   ): Promise<void> {
     let buffer = '';
+    let nativeCompleted = false;
     for await (const chunk of response.stream) {
       if (signal.aborted) {
         return;
@@ -1179,7 +1201,8 @@ export class SessionEventBridge {
       while (newlineIdx !== -1) {
         const line = buffer.slice(0, newlineIdx);
         buffer = buffer.slice(newlineIdx + 1);
-        await this.persistAgentLine(line, userEventId, signal);
+        nativeCompleted =
+          (await this.persistAgentLine(line, userEventId, signal)) === true || nativeCompleted;
         if (signal.aborted) {
           return;
         }
@@ -1188,7 +1211,13 @@ export class SessionEventBridge {
     }
     // Flush a trailing line that had no terminating newline.
     if (buffer.length > 0) {
-      await this.persistAgentLine(buffer, userEventId, signal);
+      nativeCompleted =
+        (await this.persistAgentLine(buffer, userEventId, signal)) === true || nativeCompleted;
+    }
+    if (this.resources?.native && !nativeCompleted && !signal.aborted) {
+      this.checkpointFailed = true;
+      this.abort?.abort();
+      throw new Error('Native stream ended without a completion receipt');
     }
   }
 
@@ -1244,7 +1273,7 @@ export class SessionEventBridge {
     line: string,
     userEventId: string,
     signal: AbortSignal,
-  ): Promise<void> {
+  ): Promise<boolean | void> {
     const trimmed = line.trim();
     if (trimmed.length === 0) {
       return;
@@ -1276,12 +1305,21 @@ export class SessionEventBridge {
     }
 
     // Private control record. Native SDK history is never a public transcript event.
-    if (lineObj.type === HARNESS_CHECKPOINT_EVENT || lineObj.type === RESOURCE_CHECKPOINT_EVENT) {
+    if (
+      lineObj.type === HARNESS_CHECKPOINT_EVENT ||
+      lineObj.type === RESOURCE_CHECKPOINT_EVENT ||
+      lineObj.type === NATIVE_COMPLETION_EVENT
+    ) {
       try {
         if (signal.aborted || !(await this.stillOwnsSession(signal)))
           throw new Error('checkpoint runner generation is no longer current');
-        if (lineObj.type === RESOURCE_CHECKPOINT_EVENT) {
+        if (
+          lineObj.type === RESOURCE_CHECKPOINT_EVENT ||
+          lineObj.type === NATIVE_COMPLETION_EVENT
+        ) {
           if (!this.resources || lineObj.subpath) throw new Error('unexpected resource checkpoint');
+          if ((lineObj.type === NATIVE_COMPLETION_EVENT) !== (this.resources.native === true))
+            throw new Error('Checkpoint capability differs');
           await this.resources.commit(lineObj.checkpoint_id, lineObj.manifest_sha256);
         } else {
           if (
@@ -1307,7 +1345,7 @@ export class SessionEventBridge {
         if (this.activeTurn) await closeTurnStream(this.activeTurn).catch(() => {});
         throw err;
       }
-      return;
+      return lineObj.type === NATIVE_COMPLETION_EVENT;
     }
     if (!lineObj.subpath) {
       // The request, never the SDK, owns source identity. Persist it for every
@@ -1318,6 +1356,13 @@ export class SessionEventBridge {
         ...(lineObj.type === 'agent.turn_completed' ? { turn_event_id: userEventId } : {}),
       };
     }
+    if (
+      this.resources?.native &&
+      (lineObj.type === 'agent.turn_completed' ||
+        lineObj.type === 'agent.usage' ||
+        lineObj.type.startsWith('orca.native_'))
+    )
+      throw new Error('Native completion must pass through its receipt');
     if (this.accounting) {
       try {
         if (!(await this.stillOwnsSession(signal))) throw new Error('runner generation retired');
@@ -1368,7 +1413,11 @@ export class SessionEventBridge {
       // Persist BEFORE moving on (await): the single-writer, persist-before-
       // forward append. The SSE path tails the same transcript, so this is the
       // only forward — the bridge never writes to a client socket.
-      await this.store.append(this.workspaceId, this.sessionId, [proto]);
+      if (this.resources?.native) {
+        if (!this.resources.appendNativeEvent)
+          throw new Error('Native append authority is unavailable');
+        await this.resources.appendNativeEvent(userEventId, proto);
+      } else await this.store.append(this.workspaceId, this.sessionId, [proto]);
     } catch (err) {
       this.logger?.error?.(
         { err, sessionId: this.sessionId, userEventId, type: proto.kind },
@@ -1441,6 +1490,10 @@ export interface ManagedRunnerResourcesContext {
 
 export type ManagedRunnerResourcesFactory = (context: ManagedRunnerResourcesContext) => Promise<
   | (Pick<SessionResourcesDelivery, 'deliver' | 'commit'> & {
+      readonly native?: boolean;
+      appendNativeEvent?(turnId: string, event: Event): Promise<void>;
+      snapshotResources?(): Partial<AgentSnapshot>;
+      beginTurn?(event: Event): Promise<void>;
       publishMounted?(): Promise<void>;
       refreshGitCapabilities?(): Promise<void>;
     })
@@ -1681,7 +1734,13 @@ export class SessionEventBridgeManager {
       await this.deliverSkills(runnerId, bound, registry, resources !== null);
       if (!isCurrent()) return;
       await resources?.refreshGitCapabilities?.();
-      guardrailFingerprint = await this.deliverSnapshot(runnerId, bound, registry, managed);
+      guardrailFingerprint = await this.deliverSnapshot(
+        runnerId,
+        bound,
+        registry,
+        managed,
+        resources?.snapshotResources?.(),
+      );
       if (!isCurrent()) return;
     } catch (err) {
       this.logger?.error?.(
@@ -1731,9 +1790,10 @@ export class SessionEventBridgeManager {
       return;
     }
     if (!isCurrent()) return;
-    const accounting = resources
-      ? this.accountingFactory?.({ ...bound, runnerId, isCurrent })
-      : undefined;
+    const accounting =
+      resources && !resources.native
+        ? this.accountingFactory?.({ ...bound, runnerId, isCurrent })
+        : undefined;
     const bridge = new SessionEventBridge({
       ...(accounting ? { accounting } : {}),
       ownsSession: async () => {
@@ -1855,6 +1915,7 @@ export class SessionEventBridgeManager {
     bound: { workspaceId: string; sessionId: string },
     registry: TransportRegistry,
     managed?: AgentSnapshot['managed_resources'],
+    resourceSnapshot?: Partial<AgentSnapshot>,
   ): Promise<string | undefined> {
     const provider = this.snapshotProvider;
     if (provider === undefined) {
@@ -1879,7 +1940,7 @@ export class SessionEventBridgeManager {
     if (managed)
       snapshot = {
         ...snapshot,
-        managed_resources: managed,
+        ...(resourceSnapshot ?? { managed_resources: managed }),
         ...(this.accountingFactory &&
         (snapshot.provider === 'codex-sdk' || snapshot.provider === 'pi-sdk')
           ? { request_guardrails_owner: 'registry' as const }
@@ -1944,7 +2005,7 @@ export class SessionEventBridgeManager {
       if (managed)
         snapshot = {
           ...snapshot,
-          managed_resources: managed,
+          ...(resources?.snapshotResources?.() ?? { managed_resources: managed }),
           ...(this.accountingFactory &&
           (snapshot.provider === 'codex-sdk' || snapshot.provider === 'pi-sdk')
             ? { request_guardrails_owner: 'registry' as const }
@@ -1975,6 +2036,7 @@ export class SessionEventBridgeManager {
       await resources?.publishMounted?.();
       deliveredFingerprint = nextFingerprint;
       await accounting?.prepare(event, snapshot);
+      await resources?.beginTurn?.(event);
       await resources?.refreshGitCapabilities?.();
     };
   }
@@ -2133,8 +2195,10 @@ export class SessionEventBridgeManager {
  * guardrail fold would be stale.
  */
 function guardrailSnapshotFingerprint(snapshot: AgentSnapshot): string {
+  if (snapshot.sandbox_resources) return nativeSnapshotFingerprint(snapshot);
   return JSON.stringify({
     guardrails: snapshot.guardrails ?? [],
+    ...(snapshot.sandbox_resources ? { sandbox_resources: snapshot.sandbox_resources } : {}),
   });
 }
 

@@ -127,6 +127,8 @@ import {
   type AuthoritativeUsageCaller,
 } from '../domain/usage-authority.js';
 
+import { hasNativeUsageAuthority } from '../domain/native-completion.js';
+
 const SESSION_ID_RE = /^ses_[A-Za-z0-9_-]+$/;
 const ENV_ID_RE = /^env_[A-Za-z0-9]+$/;
 const THREAD_ID_RE = /^sth_[A-Za-z0-9_-]+$/;
@@ -180,7 +182,9 @@ async function loadAuthoritativeUsageCaller(
     ? {
         kind: 'found',
         caller,
-        registryOwned: registryOwnsCodexUsage(row.snapshot, row.target ?? 'cloud'),
+        registryOwned:
+          registryOwnsCodexUsage(row.snapshot, row.target ?? 'cloud') ||
+          (await hasNativeUsageAuthority(db, workspaceId, sessionId)),
       }
     : { kind: 'unavailable' };
 }
@@ -1313,6 +1317,16 @@ export function registerInternalRoutes(
 
     const now = new Date();
     const outcome = await db.transaction(async (tx) => {
+      // Serialize with negotiated authority changes, including shared-token writers
+      // that passed the outer check before the Registry claimed this execution.
+      // persistUsage's later UPDATE cannot fence the authority read that precedes it.
+      await tx
+        .select({ id: sessions.id })
+        .from(sessions)
+        .where(and(eq(sessions.workspaceId, workspaceId), eq(sessions.id, id)))
+        .for('update');
+      if (await hasNativeUsageAuthority(tx as unknown as DbClient, workspaceId, id))
+        return 'native_registry_owned' as const;
       return persistUsage(tx, {
         workspaceId,
         sessionId: id,
@@ -1325,6 +1339,8 @@ export function registerInternalRoutes(
         ...(typeof usageEventId === 'string' ? { usageEventId } : {}),
       });
     });
+    if (outcome === 'native_registry_owned')
+      return reply.code(403).send({ error: 'Registry owns native usage accounting' });
 
     if (outcome === 'thread_not_found') return reply.code(404).send({ error: 'thread not found' });
     if (outcome === 'session_not_found') {

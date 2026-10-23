@@ -26,6 +26,7 @@ import { describe, it, expect } from 'vitest';
 import { buildAgentSnapshot, type AgentSnapshotInput } from '../../src/domain/agent-snapshot.js';
 import { buildGatewayEgress, buildSidecarEgress } from '../../src/domain/credential-egress.js';
 import { assertSnapshotCredentialFree } from '../../src/domain/egress-credential-free.js';
+import { supportsNativeFileCompletion } from '@orca/sandbox-runtime';
 
 function baseInput(overrides: Partial<AgentSnapshotInput> = {}): AgentSnapshotInput {
   return {
@@ -83,6 +84,88 @@ describe('buildAgentSnapshot', () => {
       ['bash', 'delete', 'edit', 'glob', 'grep', 'list', 'read', 'write'].sort(),
     );
   });
+
+  it.each([false, true])(
+    'preserves the explicitly enabled tool surface before native admission (shell=%s)',
+    (shell) => {
+      const snap = buildAgentSnapshot(
+        baseInput({
+          provider: 'pi',
+          agent: {
+            model: { provider: 'anthropic', id: 'claude-sonnet-4-5' },
+            system: 'Read and write Files.',
+            tools: [
+              {
+                type: 'agent_toolset_20260401',
+                default_config: { enabled: false, permission_policy: { type: 'always_allow' } },
+                configs: {
+                  read: { enabled: true },
+                  write: { enabled: true },
+                  ...(shell
+                    ? { bash: { enabled: true, permission_policy: { type: 'always_deny' } } }
+                    : {}),
+                },
+              },
+            ],
+          },
+        }),
+      );
+      expect(snap.allowed_tool_names.sort()).toEqual(
+        shell ? ['bash', 'read', 'write'] : ['read', 'write'],
+      );
+      expect(supportsNativeFileCompletion(snap)).toBe(!shell);
+      expect(snap.tool_permissions['mcp__orca__*']).toBe('always_deny');
+      if (shell) expect(snap.tool_permissions['mcp__orca__bash']).toBe('always_deny');
+    },
+  );
+
+  it('keeps a fully disabled toolset denied in both selection and permissions', () => {
+    const snap = buildAgentSnapshot(
+      baseInput({
+        provider: 'pi',
+        agent: {
+          ...baseInput().agent,
+          tools: [
+            {
+              type: 'agent_toolset',
+              default_config: { enabled: false, permission_policy: { type: 'always_allow' } },
+            },
+          ],
+        },
+      }),
+    );
+    expect(snap.allowed_tool_names).toEqual([]);
+    expect(snap.tool_permissions['mcp__orca__*']).toBe('always_deny');
+  });
+
+  it.each(['*', 'web_fetch', 'Read', 'mcp__orca__read'])(
+    'retains the legacy tool surface for unsupported toolset selector %s',
+    (selector) => {
+      const snap = buildAgentSnapshot(
+        baseInput({
+          provider: 'pi',
+          agent: {
+            ...baseInput().agent,
+            tools: [
+              {
+                type: 'agent_toolset',
+                default_config: { enabled: false },
+                configs: {
+                  read: { enabled: true },
+                  write: { enabled: true },
+                  [selector]: { enabled: true, permission_policy: { type: 'always_deny' } },
+                },
+              },
+            ],
+          },
+        }),
+      );
+      expect(supportsNativeFileCompletion(snap)).toBe(false);
+      expect(snap.allowed_tool_names).toEqual(
+        expect.arrayContaining(['bash', 'delete', 'read', 'write']),
+      );
+    },
+  );
 
   it('keeps the agent_toolset expansion when a skill allowlist re-grants agent_toolset', () => {
     // The tool-allowlist vocabulary is tool TYPES: a skill narrows by naming

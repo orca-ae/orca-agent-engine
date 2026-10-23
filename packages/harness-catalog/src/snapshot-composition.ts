@@ -152,6 +152,8 @@ export function canonicalAgentToolNames(tools: AgentToolEntry[]): string[] {
  *     is not a directly-runnable tool name);
  *   - any other token (a custom tool name, or a logical file/shell tool a skill
  *     allowlist named directly) → kept verbatim.
+ * When declarations are supplied, toolset defaults and per-tool `enabled`
+ * overrides determine the expansion. Permission policies do not remove enabled tools.
  *
  * CUSTOM-TOOL CARRIAGE (intentional, registry-native behavior). A surviving custom
  * tool name is kept in the output. This is a DELIBERATE divergence from the
@@ -173,12 +175,38 @@ export function canonicalAgentToolNames(tools: AgentToolEntry[]): string[] {
  * two are one boolean apart and read oppositely, so a consumer that
  * length-guards the value hands that agent the full built-in tool surface.
  */
-export function expandAllowedToolNames(toolNames: string[]): string[] {
+export function expandAllowedToolNames(
+  toolNames: string[],
+  tools?: readonly AgentToolEntry[],
+): string[] {
   if (toolNames.length === 0) return [];
   const allowed = new Set<string>();
   for (const toolName of toolNames) {
     if (toCanonicalToolName(toolName) === 'agent_toolset') {
-      for (const logical of AGENT_TOOLSET_LOGICAL_TOOLS) allowed.add(logical);
+      if (tools === undefined) {
+        for (const logical of AGENT_TOOLSET_LOGICAL_TOOLS) allowed.add(logical);
+      } else {
+        for (const tool of tools) {
+          if (toCanonicalToolName(tool.type) !== 'agent_toolset') continue;
+          const defaults = resolvedToolsetConfig(toolsetConfigValue(tool['default_config']));
+          const configs = new Map(
+            toolsetConfigEntries(tool['configs']).map(({ name, value }) => [name, value]),
+          );
+          // Preserve legacy selectors instead of narrowing an unsupported request into native admission.
+          if (
+            [...configs.keys()].some(
+              (name) => !AGENT_TOOLSET_LOGICAL_TOOLS.some((logical) => logical === name),
+            )
+          ) {
+            for (const logical of AGENT_TOOLSET_LOGICAL_TOOLS) allowed.add(logical);
+            continue;
+          }
+          for (const logical of AGENT_TOOLSET_LOGICAL_TOOLS) {
+            if (resolvedToolsetConfig(configs.get(logical) ?? {}, defaults).enabled)
+              allowed.add(logical);
+          }
+        }
+      }
       continue;
     }
     if (toCanonicalToolName(toolName) === 'mcp_toolset') continue;

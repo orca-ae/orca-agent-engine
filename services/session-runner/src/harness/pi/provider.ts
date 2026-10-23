@@ -17,6 +17,10 @@ import { ProviderRegistry, type ProviderFactory } from '../provider.js';
 import { readGatewayLlmEgress } from '../claude/provider.js';
 import { PiCliHarness } from './index.js';
 import { launchNativeCli, type NativeCliLogger } from '../../sandbox/native-cli-launcher.js';
+import { nativePiInstallation } from '@orca/pi-harness';
+import { dirname, join } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 /** The provider name the pi native-CLI harness registers under (matches the snapshot's). */
 export const PI_PROVIDER_NAME = 'pi';
@@ -69,6 +73,37 @@ export function registerPiProvider(
   registry: ProviderRegistry,
   deps: PiProviderDeps,
 ): ProviderRegistry {
+  let installation: ReturnType<typeof nativePiInstallation> | undefined;
+  if (
+    !deps.cliCommand &&
+    !deps.cliPrefixArgs &&
+    !deps.launch &&
+    !deps.extensionPath &&
+    !deps.bridgeCommand &&
+    !deps.bridgePrefixArgs
+  ) {
+    try {
+      installation = nativePiInstallation();
+      let root = dirname(fileURLToPath(import.meta.url));
+      while (dirname(root) !== root) {
+        try {
+          if (
+            JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).name ===
+            '@orca/session-runner'
+          )
+            break;
+        } catch {
+          /* Continue to the controlled module's package root. */
+        }
+        root = dirname(root);
+      }
+      if (dirname(root) === root) throw new Error('Runner package root unavailable');
+      installation.readPaths.push(root);
+    } catch {
+      // Absence is an explicit unsupported source, never a PATH version claim.
+      installation = undefined;
+    }
+  }
   const factory: ProviderFactory = (snapshot, ctx) => {
     const egress = readGatewayLlmEgress(snapshot);
     const harnessOpts: ConstructorParameters<typeof PiCliHarness>[0] = {
@@ -109,8 +144,24 @@ export function registerPiProvider(
     if (deps.logger !== undefined) {
       harnessOpts.logger = deps.logger;
     }
+    if (ctx.sandboxResources) {
+      if (!installation || !snapshot.sandbox_resources)
+        throw new Error('Controlled native Pi source is unavailable');
+      if (
+        (snapshot.egress as { mode?: string } | null)?.mode === 'gateway' &&
+        (!egress.apiKey || !egress.baseURL)
+      )
+        throw new Error('Native Pi gateway configuration is unavailable');
+      harnessOpts.cliCommand = process.execPath;
+      harnessOpts.cliPrefixArgs = ['--use-env-proxy', installation.cli];
+      harnessOpts.cliExtraArgs = ['--no-approve', '--no-skills', '--no-prompt-templates'];
+    }
     return new PiCliHarness(harnessOpts);
   };
-  registry.register(PI_PROVIDER_NAME, factory);
+  registry.register(
+    PI_PROVIDER_NAME,
+    factory,
+    installation ? { sessionSandboxReadPaths: installation.readPaths } : {},
+  );
   return registry;
 }

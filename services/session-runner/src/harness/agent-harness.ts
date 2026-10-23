@@ -76,6 +76,12 @@ export type RunToolWithResources = <T>(
 ) => Promise<T>;
 
 export interface SessionStartInput {
+  sandboxResources?: {
+    revision: string;
+    placementId: string;
+    executionId: string;
+    policy: unknown;
+  };
   /** Verified immutable pins; providers may use these to refresh a native Skill catalog safely. */
   managedSkillCatalog?: { baseSystem: string; skills: readonly MaterializableSkillDescriptor[] };
   /** Park before publishing the matching custom_tool_use; resolved over the independent result route. */
@@ -321,6 +327,8 @@ export type TerminationReason =
  * harness, and `stop` to abort any in-flight turn + end `events()`.
  */
 export interface AgentHarness {
+  /** Refresh a scoped model credential, or retain the runner's direct credential. */
+  refreshCredentials?(apiKey?: string): Promise<void>;
   /** Retain the session filesystem while refreshed credentials rebuild this harness. */
   readonly preserveSandboxOnRefresh?: boolean;
   /** Configure the harness from the session boot context (snapshot). */

@@ -32,13 +32,33 @@ The shape mirrors Anthropic's contract: the `scope_id` filter on
 `files.list` and the `downloadable` gate on `files.download` are the same
 fields that appear in their Files API today.
 
+## Runner-native completion
+
+For the supported [native File capability](./services/session-runner.md#native-file-completion-capability),
+`/mnt/session/outputs/` is logical; the agent receives its verified executable path.
+The file-only surface cannot spawn background writers. Capture follows tool
+settlement and freezes changed SHA-256 content under the existing transfer bounds
+(512 MiB/file, 2 GiB total, 10,000 files). Links and aliased output files are rejected.
+
+Registry pulls the frozen chunks over the authenticated tunnel, commits deterministic
+session-scoped Files and stable `session.output_indexed` events, and commits every
+normalized usage report. Only then does it persist completion-prepared evidence and
+ACK. Stable terminal and processed/completed markers precede completed ACK and the
+next turn. This also covers no-output, failed and interrupted turns.
+
+Prepared receipts recover the checkpoint-ACK/terminal gap without calling the model.
+Incomplete evidence retains committed usage and partial artifacts, blocks subsequent
+turns, and cannot authorize success or cleanup. Frozen bytes release only on prepared
+ACK; retained reports release on completed ACK, with a bounded retry tombstone.
+The harness-server indexer lifecycle below is a separate execution path.
+
 ## Write-policy status
 
 The capture path indexes only `/mnt/session/outputs/`, and the implemented
 [`output-write-policy.md`](./output-write-policy.md) makes that path the only
 writable non-resource location. `separate` mode retains explicitly read-write
-MemoryStore and Git repository mounts; the current `colocated` branch does not
-mount session resources. The prompt remains a usability hint, while runtime
+MemoryStore and Git repository mounts. Runner-managed SDK resources retain their
+own policy; the negotiated native path accepts read-only Files only. The prompt remains a usability hint, while runtime
 policy installation is the security boundary and fails closed.
 
 ## Lifecycle

@@ -22,6 +22,8 @@ import {
   type GitProxyCapability,
 } from '@orca/sandbox-runtime';
 import type { Event, TranscriptStore } from '@orca/transcript-store';
+import type { NativeCompletionCoordinator } from '../domain/native-completion.js';
+import type { AgentSnapshot } from '../domain/agent-snapshot.js';
 
 // The authenticated runner tunnel is the only transport. No store identifiers or
 // credentials are accepted from the runner; binding ids resolve through Registry.
@@ -43,6 +45,17 @@ export interface PreparedRunnerResources {
 }
 
 export interface SessionResourcesDeliveryOptions {
+  native?: {
+    coordinator: NativeCompletionCoordinator;
+    probe(): Promise<{
+      executionId: string;
+      placementId?: string;
+      revision?: string;
+      resolvedPaths?: Record<string, string>;
+      outputs?: string;
+      turn?: { turnId: string; phase: string; checkpointId?: string; digest?: string };
+    }>;
+  };
   workspaceId: string;
   sessionId: string;
   fileStore: FileStore;
@@ -65,6 +78,46 @@ export class SessionResourcesDelivery {
   private delivered = false;
 
   constructor(private readonly options: SessionResourcesDeliveryOptions) {}
+  get native(): boolean {
+    return this.options.native !== undefined;
+  }
+  private nativeBinding: { executionId: string; placementId: string; revision: string } | undefined;
+  private nativeMappings: Record<string, string> | undefined;
+
+  snapshotResources(): Partial<AgentSnapshot> {
+    if (!this.native) return { managed_resources: { version: 1, revision: this.revision! } };
+    const binding = this.nativeBinding;
+    if (!binding) throw new Error('Native placement has not been acknowledged');
+    return {
+      sandbox_resources: {
+        version: 1,
+        revision: binding.revision,
+        placement_id: binding.placementId,
+      },
+    };
+  }
+
+  async beginTurn(event: Event): Promise<void> {
+    if (!this.options.native) return;
+    const current = await this.options.native.probe();
+    const binding = this.nativeBinding;
+    if (
+      !binding ||
+      current.executionId !== binding.executionId ||
+      current.placementId !== binding.placementId ||
+      current.revision !== binding.revision
+    )
+      throw new Error('Native placement changed before execution');
+    await this.options.native.coordinator.begin(event, binding);
+  }
+
+  async appendNativeEvent(turnId: string, event: Event): Promise<void> {
+    if (!this.options.native || !this.nativeBinding)
+      throw new Error('Native placement is unavailable');
+    await this.options.native.coordinator.appendEvents(turnId, this.nativeBinding.revision, [
+      event,
+    ]);
+  }
 
   get revision(): string | undefined {
     return this.prepared?.manifest.revision;
@@ -83,19 +136,99 @@ export class SessionResourcesDelivery {
       const manifest = parseResourceManifest(prepared.manifest);
       await this.assertCurrent(manifest.revision);
       this.prepared = { ...prepared, manifest };
+      if (this.options.native) {
+        const status = await this.options.native.probe();
+        const binding = {
+          executionId: status.executionId,
+          placementId: status.placementId ?? 'unplaced',
+          revision: manifest.revision,
+        };
+        // Take over existing authority before recovery; initial authority requires verified placement.
+        const claimed = await this.options.native.coordinator.hasAuthority();
+        if (claimed) await this.options.native.coordinator.claim(binding);
+        if (status.placementId && status.revision === manifest.revision) {
+          if (
+            !status.resolvedPaths ||
+            !status.outputs ||
+            manifest.resources.some((r) => !status.resolvedPaths![r.resource_id])
+          )
+            throw new Error('Native executable mapping missing');
+          if (!claimed) await this.options.native.coordinator.claim(binding);
+          this.nativeBinding = { ...binding, placementId: status.placementId };
+        }
+      }
       // Settle the runner's frozen writes before preparing replacement Memory
       // bytes. The manifest prepared above may predate those durable writes.
-      const pending = record(
-        await this.options.request(RUNNER_RESOURCE_CHANGES_PATH, { type: 'pending' }),
-      );
-      if (pending.checkpoint !== null && pending.checkpoint !== undefined) {
-        const checkpoint = parseResourceCheckpoint(pending.checkpoint);
-        await this.commit(checkpoint.checkpoint_id, pending.manifest_sha256);
-        return await this.deliver();
+      if (await this.reconcilePending()) return await this.deliver();
+      if (this.options.native) {
+        const status = await this.options.native.probe();
+        if (status.turn?.phase === 'prepared' && status.turn.checkpointId && status.turn.digest) {
+          await this.options.native.coordinator.finish(
+            status.turn.turnId,
+            manifest.revision,
+            async (phase) => {
+              await this.options.request(RUNNER_RESOURCE_ACK_PATH, {
+                checkpoint_id: status.turn!.checkpointId,
+                manifest_sha256: status.turn!.digest,
+                completion_phase: phase,
+              });
+            },
+          );
+        }
+        for (const receipt of await this.options.native.coordinator.pending()) {
+          if (receipt.phase === 'prepared') {
+            const checkpoint = receipt.record.checkpoint!;
+            await this.options.native.coordinator.finish(
+              receipt.turnId,
+              receipt.record.revision,
+              status.executionId === receipt.record.executionId &&
+                status.turn?.turnId === receipt.turnId
+                ? async (phase) => {
+                    await this.options.request(RUNNER_RESOURCE_ACK_PATH, {
+                      checkpoint_id: checkpoint.checkpoint_id,
+                      manifest_sha256: receipt.record.digest,
+                      completion_phase: phase,
+                    });
+                  }
+                : undefined,
+            );
+          } else if (
+            receipt.phase === 'running' &&
+            status.executionId === receipt.record.executionId &&
+            status.turn?.turnId === receipt.turnId &&
+            (status.turn.phase === 'running' || status.turn.phase === 'frozen')
+          ) {
+            if (!this.nativeBinding || receipt.record.revision !== manifest.revision)
+              throw new Error('Running native placement changed');
+            if (status.turn.phase === 'frozen') {
+              // The job can freeze after the first pending read; that is not process loss.
+              if (await this.reconcilePending()) return await this.deliver();
+              throw new Error('Frozen native checkpoint is unavailable');
+            }
+            this.nativeMappings = status.resolvedPaths;
+            this.delivered = true;
+            return { version: 1, revision: manifest.revision };
+          } else
+            await this.options.native.coordinator.markLost(receipt.turnId, receipt.record.revision);
+        }
+      }
+      if (this.options.native && this.nativeBinding) {
+        const status = await this.options.native.probe();
+        if (
+          status.executionId === this.nativeBinding.executionId &&
+          status.placementId === this.nativeBinding.placementId &&
+          status.revision === manifest.revision
+        ) {
+          this.nativeMappings = status.resolvedPaths;
+          await this.reconcileOutputs();
+          this.delivered = true;
+          return { version: 1, revision: manifest.revision };
+        }
       }
       const response = record(
         await this.options.request(RUNNER_RESOURCES_PATH, {
           type: 'manifest',
+          ...(this.options.native ? { placement: 'session_sandbox' } : {}),
           manifest,
           network_allowed_domains: prepared.networkAllowedDomains,
           network_unrestricted: prepared.networkUnrestricted === true,
@@ -138,6 +271,24 @@ export class SessionResourcesDelivery {
         if (committed.committed !== true) throw new Error('runner did not commit resources');
       }
       this.prepared = { ...prepared, manifest };
+      if (this.options.native) {
+        const status = await this.options.native.probe();
+        if (
+          !status.placementId ||
+          status.revision !== manifest.revision ||
+          !status.resolvedPaths ||
+          !status.outputs ||
+          manifest.resources.some((r) => !status.resolvedPaths![r.resource_id])
+        )
+          throw new Error('Native executable mapping missing');
+        this.nativeBinding = {
+          executionId: status.executionId,
+          placementId: status.placementId,
+          revision: manifest.revision,
+        };
+        this.nativeMappings = status.resolvedPaths;
+        await this.options.native.coordinator.claim(this.nativeBinding);
+      }
       // Repair output File insert / transcript append ACK ambiguity before a turn.
       await this.reconcileOutputs();
       await this.refreshGitCapabilities();
@@ -146,6 +297,25 @@ export class SessionResourcesDelivery {
     } finally {
       await prepared.close();
     }
+  }
+
+  private async reconcilePending(): Promise<boolean> {
+    const pending = record(
+      await this.options.request(RUNNER_RESOURCE_CHANGES_PATH, { type: 'pending' }),
+    );
+    if (this.options.native && pending.incomplete_completion) {
+      const retained = pending.incomplete_completion as { turn_id?: unknown };
+      if (typeof retained.turn_id !== 'string') throw new Error('Invalid retained native turn');
+      await this.options.native.coordinator.markLost(
+        retained.turn_id,
+        this.prepared!.manifest.revision,
+        pending.incomplete_completion,
+      );
+    }
+    if (pending.checkpoint === null || pending.checkpoint === undefined) return false;
+    const checkpoint = parseResourceCheckpoint(pending.checkpoint);
+    await this.commit(checkpoint.checkpoint_id, pending.manifest_sha256);
+    return true;
   }
 
   /** Refresh after byte transfer and again after turn preparation, immediately before dispatch. */
@@ -190,6 +360,7 @@ export class SessionResourcesDelivery {
         this.options.workspaceId,
         this.options.sessionId,
         prepared.manifest.revision,
+        ...(this.nativeBinding ? [this.nativeBinding.placementId] : []),
         resource.resource_id,
         'resource_mounted',
       );
@@ -213,6 +384,9 @@ export class SessionResourcesDelivery {
                 resource_id: resource.resource_id,
                 file_id: fileId,
                 mount_path: resource.mount_path,
+                ...(this.nativeMappings
+                  ? { resolved_path: this.nativeMappings[resource.resource_id] }
+                  : {}),
                 mount_strategy: 'tarball_prefetch',
               }),
             ),
@@ -239,6 +413,23 @@ export class SessionResourcesDelivery {
     if (!prepared) throw new Error('resources were not delivered');
     if (typeof checkpointId !== 'string' || typeof digest !== 'string')
       throw new Error('invalid resource checkpoint control');
+    if (
+      this.options.native &&
+      (await this.options.native.coordinator.finishAcknowledgedCheckpoint(
+        checkpointId,
+        digest,
+        prepared.manifest.revision,
+        async (phase) => {
+          await this.assertCurrent(prepared.manifest.revision);
+          await this.options.request(RUNNER_RESOURCE_ACK_PATH, {
+            checkpoint_id: checkpointId,
+            manifest_sha256: digest,
+            completion_phase: phase,
+          });
+        },
+      ))
+    )
+      return;
     const response = record(
       await this.options.request(RUNNER_RESOURCE_CHANGES_PATH, {
         type: 'manifest',
@@ -254,6 +445,10 @@ export class SessionResourcesDelivery {
     )
       throw new Error('resource checkpoint identity differs');
     await this.assertCurrent(checkpoint.revision);
+    if (this.options.native) {
+      if (!checkpoint.completion) throw new Error('Native checkpoint has no completion evidence');
+      await this.options.native.coordinator.stage(checkpoint, digest);
+    } else if (checkpoint.completion) throw new Error('Unexpected native completion');
     // Validate the entire scope before writing even the first output. A runner
     // cannot redirect bytes to an unattached store or change a read-only mount.
     for (const file of [...checkpoint.files, ...checkpoint.deleted]) {
@@ -398,10 +593,24 @@ export class SessionResourcesDelivery {
         await rm(local);
       }
       await this.assertCurrent(checkpoint.revision);
-      await this.options.request(RUNNER_RESOURCE_ACK_PATH, {
-        checkpoint_id: checkpointId,
-        manifest_sha256: digest,
-      });
+      if (this.options.native) {
+        await this.options.native.coordinator.prepare(checkpoint, digest);
+        await this.options.native.coordinator.finish(
+          checkpoint.completion!.turn_id,
+          checkpoint.revision,
+          async (phase) => {
+            await this.options.request(RUNNER_RESOURCE_ACK_PATH, {
+              checkpoint_id: checkpointId,
+              manifest_sha256: digest,
+              completion_phase: phase,
+            });
+          },
+        );
+      } else
+        await this.options.request(RUNNER_RESOURCE_ACK_PATH, {
+          checkpoint_id: checkpointId,
+          manifest_sha256: digest,
+        });
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

@@ -8,6 +8,7 @@ export function validatedProviderFetch(
   api: string,
   send: typeof fetch = fetch,
   completed?: (usage: SdkTerminalUsage) => void,
+  observeEvent?: (event: unknown) => void,
 ): typeof fetch {
   if (
     ![
@@ -48,6 +49,7 @@ export function validatedProviderFetch(
       eventBytes = 0;
       if (payload === '[DONE]') return;
       const event = JSON.parse(payload);
+      observeEvent?.(event);
       if (completed && event.type === 'error') throw new Error('Managed model stream failed');
       if (api === 'google-generative-ai') {
         const u = event.usageMetadata;

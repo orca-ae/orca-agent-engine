@@ -711,6 +711,27 @@ export class LocalSandboxRuntime implements SandboxRuntime {
     };
   }
 
+  /** A trusted CLI may read its controlled installation; model tools retain their own roots. */
+  withReadOnlyRuntimePaths(paths: readonly string[]): LocalSandboxRuntime {
+    let manager = this.opts.manager;
+    if (process.platform === 'linux') {
+      // Keep proxy sockets readable under denyRead=/ and route loopback through the isolated proxy.
+      const isolated = createManagedToolSandboxManager();
+      manager = {
+        ...isolated,
+        wrapWithSandbox: (command, binShell, config) =>
+          isolated.wrapWithSandbox(`export NO_PROXY= no_proxy=; ${command}`, binShell, config),
+      };
+    }
+    return new LocalSandboxRuntime({
+      ...this.opts,
+      manager,
+      extraReadPaths: [
+        ...new Set([...(this.opts.extraReadPaths ?? []), ...paths.map(canonicalPathIfPresent)]),
+      ],
+    });
+  }
+
   async acquire(env: EnvironmentSpec): Promise<SandboxHandle> {
     void env;
     const id = `sbx_local_${++nextId}_${Date.now().toString(36)}`;
@@ -1224,7 +1245,16 @@ rm -- "$probe_file"`;
       ...this.config,
       filesystem: {
         ...this.config.filesystem,
-        allowRead: [...(this.config.filesystem.allowRead ?? [])],
+        // A Linux read bind of the whole private root would mask its narrower output write binds.
+        allowRead:
+          process.platform === 'linux'
+            ? [
+                ...(this.config.filesystem.allowRead ?? []).filter(
+                  (path) => path !== this.canonicalRoot,
+                ),
+                ...policy.readonlyPaths.map((path) => this.toHostPath(path)),
+              ]
+            : [...(this.config.filesystem.allowRead ?? [])],
         allowWrite,
       },
     };
