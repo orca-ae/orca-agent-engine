@@ -246,6 +246,12 @@ fields alone do not authorize access to another Session.
      `usage: { cache_creation, cache_read_input_tokens, input_tokens, output_tokens }`.
      Harness records per-model-call usage through the internal usage route and
      registry accumulates it on the session row.
+     Registry-owned managed Codex SDK and Pi SDK turns use the same accounting
+     transaction through the runner bridge. Runtime `agent.usage` frames are
+     consumed before transcript append, after managed accounting succeeds.
+     List queries exclude historical usage rows before pagination, and SSE and
+     runner recovery apply the same internal visibility rule, including threads.
+     Raw historical transcript bytes remain available to internal store readers.
    - `GET /v1/sessions` uses opaque bidirectional cursors bound to the original
      `asc`/`desc` order. A follow-up request may omit `order`; an explicit
      mismatch is rejected with 400.

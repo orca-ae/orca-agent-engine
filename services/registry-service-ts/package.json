@@ -6,7 +6,7 @@
   "type": "module",
   "main": "dist/main.js",
   "scripts": {
-    "build": "tsup src/main.ts src/migrate.ts src/bootstrap-admin.ts src/create-admin-key.ts src/create-platform-key.ts --format esm --dts --target node22",
+    "build": "tsup src/main.ts src/migrate.ts src/backfill-usage-visibility.ts src/bootstrap-admin.ts src/create-admin-key.ts src/create-platform-key.ts --format esm --dts --target node22",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "start": "node dist/main.js",
     "dev": "tsx src/main.ts",
@@ -21,6 +21,7 @@
     "conformance:gen": "node scripts/generate-conformance.mjs",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx src/migrate.ts",
+    "db:backfill-usage-visibility": "tsx src/backfill-usage-visibility.ts",
     "registry:bootstrap-admin": "tsx src/bootstrap-admin.ts",
     "registry:create-admin-key": "tsx src/create-admin-key.ts",
     "registry:create-platform-key": "tsx src/create-platform-key.ts"

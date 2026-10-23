@@ -127,6 +127,7 @@ export function oidcTranscriptUserId(
 
 const TOOL_EVENT_ID_NAMESPACE = 'fb36df80-c16a-4b8e-b226-8a6400cc4048';
 const INTERNAL_TRANSCRIPT_EVENT_KINDS = new Set([
+  'agent.usage',
   'session.deferred_user_message',
   'session.deferred_user_message_submitted',
   InternalTranscriptEventKind.userEventProcessed,

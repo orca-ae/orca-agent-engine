@@ -3386,6 +3386,7 @@ describe('Registry-owned request/usage bridge ordering', () => {
           expect(runner.turns).toHaveLength(1);
         }
         const all = store.snapshot(WORKSPACE_ID, SESSION_ID);
+        expect(all.some((e) => e.kind === 'agent.usage')).toBe(false);
         expect(all.some((e) => e.kind === 'orca.harness_checkpoint')).toBe(false);
         expect(all.some((e) => e.kind === 'agent.turn_completed')).toBe(failure === 'none');
       } finally {
@@ -3411,6 +3412,34 @@ it.each(['session.resource_mounted', 'session.output_indexed'])(
     }
   },
 );
+
+it('diverts legacy runtime usage, including malformed payloads and child reports, without appending it', async () => {
+  const { bridge, store, runner } = buildBridge();
+  runner.connect();
+  const user = await appendUserMessage(store, 'legacy partial usage');
+  runner.scriptTurn(user.id, {
+    lines: [
+      { type: 'agent.usage', usage: { input_tokens: 17, output_tokens: 2 } },
+      { type: 'agent.usage', usage: 'malformed' },
+      { type: 'agent.usage', subpath: 'threads/sth_worker', usage: { input_tokens: 3 } },
+      { type: 'agent.message', content: [{ type: 'text', text: 'visible' }] },
+      { type: 'agent.turn_completed' },
+    ],
+  });
+  bridge.start();
+  try {
+    await waitFor(() =>
+      store
+        .snapshot(WORKSPACE_ID, SESSION_ID)
+        .some((event) => event.kind === 'agent.turn_completed'),
+    );
+    const events = store.snapshot(WORKSPACE_ID, SESSION_ID);
+    expect(events.some((event) => event.kind === 'agent.usage')).toBe(false);
+    expect(events.some((event) => event.kind === 'agent.message')).toBe(true);
+  } finally {
+    await bridge.stop();
+  }
+});
 
 it.each([false, true])(
   'publishes mounts only after acknowledged preparation and recovery (failed ACK=%s)',

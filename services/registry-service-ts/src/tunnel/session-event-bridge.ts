@@ -1339,6 +1339,9 @@ export class SessionEventBridge {
         throw err;
       }
     }
+    // Usage is a private runtime signal. Managed accounting above must commit
+    // before discarding it; legacy providers gain no roll-up by hiding the frame.
+    if (lineObj.type === 'agent.usage') return;
     let proto: Event;
     try {
       proto = httpEventToProto({
