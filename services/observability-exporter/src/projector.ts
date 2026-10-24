@@ -587,6 +587,17 @@ export function reduceCanonicalEventBatch(
     .sort(compareEvents)) {
     if (!isCanonicalSubpath(event.subpath)) continue;
     const primary = event.subpath === PRIMARY_SUBPATH;
+    // Dispatcher accepts registry child archive/interrupt controls as user.interrupt.
+    if (
+      !primary &&
+      event.producedBy === 'registry' &&
+      event.kind === 'session.thread_status_terminated' &&
+      ['archived', 'interrupted'].includes(String(parsePayload(event).stop_reason))
+    ) {
+      const eventId = boundedAgentEventId(event.id);
+      if (eventId === undefined) throw new CanonicalProjectionStateError();
+      addPendingInput(next, { ...event, kind: 'user.interrupt' }, eventId, acceptedSourceIds);
+    }
     // Child follow-ups are accepted by a primary-stream marker referencing this input ID.
     if ((primary || event.kind === 'user.message') && isClientInput(event)) {
       const eventId = boundedAgentEventId(event.id);

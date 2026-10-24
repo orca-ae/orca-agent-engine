@@ -190,6 +190,10 @@ unknown rather than zero and does not prevent durable failure settlement. A pare
 child failure may still commit if the root succeeds and terminal accounting is known.
 This includes native `interrupt_agent` after the child's provider response has fully terminated:
 an aborted child with matched provider request counts does not by itself fail the root.
+During targeted cancellation, the host records the tool outcome but withholds its reply to the
+native child. Native cancellation ends the pending tool wait before another model request can
+start, including when the orchestration authorization reply is delayed. Physical tool termination
+is still confirmed before the host grants the native interrupt.
 The tree-settlement guard appends bounded reason labels to its failure message:
 `root_interrupted`, `no_usage`, `root_terminal_unsuccessful`, `missing_terminal`, and
 `provider_requests_unmatched`. Multiple labels can apply; they contain no native IDs,

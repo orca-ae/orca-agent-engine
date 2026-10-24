@@ -14,9 +14,13 @@ import { CodexSdkHarness } from '../../src/harness/codex-sdk/index.js';
 import type { AgentEvent, SessionStartInput } from '../../src/harness/agent-harness.js';
 import { turnStoreFixture } from '../support/codex-turn-store.js';
 
-it.each([true, false])(
-  'settles real native interrupt_agent with known terminal usage=%s',
-  async (known) => {
+it.each([
+  { known: true, authorizationDelay: 0 },
+  { known: false, authorizationDelay: 0 },
+  { known: true, authorizationDelay: 100 },
+])(
+  'settles real native interrupt_agent with %j',
+  async ({ known, authorizationDelay }) => {
     const directory = await mkdtemp(join(tmpdir(), 'dsh-native-settlement-'));
     const events: AgentEvent[] = [];
     const raw: WorkerEvent[] = [];
@@ -73,7 +77,7 @@ it.each([true, false])(
           await Promise.all([waitingA, waitingB]);
           interrupted = true;
           reply([call('interrupt_agent', { agent_id: a })]);
-        } else if (role === 'A' && !known && requests.filter((r) => r.role === 'A').length === 2) {
+        } else if (role === 'A' && requests.filter((r) => r.role === 'A').length === 2) {
           // Native steps await their tools: abort the follow-up request after A's tool exits.
           res.on('close', () => {
             aAborted = !res.writableEnded;
@@ -101,8 +105,8 @@ it.each([true, false])(
           getValidToken: async () => ({ token: 'jwt' }) as never,
           close: () => {},
         },
-        createWorker: (emit) =>
-          new DshSdkWorker((event) => {
+        createWorker: (emit) => {
+          const worker = new DshSdkWorker((event) => {
             raw.push(event);
             const canonical = event as unknown as {
               type: string;
@@ -119,7 +123,16 @@ it.each([true, false])(
               }
             }
             emit(event);
-          }),
+          });
+          const handle = worker.handle.bind(worker);
+          worker.handle = async (command) => {
+            // Remote authorization can arrive after a canceled host tool result.
+            if (authorizationDelay && interrupted && command.type === 'orchestration_result')
+              await new Promise((resolve) => setTimeout(resolve, authorizationDelay));
+            await handle(command);
+          };
+          return worker;
+        },
       });
       consumed.push(
         (async () => {
