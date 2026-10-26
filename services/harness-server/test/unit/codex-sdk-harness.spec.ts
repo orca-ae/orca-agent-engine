@@ -179,7 +179,8 @@ describe('DSH native thread host', () => {
       if (command.type === 'submit') {
         expect(command).toMatchObject({ sourceEventId: message.id });
         await run();
-      } else if (command.type === 'tool_result') childResult.resolve();
+      } else if (command.type === 'tool_result' || command.type === 'interrupt')
+        childResult.resolve();
     });
     const send = h.emit;
     const run = async () => {
@@ -298,6 +299,7 @@ describe('DSH native thread host', () => {
       threadId: child.slice('subagents/'.length),
     });
     expect(h.execute).not.toHaveBeenCalled();
+    expect(h.handle.mock.calls.some(([command]) => command.type === 'tool_result')).toBe(false);
     released.resolve();
     await vi.waitFor(() =>
       expect(h.events.filter((event) => event.kind === 'agent.usage')).toHaveLength(1),

@@ -26,6 +26,12 @@ The root sampling and capture pin applies to the whole trace, including the exis
 capture ceilings and state limits. Primary-stream client tool replies/confirmations address child
 actions through `payload.subpath` and the existing tool-use identity, not through arrival order.
 
+Registry-produced canonical child termination events with `stop_reason: archived` or
+`interrupted` are acceptance controls, matching the dispatcher’s `user.interrupt` handling.
+Their primary-stream acceptance markers consume the original control identity without creating
+a trace or closing the active root turn. The control and marker can cross checkpoint boundaries;
+replay preserves their accepted-source ledger entries. Other unresolved markers still fail closed.
+
 The OTLP encoder emits `orca.thread.*` identity and lineage only as
 `langfuse.observation.metadata.*`. Each observation carries its own subpath and available lineage;
 the projected root contains only the empty subpath, with no thread IDs or parent lineage to inherit.
@@ -83,6 +89,10 @@ and credentials; its own database is independent of exporter persistence.
   barrier before validating the scoped state. Restore and state growth are bounded; exceeding limits, identity conflicts, invalid
   state, or fatal consumer/producer failures fail closed for the **instance**, not a durable
   per-Session quarantine. Do not treat a restart or offset reset as a repair for corrupt state.
+  Source and delivery consumers rejoin after exhausted Fetch request timeouts or allowlisted
+  connection failures. Readiness is false until they rejoin; source ownership changes restore the
+  committed checkpoint behind the existing fencing barrier before projecting again. This retry
+  does not apply to projection, transaction, shared-state reader, or authorization failures.
 - Delivery is at-least-once relative to external HTTP: acceptance and Kafka offset commit cannot be
   atomic. A crash or lost assignment after acceptance can send the same deterministic trace again.
   Terminal results transactionally advance the delivery offset and one compacted progress value per

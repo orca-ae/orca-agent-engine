@@ -30,7 +30,10 @@ export default defineConfig({
     },
     testTimeout: 60_000,
     hookTimeout: 120_000,
-    include: ['test/**/*.spec.ts'],
+    include: [
+      'test/**/*.spec.ts',
+      '../../services/registry-service-ts/test/integration/transcript-visibility.spec.ts',
+    ],
     // Auto-loads `services/dev/.env` into the test process so locally-run
     // `pnpm e2e:agent` sees the same `ORCA_E2E_PLAINTEXT_KEY` /
     // `DATABASE_URL` etc. that the harness was started with — without the

@@ -1377,7 +1377,9 @@ export class CodexSdkHarness implements AgentHarness {
             ...(binding?.serverName ? { mcp_server_name: binding.serverName } : {}),
           },
         });
-      await this.worker!.handle({ type: 'tool_result', id: event.id, result });
+      // Native cancellation must reach the child before a host result can wake a new model call.
+      if (!this.dshProjection || !this.cancelledSubpaths.has(subpath))
+        await this.worker!.handle({ type: 'tool_result', id: event.id, result });
     }
     this.toolOrigins.delete(event.id);
     this.executingTools.delete(event.id);

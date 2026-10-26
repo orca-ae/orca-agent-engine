@@ -7,6 +7,8 @@ import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import {
   KafkaJSProtocolError,
+  KafkaJSNumberOfRetriesExceeded,
+  KafkaJSRequestTimeoutError,
   type ConsumerRunConfig,
   type EachBatchPayload,
   type Kafka,
@@ -176,12 +178,13 @@ function deliveryBatch(offsets = ['0']) {
 }
 
 function mockConsumer() {
-  const listeners = new Map<string, (event: { payload: { error: Error } }) => void>();
+  type Listener = (event: { payload: { error: Error; restart?: boolean } }) => void;
+  const listeners = new Map<string, Listener[]>();
   let config: ConsumerRunConfig | undefined;
   return {
     events: { CRASH: 'crash', GROUP_JOIN: 'group_join' },
-    on: vi.fn((event: string, listener: (event: { payload: { error: Error } }) => void) => {
-      listeners.set(event, listener);
+    on: vi.fn((event: string, listener: Listener) => {
+      listeners.set(event, [...(listeners.get(event) ?? []), listener]);
     }),
     connect: vi.fn(async () => {}),
     disconnect: vi.fn(async () => {}),
@@ -192,8 +195,10 @@ function mockConsumer() {
     run: vi.fn(async (value: ConsumerRunConfig) => {
       config = value;
     }),
-    join: () => listeners.get('group_join')?.({ payload: { error: new Error('join') } }),
-    crash: (error: Error) => listeners.get('crash')?.({ payload: { error } }),
+    join: () =>
+      listeners.get('group_join')?.forEach((fn) => fn({ payload: { error: new Error('join') } })),
+    crash: (error: Error, restart = false) =>
+      listeners.get('crash')?.forEach((fn) => fn({ payload: { error, restart } })),
     async process(batch: EachBatchPayload) {
       if (!config?.eachBatch) throw new Error('consumer not started');
       await config.eachBatch(batch);
@@ -2378,6 +2383,45 @@ describe('Kafka delivery progress', () => {
 });
 
 describe('shutdown failure classification and drain', () => {
+  it('rejoins a timed-out source and restores its committed checkpoint without redelivery', async () => {
+    const s = setup();
+    s.registryClient.resolveContext.mockResolvedValue({
+      status: 'enabled',
+      deliveryContext: context,
+    });
+    await s.runtime.start();
+    const batch = batchPayload();
+    await s.source.process(batch);
+    const head = s.head();
+    const deliveries = () =>
+      s.transaction.send.mock.calls.filter(([input]) => input.topic === deliveryTopic);
+    const sends = deliveries().length;
+    const timeout = new KafkaJSRequestTimeoutError('Fetch request timed out', {
+      clientId: 'exporter-test',
+      broker: 'broker.example:9092',
+      correlationId: 1,
+      createdAt: 0,
+      sentAt: 0,
+      pendingDuration: 30_000,
+    });
+    const error = new KafkaJSNumberOfRetriesExceeded(timeout, { retryCount: 5, retryTime: 300 });
+    const retry = s.kafka.consumer.mock.calls[1]![0].retry.restartOnFailure;
+    expect(await retry(error)).toBe(true);
+    expect(
+      await retry(Object.assign(new Error('not a transport failure'), { retriable: true })),
+    ).toBe(false);
+    s.source.crash(error, true);
+    expect(s.runtime.status()).toEqual({ state: 'running', ready: false });
+    s.source.join();
+    expect(s.runtime.status()).toEqual({ state: 'running', ready: true });
+    await s.source.process(batchPayload());
+    expect(s.head()).toEqual(head);
+    expect(deliveries()).toHaveLength(sends);
+    expect(s.producers[0]!.disconnect).toHaveBeenCalledOnce();
+    await s.runtime.stop();
+    expect(await retry(error)).toBe(false);
+  });
+
   it.each(['reader', 'consumer'] as const)(
     'classifies a late %s callback after intentional consumer disconnect',
     async (kind) => {

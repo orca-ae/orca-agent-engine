@@ -49,6 +49,59 @@ function decoded(event: Event) {
 }
 
 describe('Kafka-only durable reducer', () => {
+  it.each(['archived', 'interrupted'])(
+    'resumes through registry child %s controls and their primary acceptance markers',
+    (stopReason) => {
+      const control = event(
+        0,
+        'session.thread_status_terminated',
+        { stop_reason: stopReason },
+        { producedBy: 'registry', subpath: 'subagents/11111111-1111-4111-8111-111111111111' },
+      );
+      const marker = event(1, 'session.user_event_processed', { user_event_id: control.id });
+      const messages = [
+        control,
+        marker,
+        event(2, 'session.status_idle', { stop_reason: { type: 'end_turn' } }),
+        ...completedPrimaryTurnEvents().map((entry) => ({ ...entry, seq: entry.seq + 3 })),
+      ].map(decoded);
+      const initial = initialKafkaCheckpoint(route, context);
+      const expected = projectKafkaEvents(initial, messages);
+      expect(expected.deliveries).toHaveLength(1);
+      expect(expected.checkpoint.acceptedSourceIds).toContain(control.id);
+      for (let split = 1; split < messages.length; split++) {
+        const first = projectKafkaEvents(initial, messages.slice(0, split));
+        const restored = parseKafkaCheckpoint(JSON.parse(JSON.stringify(first.checkpoint)), route);
+        const last = projectKafkaEvents(restored, messages.slice(split));
+        expect([...first.deliveries, ...last.deliveries]).toEqual(expected.deliveries);
+        expect(last.checkpoint).toEqual(expected.checkpoint);
+        expect(projectKafkaEvents(last.checkpoint, messages).deliveries).toEqual([]);
+      }
+    },
+  );
+
+  it.each([
+    { producedBy: 'harness' as const, stop_reason: 'archived' },
+    { producedBy: 'client' as const, stop_reason: 'interrupted' },
+    { producedBy: 'registry' as const, stop_reason: 'completed' },
+  ])('rejects an unresolved marker for a non-control termination: %s', (input) => {
+    const control = event(
+      0,
+      'session.thread_status_terminated',
+      { stop_reason: input.stop_reason },
+      {
+        producedBy: input.producedBy,
+        subpath: 'subagents/11111111-1111-4111-8111-111111111111',
+      },
+    );
+    expect(() =>
+      projectKafkaEvents(initialKafkaCheckpoint(route, context), [
+        decoded(control),
+        decoded(event(1, 'session.user_event_processed', { user_event_id: control.id })),
+      ]),
+    ).toThrow('acceptance issue');
+  });
+
   it('advances past repeated completion markers without changing trace output or identities', () => {
     const messages = completedPrimaryTurnEvents().map(decoded);
     const initial = initialKafkaCheckpoint(route, context);

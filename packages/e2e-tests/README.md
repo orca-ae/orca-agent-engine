@@ -7,6 +7,15 @@ pinned and constructed, but assertions go through a `fetch` wrapper — see
 
 Coverage groups:
 
+- **Shared transcript visibility contract**
+  (`services/registry-service-ts/test/integration/transcript-visibility.spec.ts`).
+  One suite covers separate and runner/colocated ingestion, both public wire
+  formats, pagination and live/historical SSE against real HTTP and transcript
+  stores. A deterministic runner frame peer exercises the tunnel bridge without
+  a model call. Fixture transcripts use isolated Kafka/Pulsar topics or a temporary
+  Postgres schema so the running harness cannot consume their inputs. The suite
+  runs in registry integration and the wire backend matrix alongside the existing
+  live-registry visibility smoke test (`test/transcript-visibility.spec.ts`).
 - **Layer A — wire-protocol conformance** (`test/wire-conformance.spec.ts`).
   Always-on. No `ANTHROPIC_API_KEY` required. Covers the agent, environment,
   session, file, memory and skill routes, asserting response shapes, status
