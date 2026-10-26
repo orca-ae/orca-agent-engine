@@ -43,7 +43,31 @@ import type { CaptureMode } from './types.js';
 import { StartupAdmission } from './startup-admission.js';
 
 // KafkaJS is CommonJS; Node's native ESM loader does not expose this as a named export.
-const { ConfigResourceTypes } = kafkajs;
+const {
+  ConfigResourceTypes,
+  KafkaJSNumberOfRetriesExceeded,
+  KafkaJSRequestTimeoutError,
+  KafkaJSConnectionError,
+} = kafkajs;
+
+function isConsumerAvailabilityFailure(error: unknown): boolean {
+  const cause = error instanceof KafkaJSNumberOfRetriesExceeded ? error.cause : error;
+  if (cause instanceof KafkaJSRequestTimeoutError) return true;
+  return (
+    cause instanceof KafkaJSConnectionError &&
+    (cause.name === 'KafkaJSConnectionClosedError' ||
+      ('code' in cause &&
+        [
+          'ECONNRESET',
+          'ECONNREFUSED',
+          'ETIMEDOUT',
+          'EPIPE',
+          'EAI_AGAIN',
+          'ENETUNREACH',
+          'EHOSTUNREACH',
+        ].includes(String(cause.code))))
+  );
+}
 
 /** Only raised before opening a transaction; its candidate can safely be discarded. */
 class CaptureBatchExpiredError extends Error {}
@@ -124,6 +148,7 @@ export class KafkaOnlyObservabilityExporterRuntime {
   private readonly sources: Source[] = [];
   private readonly producers = new Set<Producer>();
   private readonly closingConsumers = new WeakSet<Consumer>();
+  private readonly restartingConsumers = new Set<Consumer>();
   private readonly timers = new Set<ReturnType<typeof setTimeout>>();
   private readonly admin: Admin;
   private delivery: Consumer | undefined;
@@ -204,7 +229,13 @@ export class KafkaOnlyObservabilityExporterRuntime {
   }
 
   status(): { ready: boolean; state: 'stopped' | 'starting' | 'running' | 'failed' } {
-    return { ready: this.state === 'running' && !this.abort.signal.aborted, state: this.state };
+    return {
+      ready:
+        this.state === 'running' &&
+        !this.abort.signal.aborted &&
+        this.restartingConsumers.size === 0,
+      state: this.state,
+    };
   }
 
   start(): Promise<void> {
@@ -473,11 +504,20 @@ export class KafkaOnlyObservabilityExporterRuntime {
       allowAutoTopicCreation: false,
       sessionTimeout: 60_000,
       heartbeatInterval: 3_000,
-      retry: { restartOnFailure: async () => false },
+      retry: {
+        restartOnFailure: async (error) =>
+          !this.abort.signal.aborted && isConsumerAvailabilityFailure(error),
+      },
     });
+    consumer.on(consumer.events.GROUP_JOIN, () => this.restartingConsumers.delete(consumer));
     consumer.on(consumer.events.CRASH, ({ payload }) => {
       // KafkaJS may emit a delayed CRASH while intentional disconnect settles.
-      if (!this.closingConsumers.has(consumer)) this.fail(payload.error);
+      if (this.closingConsumers.has(consumer)) return;
+      if (payload.restart && isConsumerAvailabilityFailure(payload.error)) {
+        this.restartingConsumers.add(consumer);
+        return;
+      }
+      this.fail(payload.error);
     });
     this.consumerCount += 1;
     return consumer;
