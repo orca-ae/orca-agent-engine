@@ -160,6 +160,7 @@ jobs:
           - orca-observability-exporter
           - orca-registry-service-ts
           - orca-harness-server
+          - orca-environment
           - sandbox-harness-claude-code
           - sandbox-harness-dsh
         platform:
@@ -178,6 +179,9 @@ jobs:
             build_args: ''
           - image: orca-harness-server
             dockerfile: services/harness-server/Dockerfile
+            build_args: ''
+          - image: orca-environment
+            dockerfile: services/environment-image/Dockerfile
             build_args: ''
           # Codex stays excluded until its provider is implemented.
           - image: sandbox-harness-claude-code
@@ -437,6 +441,7 @@ jobs:
           - orca-observability-exporter
           - orca-registry-service-ts
           - orca-harness-server
+          - orca-environment
           - sandbox-harness-claude-code
           - sandbox-harness-dsh
           - orca-opensandbox-code-interpreter
@@ -943,6 +948,7 @@ jobs:
           - orca-observability-exporter
           - orca-registry-service-ts
           - orca-harness-server
+          - orca-environment
           - sandbox-harness-claude-code
           - sandbox-harness-dsh
           - orca-opensandbox-code-interpreter
