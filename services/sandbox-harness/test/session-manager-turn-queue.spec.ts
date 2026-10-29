@@ -5,7 +5,7 @@ import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { createManagedSession } from '../src/session-manager.js';
 
@@ -13,6 +13,7 @@ const sessions: Array<ReturnType<typeof createManagedSession>> = [];
 const tempDirs: string[] = [];
 
 afterEach(async () => {
+  vi.useRealTimers();
   for (const session of sessions.splice(0)) session.kill();
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
@@ -35,6 +36,46 @@ async function exists(path: string): Promise<boolean> {
 }
 
 describe('managed session turn queue', () => {
+  it('keeps a long SDK command alive beyond 660s and bounds independent controls', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'sandbox-sdk-budget-'));
+    tempDirs.push(dir);
+    const fixture = join(dir, 'child.mjs');
+    // A real child holds every ACK; only the parent's command watchdog is clock-controlled.
+    await writeFile(fixture, 'process.stdin.resume();');
+    const session = createManagedSession({
+      sessionId: 'ses_budget',
+      subprocessEntryPath: fixture,
+      spawnArgs: { agent: 'fixture', args: [], replayEnv: {} },
+      emit: () => {},
+    });
+    sessions.push(session);
+    session.start();
+    vi.useFakeTimers({ toFake: ['Date', 'performance', 'setTimeout', 'clearTimeout'] });
+    const complete = vi.fn();
+    const turn = session.sendSdkCommand!({
+      type: 'submit',
+      text: 'long',
+      executionBudgetMs: 1_200_000,
+    });
+    const outcome = turn.catch(complete);
+    await vi.advanceTimersByTimeAsync(660_001);
+    expect(complete).not.toHaveBeenCalled();
+    const control = session.sendSdkCommand!({ type: 'interrupt' });
+    const rejected = expect(control).rejects.toThrow('SDK command timed out');
+    await vi.advanceTimersByTimeAsync(60_000);
+    await rejected;
+    expect(complete).not.toHaveBeenCalled();
+    await expect(session.sendSdkCommand!({ type: 'submit', executionBudgetMs: 0 })).rejects.toThrow(
+      'Invalid SDK execution budget',
+    );
+    session.kill();
+    await outcome;
+    expect(complete).toHaveBeenCalledWith(
+      expect.objectContaining({ message: 'session not alive' }),
+    );
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it('holds turns for matching turn_complete markers only', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'sandbox-harness-turn-'));
     tempDirs.push(dir);

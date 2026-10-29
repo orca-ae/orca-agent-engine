@@ -68,6 +68,7 @@ describe.each(['codex-sdk', 'pi-sdk'] as const)('sandbox %s provider', (provider
     await r.handleSdkCommand(commandStart, () => {});
     const commands = [
       { type: 'submit', text: 'hello' },
+      { type: 'submit', text: 'long', executionBudgetMs: 1_200_000 },
       {
         type: 'tool_result',
         id: 'call',
@@ -115,14 +116,19 @@ it('DSH transports authorization replies and monotonic archive fence before targ
   );
   const threadId = '11111111-1111-4111-8111-111111111111';
   const controls = [
+    { type: 'submit', text: 'long', sourceEventId: 'evt_long', executionBudgetMs: 1_200_000 },
     { type: 'archive_fence', threadId },
     { type: 'orchestration_result', id: 'call', allowed: false, reason: 'archived' },
     { type: 'interrupt', threadId, archived: true },
   ];
   for (const control of controls) await runtime.handleSdkCommand(control, () => {});
   expect(worker.handle.mock.calls.slice(1).map(([command]) => command)).toEqual(controls);
+  for (const executionBudgetMs of [0, -1, 1.5, '1200000', null, 2_147_483_648])
+    await expect(
+      runtime.handleSdkCommand({ type: 'submit', text: 'invalid', executionBudgetMs }, () => {}),
+    ).rejects.toThrow();
   const nonDsh = new CodexSdkRuntime();
-  await expect(nonDsh.handleSdkCommand(controls[0], () => {})).rejects.toThrow('DSH-only');
+  await expect(nonDsh.handleSdkCommand(controls[1], () => {})).rejects.toThrow('DSH-only');
   const missing = new CodexSdkRuntime('dsh-sdk');
   await expect(
     missing.handleSdkCommand(

@@ -7,6 +7,76 @@ import { expect, it, vi } from 'vitest';
 import { DshSdkWorker } from '../../src/worker.js';
 import { exerciseNativeTree } from '../support/native-tree.js';
 
+it.each([undefined, 1_200_000])(
+  'native submit respects remaining budget=%s and retains cancellation headroom',
+  async (executionBudgetMs) => {
+    vi.useFakeTimers({ toFake: ['Date', 'performance', 'setTimeout', 'clearTimeout'] });
+    vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms) => {
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(), ms);
+      return controller.signal;
+    });
+    const emit = vi.fn();
+    let signal!: AbortSignal;
+    let finish!: () => void;
+    const request = vi.fn((_method: string, _params: unknown, abort: AbortSignal) => {
+      signal = abort;
+      return new Promise<void>((resolve, reject) => {
+        finish = resolve;
+        abort.addEventListener('abort', () => reject(abort.reason), { once: true });
+      });
+    });
+    const worker = new DshSdkWorker(emit);
+    Object.assign(worker, { input: {}, rpc: { request }, reap: vi.fn(async () => {}) });
+    try {
+      const turn = worker.handle({
+        type: 'submit',
+        text: 'test',
+        sourceEventId: 'evt_budget',
+        ...(executionBudgetMs === undefined ? {} : { executionBudgetMs }),
+      });
+      await vi.advanceTimersByTimeAsync(600_000);
+      if (executionBudgetMs === undefined) {
+        await turn;
+        expect(signal.aborted).toBe(true);
+        expect(emit).toHaveBeenCalledWith(
+          expect.objectContaining({ type: 'failure', fatal: true }),
+        );
+      } else {
+        await vi.advanceTimersByTimeAsync(600_000);
+        expect(signal.aborted).toBe(false);
+        expect(emit).not.toHaveBeenCalled();
+        expect(request.mock.calls[0]?.[1]).toMatchObject({ executionBudgetMs });
+        finish();
+        await turn;
+      }
+    } finally {
+      finish();
+      await worker.close();
+      vi.restoreAllMocks();
+      vi.useRealTimers();
+    }
+  },
+);
+
+it.each([0, -1, 1.5, 2_147_483_648])(
+  'rejects budget %s before native admission',
+  async (executionBudgetMs) => {
+    const request = vi.fn();
+    const worker = new DshSdkWorker(() => {});
+    Object.assign(worker, { input: {}, rpc: { request } });
+    await expect(
+      worker.handle({
+        type: 'submit',
+        text: 'test',
+        sourceEventId: 'evt_budget',
+        executionBudgetMs,
+      }),
+    ).rejects.toThrow('Invalid SDK execution budget');
+    expect(request).not.toHaveBeenCalled();
+  },
+);
+
 it.each(['list_child_sessions', 'read_child_session'])(
   'reserves %s against managed tool collisions before spawning a worker',
   async (name) => {

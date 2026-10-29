@@ -21,7 +21,7 @@
 //   - GET /v1/sessions/:id/events/stream replays buffered events first, then
 //     streams live ones.
 
-import { afterEach, beforeEach, describe, it, expect } from 'vitest';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import { type AddressInfo } from 'node:net';
 import { type Server } from 'node:http';
 
@@ -198,6 +198,24 @@ async function waitFor(predicate: () => boolean, timeoutMs = 1000): Promise<void
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
+
+it.each([0, -1, 1.5, '900000', null, 2_147_483_648])(
+  'rejects invalid private submit budget %s before child admission',
+  async (executionBudgetMs) => {
+    const { json } = await postJson('/v1/sessions', { agent: 'codex-sdk' });
+    const { id } = json as { id: string };
+    const command = vi.fn(async () => 0);
+    const acknowledge = vi.spyOn(fake.eventStore, 'acknowledgeSdkEvents');
+    fake.runtimes.get(id)!.sendSdkCommand = command;
+    const response = await postJson(`/v1/sessions/${id}/sdk-command`, {
+      afterSequence: 1,
+      command: { type: 'submit', text: 'test', executionBudgetMs },
+    });
+    expect(response.status).toBe(400);
+    expect(command).not.toHaveBeenCalled();
+    expect(acknowledge).not.toHaveBeenCalled();
+  },
+);
 
 describe('POST /v1/sessions', () => {
   it('creates a session and returns 201 with the record', async () => {

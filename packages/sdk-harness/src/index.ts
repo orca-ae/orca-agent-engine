@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 export * from './wire.js';
+export * from './command-timeout.js';
 export * from './usage.js';
 export * from './provider-usage.js';
 export * from './custom-tool-result.js';
