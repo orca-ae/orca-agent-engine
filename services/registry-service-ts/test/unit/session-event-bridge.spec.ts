@@ -38,8 +38,21 @@ import {
 // the turn route are the cross-component contract asserted here.
 
 import { describe, it, expect, vi } from 'vitest';
+import { existsSync, readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
+import { InMemorySandboxRuntime } from '@orca/sandbox-runtime';
+import { SessionLoop } from '../../../session-runner/src/session-loop.js';
+import { ProviderRegistry } from '../../../session-runner/src/harness/provider.js';
+import { ClaudeCodeCliHarness } from '../../../session-runner/src/harness/claude-code/index.js';
+import { registerCodexSdkProvider } from '../../../session-runner/src/harness/codex-sdk/provider.js';
+import { createResponsesFixture } from '../../../../packages/codex-harness/test/support/responses-fixture.js';
+import { RouteDispatcher } from '../../../session-runner/src/tunnel/request-dispatch.js';
+import { serveTunnel } from '../../../session-runner/src/tunnel/serve.js';
+import { registerSessionHandlers } from '../../../session-runner/src/register-handlers.js';
 import {
   FrameKind,
+  TunnelTransport,
   decodeFrame,
   encodeFrame,
   decodeBody,
@@ -977,6 +990,569 @@ function buildBridge(
   });
   return { bridge, store, registry, runner };
 }
+
+// Actual Orca bash over MCP, with the existing scripted Claude Code CLI. The
+// transcript and tunnel peer are in-process fixtures; transport, bridge, runner
+// handlers, policy resolver and provider are production code. No worker, WebSocket
+// handshake, real CLI/model or native completion/accounting claim is made here.
+describe('runner approval — actual Orca tool round trip', () => {
+  it.each([
+    [{ 'mcp__orca__*': 'always_ask' }, 'always_ask'],
+    [{ 'mcp__orca__*': 'always_allow', mcp__orca__bash: 'always_ask' }, 'always_ask'],
+    [{ 'mcp__orca__*': 'always_ask', mcp__orca__bash: 'always_deny' }, 'always_deny'],
+    [{ 'mcp__orca__*': 'always_deny', mcp__orca__bash: 'always_allow' }, 'always_allow'],
+  ] as const)(
+    'applies canonical policy %j as %s',
+    async (policies, effective) => {
+      const store = new InMemoryTranscriptStore();
+      const registry = new TunnelRegistry();
+      const sandbox = await new InMemorySandboxRuntime().acquire({});
+      const root = (sandbox as unknown as { rootDir(): string }).rootDir();
+      const runnerRoot = fileURLToPath(new URL('../../../session-runner/', import.meta.url));
+      const providers = new ProviderRegistry();
+      providers.register(
+        'claude-code',
+        () =>
+          new ClaudeCodeCliHarness({
+            modelDefault: 'fixture',
+            workspaceId: WORKSPACE_ID,
+            sessionId: SESSION_ID,
+            sandbox,
+            cliCommand: process.execPath,
+            cliPrefixArgs: [join(runnerRoot, 'test/unit/support/fake-claude-code-cli.mjs')],
+            bridgeCommand: join(runnerRoot, 'node_modules/.bin/tsx'),
+            bridgePrefixArgs: [join(runnerRoot, 'src/harness/claude-code/bridge-entry.ts')],
+          }),
+      );
+      const loop = new SessionLoop({ workspaceId: WORKSPACE_ID, providers });
+      const dispatcher = new RouteDispatcher();
+      registerSessionHandlers(dispatcher, loop);
+      const controls: Array<{ status: number; body: Record<string, unknown> }> = [];
+      let session: RegistrySession;
+      const tunnel = serveTunnel({
+        registryRunnerUrl: 'http://approval-fixture',
+        runnerId: RUNNER_ID,
+        bindingToken: 'fixture',
+        runnerVersion: 'approval-fixture',
+        dispatcher: {
+          async dispatch(request, signal) {
+            const response = await dispatcher.dispatch(request, signal);
+            if (request.path !== RUNNER_CONFIRMATION_PATH) return response;
+            const chunks: Uint8Array[] = [];
+            for await (const chunk of response.body) chunks.push(chunk);
+            const body = Buffer.concat(chunks);
+            controls.push({ status: response.status, body: JSON.parse(body.toString('utf8')) });
+            return {
+              ...response,
+              body: (async function* () {
+                yield body;
+              })(),
+            };
+          },
+        },
+        connector: {
+          async connect() {
+            return {
+              async receive() {
+                const data = await session.outboundQueue.get();
+                return data === null
+                  ? { type: 'close' as const, code: 1000, reason: 'fixture closed' }
+                  : { type: 'text' as const, data };
+              },
+              async sendText(raw) {
+                const frame = decodeFrame(raw);
+                if (frame.kind === FrameKind.Hello) {
+                  session = registry.register(
+                    RUNNER_ID,
+                    new RunnerSocket(() => {
+                      throw new Error('Serve loop consumes the outbound queue directly');
+                    }),
+                    frame,
+                    { owner: WORKSPACE_ID },
+                  );
+                } else if (!registry.routeResponseFrame(RUNNER_ID, frame)) {
+                  throw new Error('Unrouted runner response');
+                }
+              },
+              closeSocket() {
+                registry.deregister(RUNNER_ID);
+              },
+            };
+          },
+        },
+      });
+      const bridge = new SessionEventBridge({
+        workspaceId: WORKSPACE_ID,
+        sessionId: SESSION_ID,
+        runnerId: RUNNER_ID,
+        store,
+        registry,
+      });
+      const events = () => store.snapshot(WORKSPACE_ID, SESSION_ID);
+      const confirm = async (id: string, result: 'allow' | 'deny', resolved: boolean) => {
+        const count = controls.length;
+        await appendToolConfirmation(store, id, result);
+        await waitFor(() => controls.length > count);
+        expect(controls.at(-1)).toEqual({ status: 200, body: { ok: true, resolved } });
+      };
+      try {
+        await loop.applySnapshot(
+          SESSION_ID,
+          Buffer.from(
+            JSON.stringify({
+              provider: 'claude-code',
+              model: { provider: 'anthropic', id: 'fixture' },
+              system: '',
+              allowed_tool_names: ['bash'],
+              allowed_mcp_server_names: [],
+              egress: { mode: 'gateway' },
+              tool_permissions: policies,
+              default_tool_permission: 'always_deny',
+            }),
+          ),
+        );
+        bridge.start();
+        let previousCall: string | undefined;
+        for (const verdict of ['allow', 'deny'] as const) {
+          const file = join(root, verdict + '.txt');
+          // The fixture explicitly requests mcp__orca__bash, never native Bash/Write.
+          const user = await appendUserMessage(store, `run echo ${verdict} > ${verdict}.txt`);
+          let call: string | undefined;
+          if (effective === 'always_ask') {
+            await waitFor(
+              () =>
+                events().some(
+                  (e) =>
+                    e.kind === 'agent.requires_action' &&
+                    payloadJson(e).source_event_id === user.id,
+                ),
+              10_000,
+            );
+            const requires = events().find(
+              (e) =>
+                e.kind === 'agent.requires_action' && payloadJson(e).source_event_id === user.id,
+            )!;
+            const payload = payloadJson(requires);
+            expect(payload).toMatchObject({
+              action: 'tool_confirmation',
+              tool_name: 'mcp__orca__bash',
+              source_event_id: user.id,
+            });
+            call = payload.tool_use_id as string;
+            expect(typeof call).toBe('string');
+            expect(call).not.toBe(previousCall);
+            expect(loop.hasPendingApproval(call)).toBe(true);
+            expect(existsSync(file)).toBe(false);
+            // Expire a separate gate through its supported per-call deadline; the
+            // real CLI call retains its production wait budget throughout.
+            const expired = loop.confirmTool(
+              'mcp__orca__bash',
+              {},
+              {
+                toolUseId: 'expired-call',
+                timeoutMs: 1,
+              },
+            );
+            expect(await expired).toMatchObject({
+              behavior: 'deny',
+              message: 'Tool use denied: confirmation timed out.',
+            });
+            await confirm('expired-call', 'allow', false);
+            await confirm('wrong-call', 'allow', false);
+            // Invalid/missing routing identity must not release the actual call.
+            const count = controls.length;
+            await appendToolConfirmation(store, '', 'allow');
+            await waitFor(() => controls.length > count);
+            expect(controls.at(-1)).toEqual({
+              status: 400,
+              body: { error: 'tool_confirmation_rejected' },
+            });
+            if (previousCall) await confirm(previousCall, 'allow', false);
+            expect(loop.hasPendingApproval(call)).toBe(true);
+            expect(existsSync(file)).toBe(false);
+            expect(
+              events().some(
+                (e) =>
+                  e.kind === 'agent.turn_completed' && payloadJson(e).source_event_id === user.id,
+              ),
+            ).toBe(false);
+            await confirm(call, verdict, true);
+            previousCall = call;
+          }
+          await waitFor(
+            () =>
+              events().some(
+                (e) =>
+                  e.kind === 'agent.turn_completed' && payloadJson(e).source_event_id === user.id,
+              ),
+            10_000,
+          );
+          const result = events().find(
+            (e) => e.kind === 'agent.tool_result' && payloadJson(e).source_event_id === user.id,
+          );
+          expect(result).toBeDefined();
+          const allowed =
+            effective === 'always_allow' || (effective === 'always_ask' && verdict === 'allow');
+          expect(payloadJson(result!)).toMatchObject({
+            is_error: !allowed,
+            source_event_id: user.id,
+            ...(call ? { tool_use_id: call } : {}),
+          });
+          expect(loop.hasPendingApproval()).toBe(false);
+          expect(existsSync(file)).toBe(allowed);
+          if (allowed) expect(readFileSync(file, 'utf8')).toBe(verdict + '\n');
+          await confirm(
+            payloadJson(result!).tool_use_id as string,
+            allowed ? 'deny' : 'allow',
+            false,
+          );
+          expect(existsSync(file)).toBe(allowed);
+          const use = events().find(
+            (e) => e.kind === 'agent.tool_use' && payloadJson(e).source_event_id === user.id,
+          );
+          expect(use).toBeDefined();
+          expect(payloadJson(use!)).toMatchObject({ name: 'mcp__orca__bash' });
+          const terminal = events().find(
+            (e) => e.kind === 'agent.turn_completed' && payloadJson(e).source_event_id === user.id,
+          );
+          expect(terminal).toBeDefined();
+          expect(payloadJson(terminal!).turn_event_id).toBe(user.id);
+        }
+        expect(events().filter((e) => e.kind === 'agent.requires_action')).toHaveLength(
+          effective === 'always_ask' ? 2 : 0,
+        );
+        expect(events().filter((e) => e.kind === 'agent.turn_completed')).toHaveLength(2);
+        expect(events().filter((e) => e.kind === 'agent.tool_use')).toHaveLength(2);
+      } finally {
+        await loop.stop();
+        await bridge.stop();
+        await tunnel.stop();
+        await sandbox.destroy();
+      }
+    },
+    30_000,
+  );
+});
+
+// Real SDK and provider, local model HTTP fixture, in-process transcript/connector.
+// This exercises neither the public HTTP API nor the worker/WebSocket handshake.
+describe('runner client custom tools — SDK round trip', () => {
+  it.each(['none', 'waiting', 'result-persisted'] as const)(
+    'isolates callbacks across turns and reconnects (disconnect=%s)',
+    async (reconnect) => {
+      const disconnect = reconnect !== 'none';
+      const api = await createResponsesFixture({
+        sessionId: SESSION_ID,
+        callTool: true,
+        toolName: 'lookup_ticket',
+        toolArguments: { ticket_id: 'T1' },
+      });
+      const store = new InMemoryTranscriptStore();
+      const registry = new TunnelRegistry();
+      const providers = new ProviderRegistry();
+      registerCodexSdkProvider(providers, {
+        apiKey: api.apiKey,
+        baseUrl: api.url,
+        workerArgs: [
+          fileURLToPath(
+            new URL(
+              '../../../session-runner/dist/harness/codex-sdk/worker-entry.js',
+              import.meta.url,
+            ),
+          ),
+        ],
+      });
+      const loop = new SessionLoop({
+        workspaceId: WORKSPACE_ID,
+        providers,
+        sandboxRuntime: new InMemorySandboxRuntime(),
+      });
+      const dispatcher = new RouteDispatcher();
+      registerSessionHandlers(dispatcher, loop);
+      const controls: Array<{
+        epoch: number;
+        eventId: string;
+        callId: string;
+        sessionId: string;
+        status: number;
+        body: Record<string, unknown>;
+      }> = [];
+      const connect = (epoch: number) => {
+        let session: RegistrySession;
+        return serveTunnel({
+          registryRunnerUrl: 'http://custom-tool-fixture',
+          runnerId: RUNNER_ID,
+          bindingToken: 'fixture',
+          runnerVersion: 'fixture',
+          dispatcher: {
+            async dispatch(request, signal) {
+              const response = await dispatcher.dispatch(request, signal);
+              if (request.path !== RUNNER_CUSTOM_TOOL_RESULT_PATH) return response;
+              const chunks: Uint8Array[] = [];
+              for await (const chunk of response.body) chunks.push(chunk);
+              const body = Buffer.concat(chunks);
+              const input = JSON.parse(Buffer.from(request.body).toString('utf8'));
+              controls.push({
+                epoch,
+                eventId: input.id,
+                callId: input.custom_tool_use_id,
+                sessionId:
+                  request.headers.find(([name]) => name === RUNNER_SESSION_HEADER)?.[1] ?? '',
+                status: response.status,
+                body: JSON.parse(body.toString('utf8')),
+              });
+              return {
+                ...response,
+                body: (async function* () {
+                  yield body;
+                })(),
+              };
+            },
+          },
+          connector: {
+            async connect() {
+              return {
+                async receive() {
+                  const data = await session.outboundQueue.get();
+                  return data === null
+                    ? { type: 'close' as const, code: 1000, reason: 'fixture closed' }
+                    : { type: 'text' as const, data };
+                },
+                async sendText(raw) {
+                  const frame = decodeFrame(raw);
+                  if (frame.kind === FrameKind.Hello) {
+                    session = registry.register(
+                      RUNNER_ID,
+                      new RunnerSocket(() => {
+                        throw new Error('Serve loop consumes the outbound queue directly');
+                      }),
+                      frame,
+                      { owner: WORKSPACE_ID },
+                    );
+                  } else if (!registry.routeResponseFrame(RUNNER_ID, frame)) {
+                    throw new Error('Unrouted runner response');
+                  }
+                },
+                closeSocket() {
+                  registry.deregister(RUNNER_ID);
+                },
+              };
+            },
+          },
+        });
+      };
+      let epoch = 0;
+      let tunnel = connect(epoch);
+      let releaseCheckpoint = () => {};
+      let checkpointGate = Promise.resolve();
+      const saveHarnessState = vi.fn(async (_state: unknown) => {
+        await checkpointGate;
+      });
+      const bridge = new SessionEventBridge({
+        workspaceId: WORKSPACE_ID,
+        sessionId: SESSION_ID,
+        runnerId: RUNNER_ID,
+        store,
+        registry,
+        saveHarnessState,
+      });
+      const snapshot = Buffer.from(
+        JSON.stringify({
+          provider: 'codex-sdk',
+          model: { provider: 'openai', id: 'gpt-5.4' },
+          system: 'Call lookup_ticket exactly once for the requested ticket. Wait for its result.',
+          allowed_tool_names: ['lookup_ticket'],
+          allowed_mcp_server_names: [],
+          custom_tools: [
+            {
+              name: 'lookup_ticket',
+              description: 'Look up a ticket on the client',
+              input_schema: {
+                type: 'object',
+                properties: { ticket_id: { type: 'string' } },
+                required: ['ticket_id'],
+              },
+            },
+          ],
+          egress: { mode: 'gateway' },
+          default_tool_permission: 'always_deny',
+        }),
+      );
+      const events = () => store.snapshot(WORKSPACE_ID, SESSION_ID);
+      const expectControl = async (eventId: string, callId: string, resolved: boolean) => {
+        const matches = () => controls.filter((c) => c.epoch === epoch && c.eventId === eventId);
+        await waitFor(() => matches().length > 0);
+        expect(matches()).toEqual([
+          {
+            epoch,
+            eventId,
+            callId,
+            sessionId: SESSION_ID,
+            status: 200,
+            body: { ok: true, resolved },
+          },
+        ]);
+      };
+      const result = async (id: string, resolved: boolean, text = 'WRONG') => {
+        const eventId = await appendCustomResult(store, id, {
+          content: [{ type: 'text', text }],
+          is_error: false,
+        });
+        await expectControl(eventId, id, resolved);
+      };
+      try {
+        await loop.applySnapshot(SESSION_ID, snapshot);
+        bridge.start();
+        let previous: string | undefined;
+        for (let generation = 0; generation < 2; generation++) {
+          const user = await appendUserMessage(store, 'Use lookup_ticket to look up ticket_id T1.');
+          const turnEvents = () =>
+            events().filter((e) => payloadJson(e).source_event_id === user.id);
+          await waitFor(() => turnEvents().some((e) => e.kind === 'agent.custom_tool_use'), 20_000);
+          const call = turnEvents().find((e) => e.kind === 'agent.custom_tool_use')!;
+          expect(call.sessionId).toBe(SESSION_ID);
+          expect(payloadJson(call)).toMatchObject({
+            id: call.id,
+            name: 'lookup_ticket',
+            input: { ticket_id: 'T1' },
+            source_event_id: user.id,
+          });
+          expect(call.id).not.toBe(previous);
+          expect(JSON.stringify(api.requests[0])).toContain('lookup_ticket');
+          expect(JSON.stringify(api.requests[0])).toContain(
+            'Use lookup_ticket to look up ticket_id T1.',
+          );
+          await result('evt_wrong', false);
+          if (previous) await result(previous, false, 'STALE');
+          const wrongSession = await new TunnelTransport(registry, RUNNER_ID).handleRequest({
+            method: 'POST',
+            path: RUNNER_CUSTOM_TOOL_RESULT_PATH,
+            headers: [[RUNNER_SESSION_HEADER, 'ses_other']],
+            body: Buffer.from(
+              JSON.stringify({
+                type: 'user.custom_tool_result',
+                custom_tool_use_id: call.id,
+                content: [],
+              }),
+            ),
+          });
+          expect(wrongSession.status).toBe(403);
+          for await (const _chunk of wrongSession.stream) {
+            /* drain the tunnel response */
+          }
+          expect(api.requests).toHaveLength(1);
+          expect(turnEvents().some((e) => e.kind === 'agent.turn_completed')).toBe(false);
+          expect(events().filter((e) => e.kind === 'agent.requires_action')).toEqual([]);
+          expect(turnEvents().find((e) => e.kind === 'session.status_idle')).toBeDefined();
+          expect(
+            payloadJson(turnEvents().find((e) => e.kind === 'session.status_idle')!),
+          ).toMatchObject({
+            stop_reason: { type: 'requires_action', event_ids: [call.id] },
+          });
+          if (disconnect && generation === 0) {
+            // Legacy SDK continuation is retired on reconnect/snapshot refresh.
+            // Recovery must report abandonment, never rerun or accept its result.
+            await tunnel.stop();
+            await bridge.stop();
+            let persistedResult: string | undefined;
+            if (reconnect === 'result-persisted') {
+              persistedResult = await appendCustomResult(store, call.id, {
+                content: [{ type: 'text', text: 'STALE persisted before reconnect' }],
+                is_error: false,
+              });
+            }
+            const beforeReconnect = events();
+            await loop.applySnapshot(SESSION_ID, snapshot);
+            tunnel = connect(++epoch);
+            bridge.start();
+            await waitFor(() => events().some((e) => e.kind === 'session.error'));
+            expect(payloadJson(events().find((e) => e.kind === 'session.error')!)).toMatchObject({
+              error: { type: 'custom_tool_callback_abandoned' },
+            });
+            if (persistedResult) await expectControl(persistedResult, call.id, false);
+            await waitFor(() =>
+              events().some(
+                (e) =>
+                  e.kind === 'agent.turn_completed' && payloadJson(e).turn_event_id === user.id,
+              ),
+            );
+            expect(events().slice(0, beforeReconnect.length)).toEqual(beforeReconnect);
+            expect(
+              events()
+                .slice(beforeReconnect.length)
+                .map((e) => e.kind),
+            ).toEqual(['session.error', 'session.status_idle', 'agent.turn_completed']);
+            await result(call.id, false);
+            expect(api.requests).toHaveLength(1);
+          } else {
+            const marker = `ticket T1: result for turn ${generation}`;
+            checkpointGate = new Promise<void>((resolve) => {
+              releaseCheckpoint = resolve;
+            });
+            const accepted = await appendCustomResult(store, call.id, {
+              content: [{ type: 'text', text: marker }],
+              is_error: false,
+            });
+            const duplicate = await appendCustomResult(store, call.id, {
+              content: [{ type: 'text', text: 'DUPLICATE' }],
+              is_error: false,
+            });
+            await expectControl(accepted, call.id, true);
+            await expectControl(duplicate, call.id, false);
+            await waitFor(() => api.requests.length === 2, 20_000);
+            expect(turnEvents().some((e) => e.kind === 'agent.turn_completed')).toBe(false);
+            const outputs = (api.requests[1]!.input as Array<Record<string, unknown>>).filter(
+              (item) => item.type === 'function_call_output',
+            );
+            expect(JSON.stringify(outputs.at(-1)?.output)).toContain(marker);
+            expect(JSON.stringify(outputs.at(-1)?.output)).not.toMatch(/STALE|DUPLICATE|WRONG/);
+            releaseCheckpoint();
+            await waitFor(
+              () => turnEvents().some((e) => e.kind === 'agent.turn_completed'),
+              20_000,
+            );
+            expect(api.requests).toHaveLength(2);
+            expect(JSON.stringify(api.requests[1]!.input)).toContain(marker);
+            expect(JSON.stringify(api.requests[1]!.input)).not.toContain('STALE');
+            expect(
+              JSON.stringify(
+                turnEvents()
+                  .filter((e) => e.kind === 'agent.message')
+                  .map(payloadJson),
+              ),
+            ).toContain('SDK reply');
+            await result(call.id, false, 'DUPLICATE');
+            expect(api.requests).toHaveLength(2);
+          }
+          expect(turnEvents().filter((e) => e.kind === 'agent.custom_tool_use')).toHaveLength(1);
+          const terminals = events().filter(
+            (e) => e.kind === 'agent.turn_completed' && payloadJson(e).turn_event_id === user.id,
+          );
+          expect(terminals).toHaveLength(1);
+          previous = call.id;
+          if (generation === 0) {
+            // The fixture calls the tool on request 1; re-arm it for the next turn.
+            api.requests.splice(0);
+          }
+        }
+        expect(events().filter((e) => e.kind === 'agent.custom_tool_use')).toHaveLength(2);
+        expect(events().filter((e) => e.kind === 'agent.turn_completed')).toHaveLength(2);
+        expect(controls.filter((c) => c.body.resolved === true)).toHaveLength(disconnect ? 1 : 2);
+        expect(saveHarnessState).toHaveBeenCalledTimes(disconnect ? 1 : 2);
+        expect(events().filter((e) => e.kind === 'session.error')).toHaveLength(disconnect ? 1 : 0);
+        expect(events().filter((e) => e.kind === 'agent.error')).toEqual([]);
+        expect(new Set(events().map((e) => e.id)).size).toBe(events().length);
+      } finally {
+        releaseCheckpoint();
+        await loop.stop();
+        await bridge.stop();
+        await tunnel.stop();
+        await api.close();
+      }
+    },
+    60_000,
+  );
+});
 
 // ── 1. user-event tail → runner turn request ──
 
@@ -3720,18 +4296,21 @@ it.each(['disconnect', 'shutdown'] as const)(
   },
 );
 
+let customResultCounter = 0;
+
 async function appendCustomResult(
   store: TranscriptStore,
   id: string,
   extra: Record<string, unknown> = {},
-): Promise<void> {
-  await store.append(WORKSPACE_ID, SESSION_ID, [
+): Promise<string> {
+  const [eventId] = await store.append(WORKSPACE_ID, SESSION_ID, [
     httpEventToProto({
       workspaceId: WORKSPACE_ID,
       sessionId: SESSION_ID,
       producedBy: 'client',
       idempotencyKey: '',
       input: {
+        id: `evt_custom_result_${++customResultCounter}`,
         type: 'user.custom_tool_result',
         custom_tool_use_id: id,
         content: [{ type: 'text', text: 'ticket' }],
@@ -3740,6 +4319,7 @@ async function appendCustomResult(
       },
     }),
   ]);
+  return eventId!;
 }
 
 describe('custom callback control delivery and recovery', () => {
