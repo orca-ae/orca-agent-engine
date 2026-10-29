@@ -986,6 +986,9 @@ importers:
       '@orca/codex-harness':
         specifier: workspace:*
         version: link:../../packages/codex-harness
+      '@orca/dsh-harness':
+        specifier: workspace:*
+        version: link:../../packages/dsh-harness
       '@orca/guardrails':
         specifier: workspace:*
         version: link:../../packages/guardrails

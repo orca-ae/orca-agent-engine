@@ -1,13 +1,14 @@
 // Copyright The Orca Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { InMemorySandboxRuntime } from '../../src/in-memory/runtime.js';
 import {
   LocalSandboxRuntime,
+  asLocalSandboxHandle,
   type SandboxManagerInitConfig,
   type SandboxManagerLike,
 } from '../../src/local/runtime.js';
@@ -159,6 +160,48 @@ function withTimeout<T>(p: Promise<T>, ms: number, message: string): Promise<T> 
     new Promise<T>((_, reject) => setTimeout(() => reject(new Error(message)), ms)),
   ]);
 }
+
+it('Local spawn drains large wrapper and command stderr, preserves stdout and releases resources', async () => {
+  const baseDir = mkdtempSync(join(tmpdir(), 'orca-spawn-stderr-'));
+  const releaseSandboxCommand = vi.fn(async (_command: string) => {});
+  // Real child processes with a fake wrapper: this checks pipe handling, not SRT confinement.
+  const noisy = `'${process.execPath}' -e 'require("node:fs").writeSync(2, Buffer.alloc(4 * 1024 * 1024))'`;
+  const manager: SandboxManagerLike = {
+    initialize: async () => {},
+    wrapWithSandbox: async (command) => `${noisy}; ${command}`,
+    releaseSandboxCommand,
+  };
+  const runtime = new LocalSandboxRuntime({
+    harnessWorkDir: baseDir,
+    allowedNetworkHosts: [],
+    manager,
+  });
+  const sandbox = await runtime.acquire({});
+  const root = asLocalSandboxHandle(sandbox).rootDir();
+  const child = await sandbox.spawn!(`${noisy}; printf completed`);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let exited = false;
+  try {
+    const [stdout, exit] = await Promise.race([
+      Promise.all([collect(child.stdout), child.exited]),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('stderr pipe stalled')), 5000);
+      }),
+    ]);
+    exited = true;
+    expect(stdout).toBe('completed');
+    expect(exit).toEqual({ code: 0, signal: null });
+    expect(releaseSandboxCommand).toHaveBeenCalledOnce();
+    await sandbox.destroy();
+    expect(existsSync(root)).toBe(false);
+  } finally {
+    clearTimeout(timer);
+    if (!exited) child.kill('SIGKILL');
+    await child.exited;
+    await sandbox.destroy();
+    rmSync(baseDir, { recursive: true, force: true });
+  }
+}, 10000);
 
 /**
  * spawn honors the destroyed guard the same way `run` does.

@@ -78,6 +78,14 @@ export const LLM_PROXY_AUDIENCE = 'llm-proxy';
  */
 export const DEFAULT_LLM_PROXY_JWT_TTL_SECS = 120;
 
+/** Trusted records used to bind a dormant DSH credential, independent of JWT decoding. */
+export interface DshCredentialContext {
+  orgId: string;
+  agentId: string;
+  guardrailIds: string[];
+  runtimeConfigRevision: string | undefined;
+}
+
 /** Env vars the GitHub CLI reads — injected for a token-scheme GitHub-API binding. */
 const GH_TOKEN_ENV_VARS = ['GH_TOKEN', 'GITHUB_TOKEN'] as const;
 
@@ -403,6 +411,71 @@ export class AgentSnapshotResolver {
       snapshot.guardrail_state = context.state;
     }
     return snapshot;
+  }
+
+  /** Dormant DSH issuer; does not admit or prepare a self-hosted execution. */
+  async mintSelfHostedDshCredential(
+    sessionId: string,
+  ): Promise<{ token: string; expiresAt: number; context: DshCredentialContext }> {
+    const session = await this.loader.loadSession(sessionId);
+    if (!session || session.id !== sessionId || !session.environmentId) {
+      throw new Error('DSH credential binding missing');
+    }
+    const environment = await this.loader.loadEnvironment(session.environmentId);
+    const agent =
+      session.agentVersion !== undefined
+        ? await this.loader.loadAgentVersion?.(
+            session.workspaceId,
+            session.agentId,
+            session.agentVersion,
+          )
+        : await this.loader.loadAgent(session.workspaceId, session.agentId);
+    if (!agent || agent.id !== session.agentId) throw new Error('DSH credential agent missing');
+    const selection = resolveHarnessAnnotation(agent.metadata);
+    if (
+      environment?.target !== 'self_hosted' ||
+      environment.id !== session.environmentId ||
+      (environment.egressMode !== null && environment.egressMode !== 'gateway') ||
+      'error' in selection ||
+      selection.harness !== 'dsh_sdk' ||
+      selection.mode !== 'colocated'
+    )
+      throw new Error('DSH credential requires self-hosted colocated gateway binding');
+    const model = normalizeModelForStorage(
+      session.agentOverrides?.model ?? agent.model,
+      agent.model.provider,
+    );
+    if ('error' in model || model.provider !== 'deepseek' || model.id !== 'deepseek-v4-flash') {
+      throw new Error('DSH credential requires pinned DeepSeek model');
+    }
+    const grants = dshLlmGrants(this.llmPolicy, model);
+    if (!grants || !this.gatewayLlmUrl) throw new Error('DSH credential gateway policy denied');
+    const context: DshCredentialContext = {
+      orgId: session.organizationId,
+      agentId: agent.id,
+      guardrailIds: [...new Set([...(session.guardrailIds ?? []), ...(agent.guardrailIds ?? [])])],
+      runtimeConfigRevision:
+        session.runtimeRevision !== undefined ? String(session.runtimeRevision) : undefined,
+    };
+    // The first profile has no MCP token or infrastructure/provider grants.
+    const credential = await this.minter.mint(
+      {
+        org_id: context.orgId,
+        workspace_id: session.workspaceId,
+        session_id: session.id,
+        agent_id: context.agentId,
+        guardrail_ids: context.guardrailIds,
+        ...(context.runtimeConfigRevision !== undefined
+          ? { runtime_config_revision: context.runtimeConfigRevision }
+          : {}),
+        mcp_server_names: [],
+        vault_ids: [],
+        credential_ids: [],
+        ...grants,
+      },
+      { audience: 'ai-gateway', ttlSecs: 720 },
+    );
+    return { ...credential, context };
   }
 
   /**

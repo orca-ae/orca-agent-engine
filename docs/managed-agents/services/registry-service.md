@@ -1750,6 +1750,47 @@ Client disconnect aborts the upstream call. Unexpected statuses, encodings, cont
 types and upstream failures produce a fixed error without upstream bytes or headers.
 Successful responses carry the Git binary content type and `Cache-Control: no-store`.
 
+### Dormant DSH credential handoff
+
+Registry contains dormant DSH credential methods, without a production caller or
+self-hosted DSH admission. `AgentSnapshotResolver.mintSelfHostedDshCredential` checks the
+Session-pinned colocated DSH binding, self-hosted gateway Environment and deployment ACL,
+then signs one `aud=ai-gateway` JWT with exactly 720 seconds of lifetime, route
+`llm-pi-deepseek-anthropic-messages` and model `deepseek-v4-flash`. MCP, Vault and
+credential grants are empty. The resolver also returns trusted organization, Agent,
+deduplicated Session/Agent guardrail IDs and runtime revision context from the loaded
+records, independently of JWT decoding. The ordinary resolver, cloud issuer and Pi lifetimes are
+unchanged. This method issues credentials only; it does not prepare tools or a sandbox.
+
+`SessionSnapshotDelivery.deliverDshCredentials` is an explicit internal entry point.
+Both requests use `POST /v1/runner/snapshot`, the existing Session header and NDJSON.
+The provisional request contains the snapshot, its sole LLM JWT and top-level
+`credential_handoff` with `phase: provisional`, random `handoff_id`, SHA-256
+`token_digest` (lowercase hex of the JWT UTF-8 bytes), `workspace_id`, `session_id`,
+`execution_id` and integer `expires_at_ms`. The credential-only second request contains
+only `credential_handoff`, with the same binding, `phase: confirmed` and integer
+`remaining_at_anchor_ms` instead of expiry. Each response must be a complete 2xx JSON
+body of at most 4096 bytes containing exactly `phase: acknowledged` and the same five
+binding fields. An empty 2xx response does not acknowledge either step.
+
+The delivery pins the tunnel generation and checks the caller's ownership predicate
+after asynchronous operations and before each send. It validates the signed token's
+scope, identity and expiry before transmission: organization, Agent, guardrail IDs
+and runtime revision must match the caller's explicit trusted resolver context; Git
+repository/proxy grants are rejected. Both `iat` and `exp` must be safe integers with
+exactly 720 seconds between them. Confirmation subtracts the entire
+first request/ACK round trip from the expiry at the original Registry wall-time
+anchor, measured with `performance.now()`. Wall-time and monotonic elapsed time may
+differ by at most 1000 ms for clock sampling and slew; a larger jump rejects delivery.
+Gateway skew and that tolerance consume the profile's 60-second safety margin.
+Registry requires at least 660,000 ms remaining before either send and after the final
+ACK. Both requests share one absolute deadline at the original remaining lifetime
+minus 660,000 ms; waiting for either response head or complete ACK body consumes
+that same window. Expiry cancels the pending request and releases its request slot,
+even while the tunnel remains healthy. Failed handoffs return undelivered; another
+attempt uses a fresh ID. These
+Registry checks do not establish a runner monotonic anchor or authorize execution.
+
 ### Runner resource checkpoint protocol
 
 For self-hosted `codex_sdk` or `pi_sdk` with `mode: colocated`, the Registry prepares the session's File,

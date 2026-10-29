@@ -133,6 +133,12 @@ function lastCustomDeps(): Record<string, unknown> {
 }
 
 describe('defaultRegisterProviders — claude + mock provider wiring', () => {
+  it('does not advertise the dormant DSH bootstrap provider', () => {
+    const registry = new ProviderRegistry();
+    defaultRegisterProviders(registry, baseConfig(), new InMemoryTranscriptStore());
+    expect(registry.providerNames()).not.toContain('dsh-sdk');
+  });
+
   beforeEach(() => {
     registerClaudeProvider.mockClear();
     registerClaudePersistentProvider.mockClear();

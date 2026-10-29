@@ -66,7 +66,8 @@ import type {
   code/signal and rejects on spawn failure). Use this when a transport needs
   to keep a process attached (write to stdin, consume streamed stdout)
   instead of buffering to completion. InMemory spawns on the host; Local
-  wraps the command with the `srt` sandbox profile first.
+  wraps the command with the `srt` sandbox profile first and drains wrapper and
+  command stderr, which is not exposed by the handle.
 - `files` — `write` / `read` / `list` / `delete`.
 - `runPrivileged?` — `sudo`-elevated command. **Optional**: absence is the
   feature-detection signal, and both runtimes in this package omit it (no

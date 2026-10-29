@@ -59,6 +59,11 @@ runner shell and the credential-free snapshot selects the harness.
 Adding a provider is a `register*Provider` call, nothing more. **The session loop never branches on
 the provider name** — if a change needs it to, the seam is in the wrong place.
 
+`harness/dsh-sdk` is a dormant bootstrap seam, deliberately omitted from this default
+registration/hello list. Its explicit registration still rejects `start` and `submit`.
+The separate Local+SRT initialization probe exposes no model turn or tools; do not treat
+its source presence or a successful process fixture as an execution capability.
+
 Every native-CLI provider reaches Orca's real tools through one bridge
 (`src/mcp/native-cli-bridge.ts`), exposed to the CLI as its `orca` MCP server, and routes the CLI's
 own approval request to the one transcript-backed gate in `src/tool-confirmation.ts`. Do not add a
