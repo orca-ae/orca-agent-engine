@@ -92,6 +92,44 @@ tool event remains the sole event producer. `spawn_bounds` counts cumulative `sp
 dispatches per turn, not concurrent children. Stateful tool-call rules other than this adapter,
 the `headless_subagent_purpose_guard` and all `tool_result` rules are rejected for DSH.
 
+DSH registers `list_child_sessions` and `read_child_session` alongside native delegation.
+Both use the existing private authorization and policy path. The executing agent can inspect
+only descendants in its current root's declared lineage, never its ancestors, siblings or
+another Session. An active ancestor can read retained history of an archived descendant;
+an archived caller cannot query. Inspection neither sends messages nor activates children.
+Each query produces one canonical tool-use/result pair. Child records embedded in the result
+remain data and do not create new child events, model usage or exporter spans.
+
+List returns known descendant IDs, state and history availability in stable creation order.
+Read returns child-owned input, visible text, tool calls/results and lifecycle records from
+an attached native Session, with `history_source: live`. Inherited fork context, reasoning,
+hidden instructions and private runtime fields are excluded. Native settlement disposes child
+handles, so completed children can already have unavailable history without a restart. After
+root recovery, catalog children without attached Sessions are likewise `dormant` with unavailable
+history and no inferred stop reason. Normal child execution can attach the Session for the
+duration of that activation; inspection itself cannot. Unknown and
+unauthorized IDs share one denial, while authorized unavailable history has an explicit reason:
+`source_not_attached` for an absent Session, or `source_too_large` above the event cap. These
+tools support in-flight inspection; receiving a normal completion notification does not grant
+access to the completed transcript. A detached child is `dormant`, with `last_stop_reason`
+only while the current submit retains its native turn-end reason. The next submit clears that
+evidence; completing a turn does not establish conversation termination. Detach before read
+returns unavailable, including with an old continuation. Detach or replacement during
+observation returns a bounded source-changed error without reading through a cold fallback.
+
+History acquisition is limited to 65,536 raw events, including inherited fork events, before
+the observation's reference array is materialized. Each page scans at most 200 raw records and
+returns at most 50 records within 32 KiB of serialized UTF-8 JSON. Projection and filtering
+share a 65,536 UTF-16-code-unit and 4,096-node work budget, with maximum depth 32. Required
+metadata is reserved first; optional labels use only the remainder after records. A record
+that encounters an already-consumed page's limit is deferred to the next page. A record too
+large for a fresh page becomes a marked preview; that continuation does not recover the omitted
+content. `original_bytes` is null when exact measurement exceeds the work budget.
+Continuations identify the source generation and position, not a cross-page snapshot. Appends
+preserve live cursors; Session replacement or restart requires a fresh read. Catalog rebuilds
+likewise invalidate list cursors. Query leases are disposed after each read. These limits apply
+to model inspection, not existing checkpoint or recovery loading.
+
 DSH executable tools require `supportsPerCallCancellation`; OpenSandbox implements this through
 execd execution IDs, interrupt requests and bounded exit-status confirmation. The host propagates
 per-call signals and selects only the interrupted subtree. A 10-second backend cleanup deadline

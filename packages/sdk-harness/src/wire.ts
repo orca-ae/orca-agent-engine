@@ -78,7 +78,13 @@ export type WorkerEvent =
   | {
       type: 'orchestration_request';
       id: string;
-      name: 'spawn' | 'fork' | 'send_message' | 'interrupt_agent';
+      name:
+        | 'spawn'
+        | 'fork'
+        | 'send_message'
+        | 'interrupt_agent'
+        | 'list_child_sessions'
+        | 'read_child_session';
       arguments: Record<string, unknown>;
       origin: WorkerEventOrigin;
     }
