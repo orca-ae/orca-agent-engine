@@ -12,6 +12,41 @@
 > [`../harness-modes.md`](../harness-modes.md),
 > [`../deployment-topologies.md`](../deployment-topologies.md).
 
+## Dormant DSH bootstrap
+
+The runner source contains an explicit, non-default `dsh-sdk` bootstrap provider.
+It is absent from the default provider registry and tunnel hello. Even when
+explicitly registered, its `start` and `submit` reject execution; it has no
+credential handoff, report retention or DSH completion authority. Registry/catalog
+self-hosted admission remains unchanged.
+
+Bootstrap validation accepts only DeepSeek `deepseek-v4-flash` through a scoped
+Gateway origin. It rejects remote MCP, custom tools, Skills, rosters, guardrails,
+resource placement and native checkpoint restore. Enabled `web_fetch` requires
+effective `always_deny`; unknown tools are rejected even when denied. An empty
+tool allowlist stays empty.
+
+The separate `probeDshSandboxBootstrap` initializes and retires the packaged
+`orca-managed` profile without submitting a model turn or exposing tools. It
+requires Linux amd64, Node 22.23.2, a non-root account, installed SRT npm 0.0.50,
+bubblewrap, and an actual Local runtime; an in-memory fallback is rejected.
+It validates the pinned DSH/Cordis/pi-ai dependencies, grants read-only access
+to the installed runtime/dependency paths, and uses Local `spawn` with a private
+native home/history and an explicit `env -i` launch environment.
+The private home is inside the workspace and is used only with `tools: []`. The
+launch asserts that the worker cwd equals the acquired host root; Local virtual
+`/` maps to that root. Local spawn drains both wrapper and command stderr.
+Execution uses the pinned npm `SandboxManager`; the PATH `srt` check establishes
+CLI availability for runner selection, not its version equivalence to npm.
+The probe removes the workdir only after successful worker cleanup. If cleanup
+fails, it preserves the directory; concurrent initialization and cleanup errors
+are retained together in an `AggregateError`.
+
+The DSH library's optional stdio/exit/kill launch injection preserves the cloud
+default Node process launch. Bootstrap initialization fixtures do not establish
+Linux isolation, mapped File/tool behavior, per-call cancellation, physical
+retirement or self-hosted execution qualification.
+
 ## Native File completion capability
 
 The negotiated `session_sandbox` placement and completion version 1 support the

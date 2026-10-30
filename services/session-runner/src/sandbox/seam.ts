@@ -42,6 +42,7 @@
 
 import { execFileSync } from 'node:child_process';
 export { SandboxManager } from '@orca/sandbox-runtime';
+export { LocalSandboxRuntime } from '@orca/sandbox-runtime';
 import {
   InMemorySandboxRuntime,
   LocalSandboxRuntime,

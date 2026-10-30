@@ -1,7 +1,8 @@
 // Copyright The Orca Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { spawn } from 'node:child_process';
+import type { Readable, Writable } from 'node:stream';
 import { createRequire } from 'node:module';
 import { mkdtemp, mkdir, cp, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -28,8 +29,58 @@ import {
 } from './orchestration.js';
 import { archivedSubpaths, assertNotArchived } from './archive.js';
 
+export interface DshLaunchInput {
+  executable: string;
+  args: string[];
+  cwd: string;
+  env: Record<string, string>;
+}
+
+export interface DshProcess {
+  stdout: Readable;
+  stdin: Writable;
+  exited: Promise<unknown>;
+  kill(signal: NodeJS.Signals): void;
+}
+
+export interface DshWorkerLaunchOptions {
+  launch: (input: DshLaunchInput) => Promise<DshProcess>;
+  /** Private writable history root visible inside the supplied sandbox. */
+  homeRoot: string;
+}
+
+async function launchLocal(input: DshLaunchInput): Promise<DshProcess> {
+  const child = spawn(input.executable, input.args, {
+    cwd: input.cwd,
+    detached: process.platform !== 'win32',
+    env: input.env,
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  child.stderr.resume();
+  const exited = new Promise<void>((resolve, reject) => {
+    child.once('error', reject);
+    child.once('exit', () => resolve());
+  });
+  void exited.catch(() => {});
+  return {
+    stdout: child.stdout,
+    stdin: child.stdin,
+    exited,
+    kill(signal) {
+      try {
+        if (process.platform === 'win32') child.kill(signal);
+        else if (child.pid) process.kill(-child.pid, signal);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'EPERM') child.kill(signal);
+        else if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+      }
+    },
+  };
+}
+
 export class DshSdkWorker implements SdkWorker {
-  private child: ChildProcessWithoutNullStreams | undefined;
+  private child: DshProcess | undefined;
+  private childExited = false;
   private rpc: JsonRpcLineTransport | undefined;
   private home: string | undefined;
   private input?: DshStartCommand;
@@ -46,7 +97,10 @@ export class DshSdkWorker implements SdkWorker {
     { resolve: (value: unknown) => void; subpath: string; authorization: boolean }
   >();
   private parents = new Map<string, string>();
-  constructor(private readonly emit: (event: DshWorkerEvent) => void) {}
+  constructor(
+    private readonly emit: (event: DshWorkerEvent) => void,
+    private readonly launchOptions?: DshWorkerLaunchOptions,
+  ) {}
 
   async handle(
     command: DshWorkerCommand & { sourceEventId?: string; threadId?: string },
@@ -211,7 +265,7 @@ export class DshSdkWorker implements SdkWorker {
     }
     this.input = input;
     const require = createRequire(import.meta.url);
-    this.home = await mkdtemp(join(tmpdir(), 'orca-dsh-'));
+    this.home = await mkdtemp(join(this.launchOptions?.homeRoot ?? tmpdir(), 'orca-dsh-'));
     const profile = join(this.home, 'profiles/orca-managed');
     await cp(
       dirname(require.resolve('@orca/dsh-harness/profile/orca-managed/package.json')),
@@ -242,9 +296,10 @@ export class DshSdkWorker implements SdkWorker {
     if (installed.version !== DSH_SDK_VERSION)
       throw new Error('Incompatible installed DSH runtime');
     const cli = require.resolve('@deepseek-ai/dsh/lib/bin.js');
-    const child = spawn(process.execPath, [cli, '--profile', 'orca-managed'], {
+    const child = await (this.launchOptions?.launch ?? launchLocal)({
+      executable: process.execPath,
+      args: [cli, '--profile', 'orca-managed'],
       cwd: input.root,
-      detached: process.platform !== 'win32',
       env: {
         PATH: process.env.PATH ?? '',
         HOME: this.home,
@@ -252,10 +307,8 @@ export class DshSdkWorker implements SdkWorker {
         DSH_TELEMETRY_DISABLED: '1',
         ORCA_DSH_SYSTEM: input.system,
       },
-      stdio: ['pipe', 'pipe', 'pipe'],
     });
     this.child = child;
-    child.stderr.resume(); // Never copy native history or credentials into public events.
     const stream = child.stdout.pipe(boundedLines());
     this.rpc = new JsonRpcLineTransport(stream, child.stdin);
     const rpc = this.rpc;
@@ -263,12 +316,14 @@ export class DshSdkWorker implements SdkWorker {
       rpc.close();
       void this.reap();
     });
-    child.on('error', () => rpc.close());
-    child.on('exit', () => {
+    const onExit = (): void => {
+      this.childExited = true;
       rpc.close();
       this.cancelTools();
       this.fatal = true;
-    });
+    };
+    // Observe settlement directly: an extra catch hop lets close() reap an already exited group.
+    void child.exited.then(onExit, onExit);
     rpc.onNotification((method, value) => {
       if (method !== 'orca.event') return;
       try {
@@ -486,23 +541,13 @@ export class DshSdkWorker implements SdkWorker {
     this.child = undefined;
     this.rpc?.close();
     this.rpc = undefined;
-    if (child && child.exitCode === null && child.signalCode === null) {
-      const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()));
-      const kill = (signal: NodeJS.Signals): void => {
-        try {
-          if (process.platform === 'win32') child.kill(signal);
-          else if (child.pid) process.kill(-child.pid, signal);
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code === 'EPERM') child.kill(signal);
-          else if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
-        }
-      };
-      kill('SIGTERM');
-      const timer = setTimeout(() => kill('SIGKILL'), 3000);
+    if (child && !this.childExited) {
+      child.kill('SIGTERM');
+      const timer = setTimeout(() => child.kill('SIGKILL'), 3000);
       try {
-        await exited;
+        await child.exited.catch(() => undefined);
         // A descendant can outlive the CLI or ignore TERM. Drain the owned group too.
-        kill('SIGKILL');
+        child.kill('SIGKILL');
       } finally {
         clearTimeout(timer);
       }

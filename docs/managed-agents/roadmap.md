@@ -28,6 +28,21 @@ and its row in the proposals index together.
 
 Each item is proposed as an OIP pull request; the design is reviewed there before the code lands.
 
+- **Self-hosted DSH credential consumer.** Trigger: connect the dormant
+  Registry credential issuer/handoff to self-hosted DSH preparation and dispatch.
+  Record runner monotonic M0 on the first provisional receipt and set expiry to
+  M0 + confirmed `remaining_at_anchor_ms`; confirmation must never reset M0. Add
+  a monotonic-anchor regression proving that confirmation transit, preparation and
+  dispatch consume that original deadline. Treat confirmed as armed, not permission
+  to execute: Registry must not dispatch if the confirmation ACK is lost or the
+  handoff otherwise fails. A new handoff or runner connection/execution generation
+  must invalidate old pending/armed state. Cover lost confirmation ACK and stale
+  state invalidation when implementing the consumer; no third commit phase is needed.
+- **DSH self-hosted tool visibility.** Before enabling tools beyond the dormant
+  bootstrap's `tools: []`, establish native home/history isolation from agent
+  workspace reads and writes. The current workspace-local home is not a private
+  boundary against enabled file or shell tools. Trigger: self-hosted DSH tool enablement.
+
 - **Child session inspection coverage.**
   The DSH reader lists descendants and reads bounded history from attached Session objects.
   Trigger for other readers: parent agents need the same verification on another runtime.

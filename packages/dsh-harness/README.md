@@ -6,6 +6,14 @@ Implements `SdkWorker`; the shared host adapter owns tools, approvals, usage and
 `DshSdkWorker` starts a private named profile with the published DSH CLI. The profile loads
 `@orca/dsh-harness/plugin`, not the default DSH application or native executable tools.
 Gateway Bearer credentials and the Orca Session header are refreshed through the worker API.
+The optional second constructor argument supplies a controlled `launch` callback and
+private writable `homeRoot`. The callback receives the executable, arguments, cwd and
+restricted environment, and returns Node stdio streams, an exit promise and a kill function.
+Launch failures propagate without a host-process fallback. Omitting the argument keeps
+the existing cloud Node process launch. `inspectDshInstallation` checks packaged runtime
+dependency pins and returns read-only installation paths for sandbox setup; this is
+dependency validation, not confinement or self-hosted execution qualification.
+
 Agent model.provider/id select from all chat models bundled with the official
 DSH llm-pi-ai plugin 0.2.1-alpha.2 and its pinned pi-ai 1.1.0 dependency. The
 legacy deepseek/deepseek-v4-flash adapter and route remain unchanged. Other selections

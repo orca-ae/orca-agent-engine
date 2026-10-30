@@ -1011,6 +1011,8 @@ class LocalSandboxHandle implements SandboxHandle {
         ...opts?.env,
       },
     });
+    // SpawnHandle exposes no stderr; drain the wrapper and command to prevent pipe stalls.
+    proc.stderr?.resume();
     // The 'error' listener is load-bearing: a spawn failure (nonexistent cwd,
     // EMFILE under fork pressure) with no listener is an unhandled 'error'
     // event that crashes the whole long-lived harness process. `exited` gives
