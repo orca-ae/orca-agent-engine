@@ -7,7 +7,7 @@ the gVisor sandbox.
 Chart renders:
 
 - `opensandbox` dataplane Namespace by default;
-- ConfigMap `opensandbox-server-gvisor-fuse-patch`, containing three patched
+- ConfigMap `opensandbox-server-gvisor-fuse-patch`, containing four patched
   OpenSandbox Python modules;
 - gVisor Pod `ValidatingAdmissionPolicy` and binding by default.
 
@@ -154,6 +154,10 @@ opensandbox-server:
       - name: opensandbox-server-gvisor-fuse-patch
         mountPath: /app/opensandbox_server/services/k8s/security_context.py
         subPath: security_context.py
+        readOnly: true
+      - name: opensandbox-server-gvisor-fuse-patch
+        mountPath: /app/opensandbox_server/services/k8s/status_helpers.py
+        subPath: status_helpers.py
         readOnly: true
     volumes:
       - name: opensandbox-server-gvisor-fuse-patch

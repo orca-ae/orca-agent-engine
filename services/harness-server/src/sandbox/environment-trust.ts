@@ -1,12 +1,14 @@
 // Copyright The Orca Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import type { Packages } from '../sandbox-runtime.js';
+import { normalizeEnvironmentPackages } from '@orca/sandbox-runtime';
+import type { Packages } from './sandbox-runtime.js';
 
 export interface SandboxEnvironmentTrustInput {
   mode: 'separate' | 'colocated';
   image?: string | null;
   packages?: Packages;
+  supportsEnvironmentPackages?: boolean;
 }
 
 /**
@@ -15,9 +17,9 @@ export interface SandboxEnvironmentTrustInput {
  * an image daemon can race setup from outside the agent's bubblewrap namespace.
  * In-sandbox execution therefore uses only the operator-owned catalog image.
  *
- * Environment package installers are rejected for every managed sandbox mode.
- * Install hooks execute before resource and Skill roots are sealed and can
- * leave a background process with the same race capability.
+ * Packages require provider-owned, isolated preparation. OpenSandbox runs
+ * installers in a credential-free init container and exposes their output
+ * only as an untrusted workload filesystem after that container terminates.
  */
 export function assertSandboxEnvironmentTrust(input: SandboxEnvironmentTrustInput): void {
   if (input.mode === 'colocated' && input.image !== undefined && input.image !== null) {
@@ -25,14 +27,7 @@ export function assertSandboxEnvironmentTrust(input: SandboxEnvironmentTrustInpu
       'custom in-sandbox images require a provider-sealed filesystem namespace and are not enabled',
     );
   }
-  if (!hasPackages(input.packages)) return;
-  throw new Error(
-    'managed sandbox execution does not allow environment package installers until filesystem sealing is available',
-  );
-}
-
-function hasPackages(packages: Packages | undefined): boolean {
-  return (
-    packages !== undefined && Object.values(packages).some((items) => (items?.length ?? 0) > 0)
-  );
+  if (Object.keys(normalizeEnvironmentPackages(input.packages)).length === 0) return;
+  if (input.supportsEnvironmentPackages === true) return;
+  throw new Error('sandbox runtime does not support isolated Environment package preparation');
 }

@@ -325,7 +325,7 @@ OpenSandbox Helm runtime coverage lives in
 [`e2e-stack.yml`](../../.github/workflows/e2e-stack.yml)'s
 `e2e-sandbox-harness` matrix. That job builds a clean Python base image from
 the pinned v0.2.2 source, installs `charts/opensandbox-patches` as its own Helm
-release, mounts all three ConfigMap modules through the upstream OpenSandbox
+release, mounts all four ConfigMap modules through the upstream OpenSandbox
 chart, and proves running files match ConfigMap. Job installs gVisor in Kind,
 creates `RuntimeClass/gvisor`, and verifies one contract: every sandbox Pod uses
 gVisor, adds only `SETFCAP` and `SYS_ADMIN`, contains no privileged/hostPath/host namespace/
@@ -424,7 +424,7 @@ requests its default `tail -f /dev/null`, which the patched server does not trus
 so sandbox acquisition fails.
 
 Install [`charts/opensandbox-patches`](../../charts/opensandbox-patches) beside
-the upstream OpenSandbox chart and mount its three ConfigMap keys over the
+the upstream OpenSandbox chart and mount its four ConfigMap keys over the
 server v0.2.2 Kubernetes provider modules. OpenSandbox config must set
 `secure_runtime.type=gvisor` and `secure_runtime.k8s_runtime_class=gvisor`.
 Every isolation request must match operator repository or exact-image trust
@@ -469,8 +469,12 @@ integrity: mutable tags are not cryptographic release verification, and the
 policy installs no signing infrastructure. See the
 [deployment policy and release configuration](../opensandbox/README.md#repository-and-exact-image-trust).
 
-Runtime package installation rejects before
-agent Bubblewrap. Pause/resume rejects before lifecycle or CR patch because Pod
+Environment packages install in a separate credential-free init container. Its
+bounded artifact volume is read-only in the main container, and only workload
+tool commands enter the prepared filesystem. Package preparation requires the
+matching Orca provider patch and sandbox images; an older provider or missing
+static boundary probe fails closed. See [package preparation](../opensandbox/README.md#provider-security-contract).
+Pause/resume rejects before lifecycle or CR patch because Pod
 reconstruction loses live mounts.
 
 AgentENV is an alternative external runtime:

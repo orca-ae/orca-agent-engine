@@ -119,6 +119,8 @@ export interface WritablePath {
 
 /** Immutable agent-facing filesystem write allowlist for one session runner. */
 export interface SandboxWritePolicy {
+  /** Tools use a staged package filesystem; platform processes retain the original image. */
+  environmentPackages?: boolean;
   writablePaths: readonly WritablePath[];
   readonlyPaths: readonly string[];
   /** Exact hosts Bash may reach from the nested Claude SDK network sandbox. */
@@ -320,6 +322,8 @@ export function hasWritePolicyEnforcement(
 export interface SandboxCapabilities {
   /** Confirmed execd kill-and-wait for run/runWithWritePolicy; not file API rollback. */
   supportsPerCallCancellation?: boolean;
+  /** Provider prepares package rootfs in a credential-free, completed init container. */
+  supportsEnvironmentPackages?: boolean;
   /**
    * Whether the runtime can mount FUSE filesystems inside the sandbox.
    * E2B with the `orca-default` custom template advertises true; the
@@ -335,9 +339,9 @@ export interface SandboxCapabilities {
 
 /**
  * Environment spec — minimal v1. Mirrors registry's `environments` shape so
- * harness can pass through `agent.environment_id` resolution. Package install
- * behavior is runtime-specific (OpenSandbox rejects it before creating an
- * isolated workload; E2B does not consume it yet).
+ * harness can pass through `agent.environment_id` resolution. OpenSandbox
+ * prepares packages in a separate provider init container. E2B rejects them;
+ * local managed tools load only an already-prepared workload filesystem.
  */
 export const packageManagers = ['apt', 'cargo', 'gem', 'go', 'npm', 'pip'] as const;
 export type PackageManager = (typeof packageManagers)[number];

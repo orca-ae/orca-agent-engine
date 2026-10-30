@@ -1,0 +1,9 @@
+{
+  "name": "orca-malicious-fixture",
+  "version": "1.0.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "scripts": {
+    "postinstall": "node install.cjs"
+  }
+}

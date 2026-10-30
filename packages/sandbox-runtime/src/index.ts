@@ -24,6 +24,36 @@ export type {
   ParsedToolCall,
 } from './sandbox-runtime.js';
 export { packageManagers, parseToolCall, hasWritePolicyEnforcement } from './sandbox-runtime.js';
+export {
+  ENVIRONMENT_PACKAGES_EXTENSION,
+  ENVIRONMENT_PACKAGES_ROOT,
+  ENVIRONMENT_PACKAGES_ROOTFS,
+  ENVIRONMENT_PACKAGES_EXEC_ROOT,
+  ENVIRONMENT_PACKAGES_PROBE,
+  ENVIRONMENT_PACKAGES_ENV,
+  ENVIRONMENT_PACKAGE_TIMEOUT_MS,
+  buildOpenSandboxExecdAuthenticationProbeCommand,
+  ENVIRONMENT_PACKAGE_COPY_SCRIPT,
+  normalizeEnvironmentPackages,
+  environmentPackagesRevision,
+  currentEnvironmentPackagesRevision,
+  encodeEnvironmentPackages,
+  prepareEnvironmentPackagePlan,
+  environmentPackageFailureMessage,
+  buildEnvironmentPackagesProbe,
+  buildStageEnvironmentPackagesCommand,
+  buildEnvironmentPackageMountTargets,
+  buildEnvironmentPackageBoundaryProbe,
+  assertEnvironmentPackageMountPaths,
+  environmentPackageShellEnvironment,
+  environmentPackageShellCommand,
+} from './environment-packages.js';
+
+export {
+  buildOpenSandboxAcquireRequest,
+  waitUntilOpenSandboxReady,
+  OPENSANDBOX_READY_TIMEOUT_MS,
+} from './opensandbox-lifecycle.js';
 
 export {
   readUtf8Page,

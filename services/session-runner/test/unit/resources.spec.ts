@@ -10,6 +10,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createRunnerSandboxRuntime,
   resourceManifestDigest,
+  environmentPackagesRevision,
+  ENVIRONMENT_PACKAGES_ENV,
   type ResourceManifest,
   type SandboxHandle,
 } from '../../src/sandbox/seam.js';
@@ -43,6 +45,7 @@ const sessionId = 'ses_resources';
 const hash = (content: string): string => createHash('sha256').update(content).digest('hex');
 const fixtures: Array<() => Promise<void>> = [];
 afterEach(async () => {
+  vi.unstubAllEnvs();
   cleanupGate.beforeRemove = undefined;
   cleanupGate.beforeOpen = undefined;
   cleanupGate.beforeRename = undefined;
@@ -137,6 +140,27 @@ function deferred<T>() {
 }
 
 describe('credential-free runner resources', () => {
+  it('rejects package configuration drift before acquiring a tool filesystem', async () => {
+    const h = await setup();
+    const packages = { cargo: ['ripgrep'] };
+    const value: ResourceManifest = {
+      ...manifest(),
+      version: 2,
+      environment_packages_revision: environmentPackagesRevision(packages),
+    };
+    await expect(
+      h.controller.push(sessionId, { type: 'manifest', manifest: value }),
+    ).rejects.toThrow(/matching cloud worker/);
+    vi.stubEnv(ENVIRONMENT_PACKAGES_ENV, JSON.stringify({ apt: ['jq'] }));
+    await expect(
+      h.controller.push(sessionId, { type: 'manifest', manifest: value }),
+    ).rejects.toThrow(/matching cloud worker/);
+    vi.stubEnv(ENVIRONMENT_PACKAGES_ENV, JSON.stringify(packages));
+    await expect(
+      h.controller.push(sessionId, { type: 'manifest', manifest: value }),
+    ).resolves.toEqual({ committed: false });
+  });
+
   it('rejects a file replaced by a FIFO between scanning and opening without blocking shutdown', async () => {
     const h = await setup();
     await stage(h.controller);

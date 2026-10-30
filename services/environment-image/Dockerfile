@@ -87,6 +87,7 @@ RUN pnpm deploy --filter @orca/environment-worker --prod /deploy/environment-wor
 # Keep the pinned build identical to the sandbox-harness image. Both run
 # nested filesystem, PID and network namespaces under OpenSandbox gVisor.
 FROM node:22-trixie-slim@sha256:517aa41d78545cb1b8c67b13655b4c13ede1ee9df1da8aab54cd7434aefbcaf8 AS bubblewrap-build
+COPY services/harness-server/sandbox-templates/orca-default/orca-environment-probe.c /tmp/orca-environment-probe.c
 
 # Debian's bubblewrap package is built for its native kernel floor and can
 # compile out the safe openat(2) fallback. gVisor does not implement openat2,
@@ -146,7 +147,10 @@ RUN apt-get update \
     && dpkg-deb --info /tmp/bubblewrap.deb \
         | grep -F "Version: ${BUBBLEWRAP_VERSION}-orca1"
 
+RUN cc -Os -static -Wall -Werror /tmp/orca-environment-probe.c -o /tmp/orca-environment-probe
+
 FROM node:22-trixie-slim@sha256:517aa41d78545cb1b8c67b13655b4c13ede1ee9df1da8aab54cd7434aefbcaf8 AS runtime
+COPY --from=bubblewrap-build /tmp/orca-environment-probe /usr/local/libexec/orca-environment-probe
 ARG BUBBLEWRAP_VERSION
 # git: `environment-worker`'s worktree offload and `session-runner`'s repo
 # mounts shell out to real git. ca-certificates: TLS to the LLM gateway.

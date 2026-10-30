@@ -14,6 +14,7 @@ RUN corepack enable && corepack prepare pnpm@9.15.9 --activate
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
 COPY patches ./patches
 COPY packages/harness-catalog/package.json ./packages/harness-catalog/
+COPY packages/sandbox-runtime/package.json ./packages/sandbox-runtime/
 COPY packages/codex-harness/package.json ./packages/codex-harness/
 COPY packages/sdk-harness/package.json ./packages/sdk-harness/
 COPY packages/pi-harness/package.json ./packages/pi-harness/
@@ -33,9 +34,12 @@ COPY packages/dsh-harness/src ./packages/dsh-harness/src
 COPY packages/dsh-harness/profile ./packages/dsh-harness/profile
 COPY packages/harness-catalog/tsconfig.json ./packages/harness-catalog/
 COPY packages/harness-catalog/src ./packages/harness-catalog/src
+COPY packages/sandbox-runtime/tsconfig.json ./packages/sandbox-runtime/
+COPY packages/sandbox-runtime/src ./packages/sandbox-runtime/src
 COPY services/sandbox-harness/tsconfig.json ./services/sandbox-harness/
 COPY services/sandbox-harness/src ./services/sandbox-harness/src
 RUN pnpm -F @orca/sdk-harness build && \
+    pnpm -F @orca/sandbox-runtime build && \
     pnpm -F @orca/harness-catalog build && \
     pnpm -F @orca/pi-harness build && \
     pnpm -F @orca/dsh-harness build && \
@@ -43,6 +47,7 @@ RUN pnpm -F @orca/sdk-harness build && \
     && pnpm -F @orca/sandbox-harness build
 
 FROM node:22-trixie-slim@sha256:517aa41d78545cb1b8c67b13655b4c13ede1ee9df1da8aab54cd7434aefbcaf8 AS bubblewrap-build
+COPY services/harness-server/sandbox-templates/orca-default/orca-environment-probe.c /tmp/orca-environment-probe.c
 
 # Debian's bubblewrap package is built for its native kernel floor and can
 # compile out the safe openat(2) fallback. gVisor does not implement openat2,
@@ -102,7 +107,10 @@ RUN apt-get update \
     && dpkg-deb --info /tmp/bubblewrap.deb \
         | grep -F "Version: ${BUBBLEWRAP_VERSION}-orca1"
 
+RUN cc -Os -static -Wall -Werror /tmp/orca-environment-probe.c -o /tmp/orca-environment-probe
+
 FROM node:22-trixie-slim@sha256:517aa41d78545cb1b8c67b13655b4c13ede1ee9df1da8aab54cd7434aefbcaf8 AS runtime
+COPY --from=bubblewrap-build /tmp/orca-environment-probe /usr/local/libexec/orca-environment-probe
 ARG BUBBLEWRAP_VERSION
 WORKDIR /app/services/sandbox-harness
 
@@ -173,6 +181,9 @@ COPY --from=build /app/packages/codex-harness/dist /app/packages/codex-harness/d
 COPY --from=build /app/packages/codex-harness/node_modules /app/packages/codex-harness/node_modules
 COPY --from=build /app/packages/harness-catalog/package.json /app/packages/harness-catalog/package.json
 COPY --from=build /app/packages/harness-catalog/dist /app/packages/harness-catalog/dist
+COPY --from=build /app/packages/sandbox-runtime/package.json /app/packages/sandbox-runtime/package.json
+COPY --from=build /app/packages/sandbox-runtime/dist /app/packages/sandbox-runtime/dist
+COPY --from=build /app/packages/sandbox-runtime/node_modules /app/packages/sandbox-runtime/node_modules
 COPY --from=build /app/services/sandbox-harness/node_modules ./node_modules
 COPY --from=build /app/services/sandbox-harness/package.json ./package.json
 COPY --from=build /app/services/sandbox-harness/dist ./dist

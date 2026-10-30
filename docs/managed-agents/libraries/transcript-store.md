@@ -380,11 +380,14 @@ incompatible patch hash and cannot consume this frozen lockfile.
 Installation builds the patched binding from source; it does not download the
 upstream Node prebuilt, which contains the invalid-free bug. The build uses
 SHA-512-pinned Apache C++ client 4.1.0 archives and static linking, so runtime
-images need no separate `libpulsar` installation. Archive downloads have a five-minute
-deadline per attempt (including the response body) and retry network failures, HTTP
-408/429 and 5xx responses up to three attempts, with one- and two-second backoffs.
-Other HTTP errors and checksum mismatches fail the install without retrying or
-falling back to the unsafe upstream Node prebuilt. Archive extraction commands retain
+images need no separate `libpulsar` installation. Downloads try the official Apache
+CDN first, then the Apache archive if a release is absent (HTTP 404) or the first
+source exhausts its retries. Each source has a five-minute deadline per attempt
+(including the response body) and retries network failures, HTTP 408/429 and 5xx
+responses up to three attempts, with one- and two-second backoffs. Other HTTP errors
+fail immediately; every downloaded archive must match the same pinned SHA-512
+before extraction or compilation. Installs never fall back to the unsafe upstream
+Node prebuilt. Archive extraction commands retain
 a five-minute timeout; native compilation has no subprocess timeout. Release images
 build on native amd64 and arm64 runners without QEMU. CI job timeouts bound the overall
 build (90 minutes for release images); local builds rely on the caller for cancellation.

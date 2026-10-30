@@ -372,6 +372,14 @@ const EXCUSED_SOURCES = new Map([
     'forwards only PATH to the private DSH process; its home and system prompt are generated worker inputs, not ambient operator configuration',
   ],
   [
+    'packages/sandbox-runtime/src/environment-packages.ts',
+    'reads ORCA_ENVIRONMENT_PACKAGES, provider-injected package declarations checked against resource manifests; documented in the worker and runner service references, not operator configuration',
+  ],
+  [
+    'scripts/test-environment-packages-docker.mjs',
+    'a local acceptance fixture checks a dummy runtime-only token inside its generated malicious installer; it reads no operator settings',
+  ],
+  [
     'packages/codex-harness/src/worker.ts',
     'forwards only PATH to the SDK subprocess; credentials are explicit worker input, not ambient environment settings',
   ],

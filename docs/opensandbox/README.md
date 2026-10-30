@@ -77,7 +77,7 @@ type = "gvisor"
 k8s_runtime_class = "gvisor"
 ```
 
-Mount all three ConfigMap modules into `opensandbox-server`:
+Mount all four ConfigMap modules into `opensandbox-server`:
 
 ```yaml
 volumeMounts:
@@ -92,6 +92,10 @@ volumeMounts:
   - name: opensandbox-server-gvisor-fuse-patch
     mountPath: /app/opensandbox_server/services/k8s/security_context.py
     subPath: security_context.py
+    readOnly: true
+  - name: opensandbox-server-gvisor-fuse-patch
+    mountPath: /app/opensandbox_server/services/k8s/status_helpers.py
+    subPath: status_helpers.py
     readOnly: true
 volumes:
   - name: opensandbox-server-gvisor-fuse-patch
@@ -195,6 +199,70 @@ registry ownership/push ACLs, and any proxy's upstream mapping and integrity.
 
 ## Provider security contract
 
+Each Orca acquisition creates a fresh execd API credential from 32 random bytes,
+encoded as 64 hexadecimal characters. It authenticates management requests for that
+sandbox until the sandbox is destroyed; it is not shared across acquisitions.
+`EXECD_ACCESS_TOKEN` is a literal environment value in the BatchSandbox and Pod
+specifications. Principals with permission to read those resources can read it and
+are part of the trusted management boundary. Operators restrict these resource reads
+to trusted management principals. The installer and agent tools receive neither this
+credential nor a ServiceAccount token. The runtime also probes the local listener without credentials
+and requires HTTP 401, so an old execd that ignores authentication fails closed.
+The harness entrypoint removes the key before starting its SDK. Tool launchers remove
+it before executing Bubblewrap, keeping it out of both the command environment and
+the nested PID 1 environment.
+Existing sandboxes retain their previous image and authentication configuration;
+recreate them when applying the updated runtime and images.
+
+Environment packages use the optional `orca.environment.packages.v1` extension,
+whose JSON value contains `version: 1` and the six package-manager arrays. The
+provider installs them in an init container using the same operator-trusted base
+image, with no runtime environment variables, mounted credentials, ServiceAccount
+token or concurrent runtime process. System packages precede language packages.
+The installer exports an untrusted rootfs into a fresh 8 GiB `emptyDir`; the main
+container mounts it read-only at `/opt/orca-environment-packages`. Templates cannot
+inject installer environment variables, writable artifact consumers or sidecar init
+containers. The main and installer containers use the same configured image pull
+policy, including for `latest` tags, and inherit operator resource limits. They
+receive a 16 GiB ephemeral-storage limit when none is set.
+
+The 8 GiB artifact limit includes exported base-image files, installed packages and
+retained package caches; it is not 8 GiB reserved for additional packages. Trusted
+staging makes a second copy with an independent 8 GiB logical-file-size and 500,000-entry
+limit, strips privileged bits and breaks hard links. Reflinks are an optimization, not
+a capacity assumption. Budget for both copies plus installation writes, caches, logs
+and filesystem overhead under the Pod's ephemeral-storage limits and the node's free
+space. Two artifacts near 8 GiB leave no headroom under the default 16 GiB limit.
+Storage exhaustion or eviction fails acquisition; partial staging and failed sandboxes
+are removed. Operators size the image, package plan and storage limits together.
+
+Package executable directories precede system directories in the agent's `PATH`, so
+installed tools can shadow system commands inside the workload boundary. They do not
+replace the controller's executables or environment. A Go specification without `@`
+is passed to `go install` with `@latest`; explicit versions are preserved. Pin versions
+when reproducible package selection is required.
+
+During package preparation, an allocated Pod reports `Allocated` so lifecycle creation
+does not wait for installers to finish. A non-zero installer exit, init-container
+startup failure or Pod eviction reports `Failed` with a fixed reason, without installer
+output or termination messages. A transient `ErrImagePull` permits another pull attempt;
+`ImagePullBackOff` and `CrashLoopBackOff` fail acquisition. Both clients use the shared
+OpenSandbox request builder and readiness loop. During package preparation they poll
+lifecycle status and execd every two seconds, then destroy a failed sandbox as soon as
+it is observed. Acquisitions without packages retain the 500 ms readiness interval.
+Each package lifecycle read inspects Pod init status through the server's Kubernetes
+client and its `[kubernetes] read_qps` / `read_burst` limiter; operators can bound aggregate
+Kubernetes read traffic across concurrent acquisitions with those settings. Successful
+preparation still requires execd readiness and proof that the extension was honored
+before opening a Session.
+The package plan uses canonical manager order, valid UTF-8 strings bounded to 1,024
+UTF-16 code units, and a SHA-256 revision over compact UTF-8 JSON. Python and TypeScript
+validate the same golden fixtures, including Unicode and rejected edge whitespace. The operator images include the
+static `orca-environment-probe`; package-enabled execution fails closed when the image
+or provider lacks the matching contract. Package-provided shells, loaders and libraries
+are never used for this probe or for the trusted controller. Unrestricted Environment
+networking is required for package preparation.
+
 Isolation requests must include:
 
 ```json
@@ -222,6 +290,18 @@ Pause and resume reject in harness and provider before lifecycle/CR patch.
 Snapshot restore cannot preserve live in-sandbox FUSE mounts.
 
 ## Verify
+
+The stack E2E workflow runs Environment package installation against its real
+OpenSandbox server and gVisor kind cluster. The dedicated entry point is
+`pnpm -F @orca/harness-server test:e2e:opensandbox`; it requires the live server's
+domain and API key, a package fixture image in `OPEN_SANDBOX_IMAGE`, and
+`KIND_CLUSTER_NAME`. The fixture image extends the sandbox-harness image using
+`services/harness-server/test/fixtures/environment-packages/Dockerfile`.
+Both runtime clients install all six managers and exercise malicious installation
+hooks, read-only resources, management authentication and failed sandbox cleanup.
+Pod inspection explicitly selects the named kind context. The Layer B.1 matrix
+also verifies Environment packages through the Registry, real SDK tool dispatch
+and the Files download API.
 
 ```bash
 kubectl get runtimeclass gvisor

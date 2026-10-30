@@ -209,6 +209,17 @@ moved, `GET /apis` and `GET /api` let it detect what a deployment serves instead
 
 Operational work the engine needs before it can carry production traffic under an SLO.
 
+- **Package preparation on additional execution paths.** OpenSandbox supports
+  `apt`, `pip`, `npm`, `cargo`, `gem`, and `go` through a separate init container,
+  with unrestricted Environment networking. E2B, AgentENV, local Environment
+  launching, and runner providers without managed resources reject package plans.
+  Existing workers do not rebuild automatically when package declarations change;
+  resource transfer rejects a worker with a different declaration revision.
+  **Trigger:** a workload requires another backend, limited-network installation,
+  an unmanaged runner provider, or automatic worker replacement. Implement and
+  validate an equivalent isolated preparation boundary, network policy, or worker
+  generation transition before enabling that path.
+
 - **In-use Vault deletion protection.** Vault DELETE currently revokes credentials even
   when an undeleted Session references the Vault; it has no `409 conflict_error` guard.
   An in-use check is deferred because it changes the existing credential-revocation
@@ -300,7 +311,7 @@ Operational work the engine needs before it can carry production traffic under a
   backpressure protocol.
 - **harness-server on the shared sandbox packages.** session-runner and Registry use
   `@orca/sandbox-runtime`, and Registry's cloud Environment launchers use `@orca/cloud-sandbox`.
-  harness-server imports only `composeSkillsCatalog` from them: it keeps its own sandbox runtimes
+  harness-server imports `composeSkillsCatalog` and shared package-preparation helpers: it keeps its own sandbox runtimes
   (including E2B and OpenSandbox) and write-policy code under `src/sandbox/`, and its own copy of
   the Skill-bundle validators, so a fix to shared behavior has to be made in both copies.
   **Trigger:** the copies diverging in behavior, or a runtime change that has to land in both. Move
