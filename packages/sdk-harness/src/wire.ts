@@ -63,7 +63,13 @@ export interface SdkTurnOptions {
 }
 export type WorkerCommand =
   | StartCommand
-  | { type: 'submit'; text: string; sourceEventId?: string; threadId?: string }
+  | {
+      type: 'submit';
+      text: string;
+      sourceEventId?: string;
+      threadId?: string;
+      executionBudgetMs?: number;
+    }
   | { type: 'interrupt'; threadId?: string; archived?: boolean }
   | { type: 'archive_fence'; threadId: string }
   | { type: 'orchestration_result'; id: string; allowed: boolean; reason?: string }

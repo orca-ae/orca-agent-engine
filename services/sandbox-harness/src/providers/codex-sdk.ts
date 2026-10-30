@@ -54,6 +54,7 @@ const commandSchema = z.discriminatedUnion('type', [
     text: z.string(),
     sourceEventId: z.string().optional(),
     threadId: z.string().uuid().optional(),
+    executionBudgetMs: z.number().int().min(1).max(2_147_483_647).optional(),
   }),
   z.object({
     type: z.literal('tool_result'),

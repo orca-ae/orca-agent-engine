@@ -18,6 +18,7 @@
  * long-running sessions must not retain an unbounded id set.
  */
 
+import { sdkCommandTimeoutMs, sdkTimeoutSignal } from '@orca/sdk-harness';
 import type {
   HarnessChannel,
   HarnessTransport,
@@ -202,18 +203,23 @@ export class DialInTransport implements HarnessTransport {
       },
 
       async sdkCommand(command: unknown, afterSequence?: number): Promise<number> {
-        const response = await fetch(`${baseUrl}/v1/sessions/${sessionId}/sdk-command`, {
-          method: 'POST',
-          headers: { ...commonHeaders, 'content-type': 'application/json' },
-          body: JSON.stringify({ command, afterSequence }),
-          signal: AbortSignal.any([abort.signal, AbortSignal.timeout(660_000)]),
-        });
-        if (!response.ok)
-          throw new Error(`SDK command failed: ${response.status} ${await response.text()}`);
-        const result = (await response.json()) as { ok?: boolean; sequence?: number };
-        if (result.ok !== true || !Number.isSafeInteger(result.sequence) || result.sequence! < 0)
-          throw new Error('SDK command was not acknowledged');
-        return result.sequence!;
+        const watchdog = sdkTimeoutSignal(sdkCommandTimeoutMs(command));
+        try {
+          const response = await fetch(`${baseUrl}/v1/sessions/${sessionId}/sdk-command`, {
+            method: 'POST',
+            headers: { ...commonHeaders, 'content-type': 'application/json' },
+            body: JSON.stringify({ command, afterSequence }),
+            signal: AbortSignal.any([abort.signal, watchdog.signal]),
+          });
+          if (!response.ok)
+            throw new Error(`SDK command failed: ${response.status} ${await response.text()}`);
+          const result = (await response.json()) as { ok?: boolean; sequence?: number };
+          if (result.ok !== true || !Number.isSafeInteger(result.sequence) || result.sequence! < 0)
+            throw new Error('SDK command was not acknowledged');
+          return result.sequence!;
+        } finally {
+          watchdog.dispose();
+        }
       },
 
       async stop(): Promise<void> {

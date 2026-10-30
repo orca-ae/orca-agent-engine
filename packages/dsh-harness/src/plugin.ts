@@ -21,7 +21,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { readFile, readdir, lstat } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { SdkTerminalUsage } from '@orca/sdk-harness';
-import { assertSdkTerminalUsage } from '@orca/sdk-harness';
+import { sdkExecutionBudgetMs, sdkTimeoutSignal, assertSdkTerminalUsage } from '@orca/sdk-harness';
 import { captureCheckpoint, MAX_STATE_BYTES, MAX_STATE_FILES, NATIVE_ID } from './checkpoint.js';
 import { boundedLines } from './bounds.js';
 import { gatewayBase, installManagedFetch } from './transport.js';
@@ -741,6 +741,10 @@ export function apply(ctx: Context): void {
       params.sourceEventId.length <= 4
     )
       throw new Error('DSH requires accepted root sourceEventId');
+    const budget = sdkExecutionBudgetMs(params.executionBudgetMs);
+    const watchdog = sdkTimeoutSignal(
+      budget + (params.executionBudgetMs === undefined ? 0 : 30_000),
+    );
     sourceEventId = params.sourceEventId;
     active = true;
     interrupted = false;
@@ -776,7 +780,7 @@ export function apply(ctx: Context): void {
             delivery: 'queue',
             content,
           },
-          AbortSignal.timeout(600000),
+          watchdog.signal,
         );
       } else
         handle.agent.followup(
@@ -831,6 +835,7 @@ export function apply(ctx: Context): void {
         message: error instanceof Error ? error.message : 'DSH tree failed',
       });
     } finally {
+      watchdog.dispose();
       calls.clear();
       compactions.clear();
       active = false;

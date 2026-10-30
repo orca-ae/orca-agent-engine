@@ -894,6 +894,8 @@ export class CodexSdkHarness implements AgentHarness {
       failDeadline = reject;
     });
     void deadlineFailure.catch(() => {});
+    const turnTimeoutMs = this.opts.turnTimeoutMs ?? 600_000;
+    const expires = performance.now() + turnTimeoutMs;
     const timer = setTimeout(() => {
       this.turnFailure ??= `${this.sdkName} turn timed out`;
       if (this.opts.harness === 'dsh_sdk')
@@ -902,7 +904,7 @@ export class CodexSdkHarness implements AgentHarness {
           () => failDeadline(new Error(this.turnFailure)),
         );
       else void this.interrupt().catch(() => {});
-    }, this.opts.turnTimeoutMs ?? 600_000);
+    }, turnTimeoutMs);
     const execution = (async () => {
       if (controlFailure) await Promise.race([ready, controlFailure]);
       await this.worker!.refreshOptions({
@@ -913,6 +915,12 @@ export class CodexSdkHarness implements AgentHarness {
           ? { piGatewayUrl: this.opts.piGatewayUrl }
           : {}),
       });
+      // Preserve positive sub-millisecond budgets without exceeding the configured integer limit.
+      const executionBudgetMs = Math.min(turnTimeoutMs, Math.ceil(expires - performance.now()));
+      if (this.opts.harness === 'dsh_sdk' && executionBudgetMs <= 0) {
+        this.turnFailure ??= 'DSH SDK turn timed out';
+        throw new Error(this.turnFailure);
+      }
       if (!this.abort?.signal.aborted) {
         try {
           await this.worker!.handle({
@@ -920,6 +928,7 @@ export class CodexSdkHarness implements AgentHarness {
             text,
             ...(this.opts.harness === 'dsh_sdk'
               ? {
+                  executionBudgetMs,
                   sourceEventId: this.turnId!,
                   ...(nativeThreadId(subpath) ? { threadId: nativeThreadId(subpath)! } : {}),
                 }

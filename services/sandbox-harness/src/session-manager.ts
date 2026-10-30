@@ -28,6 +28,7 @@
 //     releases the lock after child cleanup finishes.
 
 import { randomUUID } from 'node:crypto';
+import { sdkCommandTimeoutMs, sdkTimeoutSignal } from '@orca/sdk-harness';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createInterface } from 'node:readline';
 
@@ -822,13 +823,16 @@ export function createManagedSession({
 
   async function sendSdkCommand(command: unknown): Promise<number> {
     if (!alive) throw new Error('session not alive');
+    const watchdog = sdkTimeoutSignal(sdkCommandTimeoutMs(command));
     const id = randomUUID();
-    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       return await new Promise<number>((resolve, reject) => {
         controls.set(id, { resolve, reject });
-        // Bounds a wedged child while allowing the host's ten-minute turn deadline.
-        timer = setTimeout(() => reject(new Error('SDK command timed out')), 660_000);
+        watchdog.signal.addEventListener(
+          'abort',
+          () => reject(new Error('SDK command timed out')),
+          { once: true },
+        );
         void writeOnce(
           `${JSON.stringify({
             type: 'control_request',
@@ -838,7 +842,7 @@ export function createManagedSession({
         ).catch(reject);
       });
     } finally {
-      clearTimeout(timer);
+      watchdog.dispose();
       controls.delete(id);
     }
   }

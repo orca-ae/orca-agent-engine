@@ -8,7 +8,13 @@ import { mkdtemp, mkdir, cp, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { JsonRpcLineTransport } from '@deepseek-ai/dsh-sdk-protocol';
-import { assertSdkTerminalUsage, type SdkWorker, type SdkTurnOptions } from '@orca/sdk-harness';
+import {
+  assertSdkTerminalUsage,
+  sdkExecutionBudgetMs,
+  sdkTimeoutSignal,
+  type SdkWorker,
+  type SdkTurnOptions,
+} from '@orca/sdk-harness';
 import { dshModel, validateHarnessModel } from '@orca/harness-catalog';
 import {
   assertDshCheckpointInstructions,
@@ -211,11 +217,20 @@ export class DshSdkWorker implements SdkWorker {
       this.archived,
       (path) => this.parents.get(path),
     );
+    const budget = sdkExecutionBudgetMs(command.executionBudgetMs);
+    const watchdog = sdkTimeoutSignal(
+      budget + (command.executionBudgetMs === undefined ? 0 : 30_000),
+    );
     this.active = this.rpc
       .request(
         'submit',
-        { text: command.text, sourceEventId: command.sourceEventId, threadId: command.threadId },
-        AbortSignal.timeout(600000),
+        {
+          text: command.text,
+          sourceEventId: command.sourceEventId,
+          threadId: command.threadId,
+          executionBudgetMs: command.executionBudgetMs,
+        },
+        watchdog.signal,
       )
       .then(async () => {
         if (this.fatal) {
@@ -231,6 +246,7 @@ export class DshSdkWorker implements SdkWorker {
         await this.reap();
       })
       .finally(() => {
+        watchdog.dispose();
         this.active = undefined;
       });
     await this.active;

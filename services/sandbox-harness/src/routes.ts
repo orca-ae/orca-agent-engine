@@ -27,6 +27,7 @@
 // feed must have no gap and no duplication.
 
 import type { ServerResponse } from 'node:http';
+import { sdkCommandTimeoutMs } from '@orca/sdk-harness';
 
 import {
   HttpError,
@@ -471,6 +472,11 @@ export const sdkCommand: RouteHandler = async (req, res, ctx, params) => {
   if (!runtime?.isAlive() || !runtime.sendSdkCommand)
     throw new HttpError(409, 'SDK command channel unavailable');
   const body = asRecord(req.body);
+  try {
+    sdkCommandTimeoutMs(body.command);
+  } catch {
+    throw new HttpError(400, 'invalid SDK execution budget');
+  }
   if (body.afterSequence !== undefined) {
     if (!Number.isSafeInteger(body.afterSequence) || (body.afterSequence as number) < 0)
       throw new HttpError(400, 'invalid SDK event acknowledgement');

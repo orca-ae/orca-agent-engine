@@ -49,6 +49,14 @@ unsupported harness IDs fail configuration loading. Helm renders them from
 values are numbers, not strings. Tool-confirmation waits, managed tools and
 DSH native children share the same turn deadline.
 
+The DSH host measures elapsed time with a monotonic clock. After credential refresh,
+it passes the remaining execution budget to the local or colocated worker.
+Native submit and child follow-up watchdogs allow
+that budget plus 30 seconds for cancellation/drain; the HTTP command and sandbox
+ACK watchdogs allow 60 seconds. These watchdogs do not own the business deadline.
+Control commands remain bounded independently, and the post-ACK SSE delivery
+fence retains its separate timeout.
+
 DSH deadline cancellation joins worker interruption and active execution for at most
 15 seconds, followed by a separate retirement budget of at most 15 seconds. It then
 abandons the unfinished receipt, persists a timeout error and final non-pending idle,

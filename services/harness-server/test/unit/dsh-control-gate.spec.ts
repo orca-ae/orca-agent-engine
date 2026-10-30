@@ -356,7 +356,7 @@ it('waits for control readiness and fails closed on a follower read failure befo
 it.each(['timeout', 'complete', 'stop'])(
   'joins stalled ownership admission on %s without delivering the control',
   async (mode) => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ['Date', 'performance', 'setTimeout', 'clearTimeout'] });
     const lookup = vi.fn(() => new Promise<never>(() => {}));
     let joined = false;
     const store: TranscriptStore = {
@@ -495,7 +495,7 @@ it('drops a late root interrupt after normal completion and does not cancel the 
 it.each([false, true])(
   'bounds active cleanup when interrupt ACK hangs=%s, including a hung submit',
   async (hangs) => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ['Date', 'performance', 'setTimeout', 'clearTimeout'] });
     let send!: () => void;
     const interrupt = vi
       .fn()
@@ -632,7 +632,7 @@ it.each(['interrupt', 'tool', 'submit'] as const)(
 it.each(['deadline', 'interrupt'])(
   'shares cancellation budgets and preserves the first %s cause',
   async (first) => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ['Date', 'performance', 'setTimeout', 'clearTimeout'] });
     let send!: () => void;
     const accepted = vi.fn(async () => {});
     const control = { id: 'evt_overlapping_interrupt', kind: 'user.interrupt', payload: {} };
@@ -708,7 +708,7 @@ it.each(['deadline', 'interrupt'])(
 it.each(['interrupt', 'interrupt-reject', 'submit', 'tool-result', 'retirement'])(
   'settles an approval deadline with stalled %s and fences late work',
   async (stalled) => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ['Date', 'performance', 'setTimeout', 'clearTimeout'] });
     const directory = await mkdtemp(join(tmpdir(), 'dsh-deadline-'));
     const marker = join(directory, 'forbidden');
     const execute = vi.fn(async () => {
@@ -848,7 +848,7 @@ it.each(['interrupt', 'interrupt-reject', 'submit', 'tool-result', 'retirement']
 );
 
 it('does not execute an approval accepted concurrently with deadline cancellation', async () => {
-  vi.useFakeTimers();
+  vi.useFakeTimers({ toFake: ['Date', 'performance', 'setTimeout', 'clearTimeout'] });
   const execute = vi.fn(async () => ({ content: 'forbidden' }));
   const f = fixture(
     {
@@ -904,7 +904,7 @@ it('does not execute an approval accepted concurrently with deadline cancellatio
 it.each([false, true])(
   'settles deadline with acknowledged terminal usage=%s without inventing usage',
   async (known) => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ['Date', 'performance', 'setTimeout', 'clearTimeout'] });
     const onUsage = vi.fn(async () => ({ total_tokens: 2 }));
     const onGuardrailState = vi.fn(async () => {});
     const f = fixture(
@@ -1069,6 +1069,124 @@ it('settles a pending Bash deadline through the real native DSH worker', async (
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 }, 40_000);
+
+it.each([600_000, 1_200_000])(
+  'subtracts credential refresh time from the DSH submit budget %s',
+  async (budget) => {
+    vi.useFakeTimers({ toFake: ['Date', 'performance', 'setTimeout', 'clearTimeout'] });
+    let refreshing = false;
+    const f = fixture({}, undefined, budget, undefined, undefined, undefined, undefined, {
+      llmGatewayJwtProvider: {
+        getValidToken: async () => {
+          if (refreshing) await vi.advanceTimersByTimeAsync(20_000);
+          return { token: 'jwt' } as never;
+        },
+        close: () => {},
+      },
+    });
+    f.setRun(async () => f.complete());
+    try {
+      await f.harness.start(f.input);
+      refreshing = true;
+      await f.harness.submit(message);
+      expect(f.replies.find((command) => command.type === 'submit')).toMatchObject({
+        executionBudgetMs: budget - 20_000,
+      });
+    } finally {
+      await f.harness.stop('error');
+      vi.useRealTimers();
+    }
+  },
+);
+
+it('never admits native submit when refresh consumes the remaining host budget', async () => {
+  vi.useFakeTimers({ toFake: ['Date', 'performance', 'setTimeout', 'clearTimeout'] });
+  let refreshing = false;
+  const f = fixture({}, undefined, 1_200_000, undefined, undefined, undefined, undefined, {
+    llmGatewayJwtProvider: {
+      getValidToken: async () => {
+        if (refreshing) await vi.advanceTimersByTimeAsync(1_200_000);
+        return { token: 'jwt' } as never;
+      },
+      close: () => {},
+    },
+  });
+  try {
+    await f.harness.start(f.input);
+    refreshing = true;
+    await expect(f.harness.submit(message)).rejects.toThrow('timed out');
+    expect(f.replies.filter((command) => command.type === 'submit')).toEqual([]);
+    expect(f.turns.snapshot.receipt).toMatchObject({
+      phase: 'settled',
+      error: expect.stringContaining('timed out'),
+    });
+    expect(f.turns.snapshot.state).toBeNull();
+  } finally {
+    await f.harness.stop('error');
+    vi.useRealTimers();
+  }
+});
+
+it.each([900_000, -900_000])(
+  'ignores wall clock correction %s during refresh at the maximum configured budget',
+  async (correction) => {
+    vi.useFakeTimers({ toFake: ['Date', 'performance', 'setTimeout', 'clearTimeout'] });
+    let refreshing = false;
+    const f = fixture({}, undefined, 2_147_483_647, undefined, undefined, undefined, undefined, {
+      llmGatewayJwtProvider: {
+        getValidToken: async () => {
+          if (refreshing) {
+            await vi.advanceTimersByTimeAsync(1_000);
+            vi.setSystemTime(Date.now() + correction);
+          }
+          return { token: 'jwt' } as never;
+        },
+        close: () => {},
+      },
+    });
+    f.setRun(async () => f.complete());
+    try {
+      await f.harness.start(f.input);
+      refreshing = true;
+      await f.harness.submit(message);
+      expect(f.replies.find((command) => command.type === 'submit')).toMatchObject({
+        executionBudgetMs: 2_147_482_647,
+      });
+    } finally {
+      await f.harness.stop('error');
+      vi.useRealTimers();
+    }
+  },
+);
+
+it('rounds an unexpired sub-millisecond execution budget up to a valid integer', async () => {
+  vi.useFakeTimers({ toFake: ['Date', 'performance', 'setTimeout', 'clearTimeout'] });
+  const clock = vi.spyOn(performance, 'now');
+  let refreshing = false;
+  const f = fixture({}, undefined, 1, undefined, undefined, undefined, undefined, {
+    llmGatewayJwtProvider: {
+      getValidToken: async () => {
+        // The fake timer's integer tick does not model performance.now()'s fractional precision.
+        if (refreshing) clock.mockReturnValue(0.75);
+        return { token: 'jwt' } as never;
+      },
+      close: () => {},
+    },
+  });
+  f.setRun(async () => f.complete());
+  try {
+    await f.harness.start(f.input);
+    refreshing = true;
+    await f.harness.submit(message);
+    expect(f.replies.find((command) => command.type === 'submit')).toMatchObject({
+      executionBudgetMs: 1,
+    });
+  } finally {
+    await f.harness.stop('error');
+    clock.mockRestore();
+    vi.useRealTimers();
+  }
+});
 
 it('applies the configured whole-tree deadline to DSH turns', async () => {
   const config = loadConfig({ SANDBOX_RUNTIME: 'in-memory', HARNESS_TURN_TIMEOUT_MS: '1234' });
