@@ -13,6 +13,7 @@ import { guardrailsContract } from './guardrails.contract.js';
 import { healthContract } from './health.contract.js';
 import { memoryStoresContract } from './memory-stores.contract.js';
 import { modelPricesContract } from './model-prices.contract.js';
+import { modelPriceRulesContract } from './model-price-rules.contract.js';
 import { outcomesContract } from './outcomes.contract.js';
 import { sessionsContract } from './sessions.contract.js';
 import { skillsContract } from './skills.contract.js';
@@ -104,6 +105,7 @@ export const publicContract = withAcceptedAndIgnoredHeaders(
     health: healthContract,
     memoryStores: memoryStoresContract,
     modelPrices: modelPricesContract,
+    modelPriceRules: modelPriceRulesContract,
     outcomes: outcomesContract,
     sessions: sessionsContract,
     skills: skillsContract,

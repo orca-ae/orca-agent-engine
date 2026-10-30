@@ -35,6 +35,8 @@ import { EnvironmentClaimStore, startEnvironmentClaimReaper } from './domain/env
 import { EnvironmentTokenStore } from './domain/environment-token-store.js';
 import { createPostgresModelPriceStore, loadSeedModelPrices } from './pricing/store.js';
 import { createModelPriceRefresher } from './pricing/refresher.js';
+import { createConditionalPriceRefresher } from './pricing/conditional-refresher.js';
+import { createPostgresPricingCatalogStore } from './pricing/catalog-store.js';
 import { SessionJwtMinter } from './auth/session-jwt.js';
 import { buildConfiguredInternalAuthVerifier } from './auth/internal-auth.js';
 import {
@@ -396,6 +398,7 @@ const internalAuthVerifier = buildConfiguredInternalAuthVerifier({
 const publicApp = buildPublicApp(appOptions);
 const internalApp = buildInternalApp(appOptions, internalAuthVerifier);
 const adminApp = buildAdminApp({
+  conditionalPricingEnabled: config.conditionalPricingEnabled,
   db,
   oidc: {
     allowedIssuers: config.adminOidcAllowedIssuers,
@@ -599,6 +602,12 @@ const modelPriceRefresher = config.priceRefreshUrl
     })
   : null;
 modelPriceRefresher?.start();
+const conditionalPriceRefresher = createConditionalPriceRefresher({
+  store: createPostgresPricingCatalogStore(db),
+  sources: config.priceSources,
+  onFailure: (source, message) => console.warn('registry: conditional prices', { source, message }),
+});
+conditionalPriceRefresher.start();
 
 // Drives the registry read models off the transcript consumer: the event index
 // (paginated `/events` + SSE) and the `session_threads` Threads-API read model.
@@ -620,6 +629,7 @@ const shutdown = async (): Promise<void> => {
   clearInterval(skillBundleDeletionReconcileTimer);
   await agentObservabilityMaintenance.stop();
   modelPriceRefresher?.stop();
+  conditionalPriceRefresher.stop();
   try {
     claimReaper.stop();
     await Promise.all([publicApp.close(), internalApp.close(), adminApp.close()]);

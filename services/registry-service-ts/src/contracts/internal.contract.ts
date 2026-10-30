@@ -3,6 +3,7 @@
 
 import { initContract } from '@ts-rest/core';
 import { z } from 'zod';
+import { RequestPriceFactsSchema } from './model-price-rules.contract.js';
 import {
   LOGICAL_CREDENTIAL_ID_PATTERN,
   PROVIDER_CREDENTIAL_SCHEMES,
@@ -777,6 +778,7 @@ export const internalContract = c.router({
     method: 'POST',
     path: '/internal/v1/workspaces/:workspaceId/sessions/:id/usage',
     pathParams: z.object({ workspaceId: z.string().min(1), id: idString('ses') }),
+    headers: z.object({ 'x-orca-pricing-capability': z.literal('request-facts-v1').optional() }),
     body: z.object({
       usage: z.object({
         cache_creation: z
@@ -815,6 +817,7 @@ export const internalContract = c.router({
       turn_event_id: idString('evt').optional(),
       /** Stable sandbox event id; duplicate delivery returns the original totals without charging twice. */
       usage_event_id: idString('evt').optional(),
+      pricing_facts: RequestPriceFactsSchema.optional(),
     }),
     responses: {
       200: InternalSession,

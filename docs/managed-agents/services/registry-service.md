@@ -29,6 +29,11 @@ incomplete, preserves committed results, and requires operator recovery.
 The [runner upgrade and rollback procedure](./session-runner.md#native-capability-upgrade-and-rollback)
 specifies writer draining, additive storage retention and checkpoint recovery.
 
+Registry also owns [conditional pricing v2](../pricing.md#conditional-pricing-v2): append-only catalog
+versions, fenced provider publication, organization operator rule sets and first-acceptance cost
+receipts. Native aggregate reports retain unknown tier/context facts and are unpriced for explicitly
+converted models. Conditional conversion defaults off; dormant publication leaves v1 accounting intact.
+
 ## Resource deletion
 
 Resource DELETE operations retain database rows and set a nullable `deleted_at`

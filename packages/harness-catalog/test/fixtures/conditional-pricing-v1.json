@@ -1,0 +1,1345 @@
+{
+  "version": 1,
+  "vectors": [
+    {
+      "name": "legacy-cache-conversion",
+      "input": {
+        "catalog": {
+          "catalog_id": "catalog-1",
+          "generation": 1,
+          "published_at": "2026-10-29T00:00:00.000Z",
+          "required_features": [
+            "exact-identity-v1",
+            "actual-service-tier-v1",
+            "whole-request-input-band-v1",
+            "explicit-cache-rates-v1",
+            "source-precedence-v1",
+            "per-rule-validity-v1"
+          ],
+          "rules": [
+            {
+              "rule_set_id": "set-1",
+              "rule_id": "rule-1",
+              "revision": 1,
+              "provider": "anthropic",
+              "model_id": "example-model",
+              "source": "seed",
+              "conditions": {
+                "service_tier": "standard",
+                "request_input_tokens": {
+                  "min": 0,
+                  "max": null
+                }
+              },
+              "rates": {
+                "input_per_million_tokens": 2,
+                "output_per_million_tokens": 8,
+                "cache_read_per_million_tokens": 0.2,
+                "cache_write_per_million_tokens": 2.5,
+                "cache_write_1h_per_million_tokens": 4
+              },
+              "usage_profile": "anthropic-cache-v1",
+              "profile_version": "anthropic-v1",
+              "provenance": {
+                "source_id": "fixture",
+                "document_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "adapter_version": "fixture-v1",
+                "observed_at": "2026-10-29T00:00:00.000Z"
+              },
+              "provider_effective_at": null,
+              "active_from": "2026-10-29T00:00:00.000Z",
+              "retired_at": null,
+              "valid_until": null
+            }
+          ]
+        },
+        "provider": "anthropic",
+        "model_id": "example-model",
+        "organization_id": "org-1",
+        "pricing_time": "2026-10-29T00:00:00.000Z",
+        "facts": {
+          "version": 1,
+          "request_id": "response-1",
+          "service_tier": "standard",
+          "request_input_tokens": 1500,
+          "usage_profile": "anthropic-cache-v1",
+          "evidence_source": "provider_response"
+        },
+        "usage": {
+          "inputTokens": 1000,
+          "outputTokens": 100,
+          "cacheReadInputTokens": 200,
+          "cacheCreationEphemeral5mInputTokens": 300,
+          "cacheCreationEphemeral1hInputTokens": 0
+        }
+      },
+      "expected": {
+        "status": "priced",
+        "cost_nano_usd": "3590000",
+        "rule_id": "rule-1"
+      }
+    },
+    {
+      "name": "absent-tier",
+      "input": {
+        "catalog": {
+          "catalog_id": "catalog-1",
+          "generation": 1,
+          "published_at": "2026-10-29T00:00:00.000Z",
+          "required_features": [
+            "exact-identity-v1",
+            "actual-service-tier-v1",
+            "whole-request-input-band-v1",
+            "explicit-cache-rates-v1",
+            "source-precedence-v1",
+            "per-rule-validity-v1"
+          ],
+          "rules": [
+            {
+              "rule_set_id": "set-1",
+              "rule_id": "rule-1",
+              "revision": 1,
+              "provider": "anthropic",
+              "model_id": "example-model",
+              "source": "seed",
+              "conditions": {
+                "service_tier": "standard",
+                "request_input_tokens": {
+                  "min": 0,
+                  "max": null
+                }
+              },
+              "rates": {
+                "input_per_million_tokens": 2,
+                "output_per_million_tokens": 8,
+                "cache_read_per_million_tokens": 0.2,
+                "cache_write_per_million_tokens": 2.5,
+                "cache_write_1h_per_million_tokens": 4
+              },
+              "usage_profile": "anthropic-cache-v1",
+              "profile_version": "anthropic-v1",
+              "provenance": {
+                "source_id": "fixture",
+                "document_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "adapter_version": "fixture-v1",
+                "observed_at": "2026-10-29T00:00:00.000Z"
+              },
+              "provider_effective_at": null,
+              "active_from": "2026-10-29T00:00:00.000Z",
+              "retired_at": null,
+              "valid_until": null
+            }
+          ]
+        },
+        "provider": "anthropic",
+        "model_id": "example-model",
+        "organization_id": "org-1",
+        "pricing_time": "2026-10-29T00:00:00.000Z",
+        "facts": {
+          "version": 1,
+          "request_id": "response-1",
+          "service_tier": null,
+          "request_input_tokens": 1500,
+          "usage_profile": "anthropic-cache-v1",
+          "evidence_source": "provider_response"
+        },
+        "usage": {
+          "inputTokens": 1000,
+          "outputTokens": 100,
+          "cacheReadInputTokens": 200,
+          "cacheCreationEphemeral5mInputTokens": 300,
+          "cacheCreationEphemeral1hInputTokens": 0
+        }
+      },
+      "expected": {
+        "status": "unpriced",
+        "reason": "unknown_service_tier"
+      }
+    },
+    {
+      "name": "auto-is-unknown",
+      "input": {
+        "catalog": {
+          "catalog_id": "catalog-1",
+          "generation": 1,
+          "published_at": "2026-10-29T00:00:00.000Z",
+          "required_features": [
+            "exact-identity-v1",
+            "actual-service-tier-v1",
+            "whole-request-input-band-v1",
+            "explicit-cache-rates-v1",
+            "source-precedence-v1",
+            "per-rule-validity-v1"
+          ],
+          "rules": [
+            {
+              "rule_set_id": "set-1",
+              "rule_id": "rule-1",
+              "revision": 1,
+              "provider": "anthropic",
+              "model_id": "example-model",
+              "source": "seed",
+              "conditions": {
+                "service_tier": "standard",
+                "request_input_tokens": {
+                  "min": 0,
+                  "max": null
+                }
+              },
+              "rates": {
+                "input_per_million_tokens": 2,
+                "output_per_million_tokens": 8,
+                "cache_read_per_million_tokens": 0.2,
+                "cache_write_per_million_tokens": 2.5,
+                "cache_write_1h_per_million_tokens": 4
+              },
+              "usage_profile": "anthropic-cache-v1",
+              "profile_version": "anthropic-v1",
+              "provenance": {
+                "source_id": "fixture",
+                "document_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "adapter_version": "fixture-v1",
+                "observed_at": "2026-10-29T00:00:00.000Z"
+              },
+              "provider_effective_at": null,
+              "active_from": "2026-10-29T00:00:00.000Z",
+              "retired_at": null,
+              "valid_until": null
+            }
+          ]
+        },
+        "provider": "anthropic",
+        "model_id": "example-model",
+        "organization_id": "org-1",
+        "pricing_time": "2026-10-29T00:00:00.000Z",
+        "facts": {
+          "version": 1,
+          "request_id": "response-1",
+          "service_tier": "auto",
+          "request_input_tokens": 1500,
+          "usage_profile": "anthropic-cache-v1",
+          "evidence_source": "provider_response"
+        },
+        "usage": {
+          "inputTokens": 1000,
+          "outputTokens": 100,
+          "cacheReadInputTokens": 200,
+          "cacheCreationEphemeral5mInputTokens": 300,
+          "cacheCreationEphemeral1hInputTokens": 0
+        }
+      },
+      "expected": {
+        "status": "unpriced",
+        "reason": "unknown_service_tier"
+      }
+    },
+    {
+      "name": "priority-is-not-standard",
+      "input": {
+        "catalog": {
+          "catalog_id": "catalog-1",
+          "generation": 1,
+          "published_at": "2026-10-29T00:00:00.000Z",
+          "required_features": [
+            "exact-identity-v1",
+            "actual-service-tier-v1",
+            "whole-request-input-band-v1",
+            "explicit-cache-rates-v1",
+            "source-precedence-v1",
+            "per-rule-validity-v1"
+          ],
+          "rules": [
+            {
+              "rule_set_id": "set-1",
+              "rule_id": "rule-1",
+              "revision": 1,
+              "provider": "anthropic",
+              "model_id": "example-model",
+              "source": "seed",
+              "conditions": {
+                "service_tier": "standard",
+                "request_input_tokens": {
+                  "min": 0,
+                  "max": null
+                }
+              },
+              "rates": {
+                "input_per_million_tokens": 2,
+                "output_per_million_tokens": 8,
+                "cache_read_per_million_tokens": 0.2,
+                "cache_write_per_million_tokens": 2.5,
+                "cache_write_1h_per_million_tokens": 4
+              },
+              "usage_profile": "anthropic-cache-v1",
+              "profile_version": "anthropic-v1",
+              "provenance": {
+                "source_id": "fixture",
+                "document_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "adapter_version": "fixture-v1",
+                "observed_at": "2026-10-29T00:00:00.000Z"
+              },
+              "provider_effective_at": null,
+              "active_from": "2026-10-29T00:00:00.000Z",
+              "retired_at": null,
+              "valid_until": null
+            }
+          ]
+        },
+        "provider": "anthropic",
+        "model_id": "example-model",
+        "organization_id": "org-1",
+        "pricing_time": "2026-10-29T00:00:00.000Z",
+        "facts": {
+          "version": 1,
+          "request_id": "response-1",
+          "service_tier": "priority",
+          "request_input_tokens": 1500,
+          "usage_profile": "anthropic-cache-v1",
+          "evidence_source": "provider_response"
+        },
+        "usage": {
+          "inputTokens": 1000,
+          "outputTokens": 100,
+          "cacheReadInputTokens": 200,
+          "cacheCreationEphemeral5mInputTokens": 300,
+          "cacheCreationEphemeral1hInputTokens": 0
+        }
+      },
+      "expected": {
+        "status": "unpriced",
+        "reason": "no_matching_rule"
+      }
+    },
+    {
+      "name": "cached-input-counted-once",
+      "input": {
+        "catalog": {
+          "catalog_id": "catalog-1",
+          "generation": 1,
+          "published_at": "2026-10-29T00:00:00.000Z",
+          "required_features": [
+            "exact-identity-v1",
+            "actual-service-tier-v1",
+            "whole-request-input-band-v1",
+            "explicit-cache-rates-v1",
+            "source-precedence-v1",
+            "per-rule-validity-v1"
+          ],
+          "rules": [
+            {
+              "rule_set_id": "set-1",
+              "rule_id": "rule-1",
+              "revision": 1,
+              "provider": "anthropic",
+              "model_id": "example-model",
+              "source": "seed",
+              "conditions": {
+                "service_tier": "standard",
+                "request_input_tokens": {
+                  "min": 0,
+                  "max": null
+                }
+              },
+              "rates": {
+                "input_per_million_tokens": 2,
+                "output_per_million_tokens": 8,
+                "cache_read_per_million_tokens": 0.2,
+                "cache_write_per_million_tokens": 2.5,
+                "cache_write_1h_per_million_tokens": 4
+              },
+              "usage_profile": "anthropic-cache-v1",
+              "profile_version": "anthropic-v1",
+              "provenance": {
+                "source_id": "fixture",
+                "document_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "adapter_version": "fixture-v1",
+                "observed_at": "2026-10-29T00:00:00.000Z"
+              },
+              "provider_effective_at": null,
+              "active_from": "2026-10-29T00:00:00.000Z",
+              "retired_at": null,
+              "valid_until": null
+            }
+          ]
+        },
+        "provider": "anthropic",
+        "model_id": "example-model",
+        "organization_id": "org-1",
+        "pricing_time": "2026-10-29T00:00:00.000Z",
+        "facts": {
+          "version": 1,
+          "request_id": "response-1",
+          "service_tier": "standard",
+          "request_input_tokens": 1000,
+          "usage_profile": "anthropic-cache-v1",
+          "evidence_source": "provider_response"
+        },
+        "usage": {
+          "inputTokens": 1000,
+          "outputTokens": 100,
+          "cacheReadInputTokens": 200,
+          "cacheCreationEphemeral5mInputTokens": 300,
+          "cacheCreationEphemeral1hInputTokens": 0
+        }
+      },
+      "expected": {
+        "status": "unpriced",
+        "reason": "input_count_mismatch"
+      }
+    },
+    {
+      "name": "unsupported-cache-read",
+      "input": {
+        "catalog": {
+          "catalog_id": "catalog-1",
+          "generation": 1,
+          "published_at": "2026-10-29T00:00:00.000Z",
+          "required_features": [
+            "exact-identity-v1",
+            "actual-service-tier-v1",
+            "whole-request-input-band-v1",
+            "explicit-cache-rates-v1",
+            "source-precedence-v1",
+            "per-rule-validity-v1"
+          ],
+          "rules": [
+            {
+              "rule_set_id": "set-1",
+              "rule_id": "rule-1",
+              "revision": 1,
+              "provider": "anthropic",
+              "model_id": "example-model",
+              "source": "seed",
+              "conditions": {
+                "service_tier": "standard",
+                "request_input_tokens": {
+                  "min": 0,
+                  "max": null
+                }
+              },
+              "rates": {
+                "input_per_million_tokens": 2,
+                "output_per_million_tokens": 8,
+                "cache_read_per_million_tokens": null,
+                "cache_write_per_million_tokens": 2.5,
+                "cache_write_1h_per_million_tokens": 4
+              },
+              "usage_profile": "anthropic-cache-v1",
+              "profile_version": "anthropic-v1",
+              "provenance": {
+                "source_id": "fixture",
+                "document_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "adapter_version": "fixture-v1",
+                "observed_at": "2026-10-29T00:00:00.000Z"
+              },
+              "provider_effective_at": null,
+              "active_from": "2026-10-29T00:00:00.000Z",
+              "retired_at": null,
+              "valid_until": null
+            }
+          ]
+        },
+        "provider": "anthropic",
+        "model_id": "example-model",
+        "organization_id": "org-1",
+        "pricing_time": "2026-10-29T00:00:00.000Z",
+        "facts": {
+          "version": 1,
+          "request_id": "response-1",
+          "service_tier": "standard",
+          "request_input_tokens": 1500,
+          "usage_profile": "anthropic-cache-v1",
+          "evidence_source": "provider_response"
+        },
+        "usage": {
+          "inputTokens": 1000,
+          "outputTokens": 100,
+          "cacheReadInputTokens": 200,
+          "cacheCreationEphemeral5mInputTokens": 300,
+          "cacheCreationEphemeral1hInputTokens": 0
+        }
+      },
+      "expected": {
+        "status": "unpriced",
+        "reason": "unsupported_usage"
+      }
+    },
+    {
+      "name": "unsupported-lifetime-or-unit",
+      "input": {
+        "catalog": {
+          "catalog_id": "catalog-1",
+          "generation": 1,
+          "published_at": "2026-10-29T00:00:00.000Z",
+          "required_features": [
+            "exact-identity-v1",
+            "actual-service-tier-v1",
+            "whole-request-input-band-v1",
+            "explicit-cache-rates-v1",
+            "source-precedence-v1",
+            "per-rule-validity-v1"
+          ],
+          "rules": [
+            {
+              "rule_set_id": "set-1",
+              "rule_id": "rule-1",
+              "revision": 1,
+              "provider": "anthropic",
+              "model_id": "example-model",
+              "source": "seed",
+              "conditions": {
+                "service_tier": "standard",
+                "request_input_tokens": {
+                  "min": 0,
+                  "max": null
+                }
+              },
+              "rates": {
+                "input_per_million_tokens": 2,
+                "output_per_million_tokens": 8,
+                "cache_read_per_million_tokens": 0.2,
+                "cache_write_per_million_tokens": 2.5,
+                "cache_write_1h_per_million_tokens": 4
+              },
+              "usage_profile": "anthropic-cache-v1",
+              "profile_version": "anthropic-v1",
+              "provenance": {
+                "source_id": "fixture",
+                "document_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "adapter_version": "fixture-v1",
+                "observed_at": "2026-10-29T00:00:00.000Z"
+              },
+              "provider_effective_at": null,
+              "active_from": "2026-10-29T00:00:00.000Z",
+              "retired_at": null,
+              "valid_until": null
+            }
+          ]
+        },
+        "provider": "anthropic",
+        "model_id": "example-model",
+        "organization_id": "org-1",
+        "pricing_time": "2026-10-29T00:00:00.000Z",
+        "facts": {
+          "version": 1,
+          "request_id": "response-1",
+          "service_tier": "standard",
+          "request_input_tokens": 1500,
+          "usage_profile": "anthropic-cache-v1",
+          "evidence_source": "provider_response",
+          "unsupported_usage": true
+        },
+        "usage": {
+          "inputTokens": 1000,
+          "outputTokens": 100,
+          "cacheReadInputTokens": 200,
+          "cacheCreationEphemeral5mInputTokens": 300,
+          "cacheCreationEphemeral1hInputTokens": 0
+        }
+      },
+      "expected": {
+        "status": "unpriced",
+        "reason": "unsupported_usage"
+      }
+    },
+    {
+      "name": "feature-negotiation",
+      "input": {
+        "catalog": {
+          "catalog_id": "catalog-1",
+          "generation": 1,
+          "published_at": "2026-10-29T00:00:00.000Z",
+          "required_features": [
+            "exact-identity-v1",
+            "actual-service-tier-v1",
+            "whole-request-input-band-v1",
+            "explicit-cache-rates-v1",
+            "source-precedence-v1",
+            "per-rule-validity-v1",
+            "future-feature"
+          ],
+          "rules": [
+            {
+              "rule_set_id": "set-1",
+              "rule_id": "rule-1",
+              "revision": 1,
+              "provider": "anthropic",
+              "model_id": "example-model",
+              "source": "seed",
+              "conditions": {
+                "service_tier": "standard",
+                "request_input_tokens": {
+                  "min": 0,
+                  "max": null
+                }
+              },
+              "rates": {
+                "input_per_million_tokens": 2,
+                "output_per_million_tokens": 8,
+                "cache_read_per_million_tokens": 0.2,
+                "cache_write_per_million_tokens": 2.5,
+                "cache_write_1h_per_million_tokens": 4
+              },
+              "usage_profile": "anthropic-cache-v1",
+              "profile_version": "anthropic-v1",
+              "provenance": {
+                "source_id": "fixture",
+                "document_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "adapter_version": "fixture-v1",
+                "observed_at": "2026-10-29T00:00:00.000Z"
+              },
+              "provider_effective_at": null,
+              "active_from": "2026-10-29T00:00:00.000Z",
+              "retired_at": null,
+              "valid_until": null
+            }
+          ]
+        },
+        "provider": "anthropic",
+        "model_id": "example-model",
+        "organization_id": "org-1",
+        "pricing_time": "2026-10-29T00:00:00.000Z",
+        "facts": {
+          "version": 1,
+          "request_id": "response-1",
+          "service_tier": "standard",
+          "request_input_tokens": 1500,
+          "usage_profile": "anthropic-cache-v1",
+          "evidence_source": "provider_response"
+        },
+        "usage": {
+          "inputTokens": 1000,
+          "outputTokens": 100,
+          "cacheReadInputTokens": 200,
+          "cacheCreationEphemeral5mInputTokens": 300,
+          "cacheCreationEphemeral1hInputTokens": 0
+        }
+      },
+      "expected": {
+        "status": "unpriced",
+        "reason": "unsupported_features"
+      }
+    },
+    {
+      "name": "boundary-100000",
+      "input": {
+        "catalog": {
+          "catalog_id": "catalog-1",
+          "generation": 1,
+          "published_at": "2026-10-29T00:00:00.000Z",
+          "required_features": [
+            "exact-identity-v1",
+            "actual-service-tier-v1",
+            "whole-request-input-band-v1",
+            "explicit-cache-rates-v1",
+            "source-precedence-v1",
+            "per-rule-validity-v1"
+          ],
+          "rules": [
+            {
+              "rule_set_id": "set-1",
+              "rule_id": "rule-1",
+              "revision": 1,
+              "provider": "anthropic",
+              "model_id": "example-model",
+              "source": "seed",
+              "conditions": {
+                "service_tier": "standard",
+                "request_input_tokens": {
+                  "min": 0,
+                  "max": 100001
+                }
+              },
+              "rates": {
+                "input_per_million_tokens": 2,
+                "output_per_million_tokens": 8,
+                "cache_read_per_million_tokens": 0.2,
+                "cache_write_per_million_tokens": 2.5,
+                "cache_write_1h_per_million_tokens": 4
+              },
+              "usage_profile": "anthropic-cache-v1",
+              "profile_version": "anthropic-v1",
+              "provenance": {
+                "source_id": "fixture",
+                "document_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "adapter_version": "fixture-v1",
+                "observed_at": "2026-10-29T00:00:00.000Z"
+              },
+              "provider_effective_at": null,
+              "active_from": "2026-10-29T00:00:00.000Z",
+              "retired_at": null,
+              "valid_until": null
+            },
+            {
+              "rule_set_id": "set-1",
+              "rule_id": "upper",
+              "revision": 1,
+              "provider": "anthropic",
+              "model_id": "example-model",
+              "source": "seed",
+              "conditions": {
+                "service_tier": "standard",
+                "request_input_tokens": {
+                  "min": 100001,
+                  "max": null
+                }
+              },
+              "rates": {
+                "input_per_million_tokens": 4,
+                "output_per_million_tokens": 8,
+                "cache_read_per_million_tokens": 0.2,
+                "cache_write_per_million_tokens": 2.5,
+                "cache_write_1h_per_million_tokens": 4
+              },
+              "usage_profile": "anthropic-cache-v1",
+              "profile_version": "anthropic-v1",
+              "provenance": {
+                "source_id": "fixture",
+                "document_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "adapter_version": "fixture-v1",
+                "observed_at": "2026-10-29T00:00:00.000Z"
+              },
+              "provider_effective_at": null,
+              "active_from": "2026-10-29T00:00:00.000Z",
+              "retired_at": null,
+              "valid_until": null
+            }
+          ]
+        },
+        "provider": "anthropic",
+        "model_id": "example-model",
+        "organization_id": "org-1",
+        "pricing_time": "2026-10-29T00:00:00.000Z",
+        "facts": {
+          "version": 1,
+          "request_id": "response-1",
+          "service_tier": "standard",
+          "request_input_tokens": 100000,
+          "usage_profile": "anthropic-cache-v1",
+          "evidence_source": "provider_response"
+        },
+        "usage": {
+          "inputTokens": 100000,
+          "outputTokens": 100,
+          "cacheReadInputTokens": 0,
+          "cacheCreationEphemeral5mInputTokens": 0,
+          "cacheCreationEphemeral1hInputTokens": 0
+        }
+      },
+      "expected": {
+        "status": "priced",
+        "cost_nano_usd": "200800000",
+        "rule_id": "rule-1"
+      }
+    },
+    {
+      "name": "boundary-100001",
+      "input": {
+        "catalog": {
+          "catalog_id": "catalog-1",
+          "generation": 1,
+          "published_at": "2026-10-29T00:00:00.000Z",
+          "required_features": [
+            "exact-identity-v1",
+            "actual-service-tier-v1",
+            "whole-request-input-band-v1",
+            "explicit-cache-rates-v1",
+            "source-precedence-v1",
+            "per-rule-validity-v1"
+          ],
+          "rules": [
+            {
+              "rule_set_id": "set-1",
+              "rule_id": "rule-1",
+              "revision": 1,
+              "provider": "anthropic",
+              "model_id": "example-model",
+              "source": "seed",
+              "conditions": {
+                "service_tier": "standard",
+                "request_input_tokens": {
+                  "min": 0,
+                  "max": 100001
+                }
+              },
+              "rates": {
+                "input_per_million_tokens": 2,
+                "output_per_million_tokens": 8,
+                "cache_read_per_million_tokens": 0.2,
+                "cache_write_per_million_tokens": 2.5,
+                "cache_write_1h_per_million_tokens": 4
+              },
+              "usage_profile": "anthropic-cache-v1",
+              "profile_version": "anthropic-v1",
+              "provenance": {
+                "source_id": "fixture",
+                "document_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "adapter_version": "fixture-v1",
+                "observed_at": "2026-10-29T00:00:00.000Z"
+              },
+              "provider_effective_at": null,
+              "active_from": "2026-10-29T00:00:00.000Z",
+              "retired_at": null,
+              "valid_until": null
+            },
+            {
+              "rule_set_id": "set-1",
+              "rule_id": "upper",
+              "revision": 1,
+              "provider": "anthropic",
+              "model_id": "example-model",
+              "source": "seed",
+              "conditions": {
+                "service_tier": "standard",
+                "request_input_tokens": {
+                  "min": 100001,
+                  "max": null
+                }
+              },
+              "rates": {
+                "input_per_million_tokens": 4,
+                "output_per_million_tokens": 8,
+                "cache_read_per_million_tokens": 0.2,
+                "cache_write_per_million_tokens": 2.5,
+                "cache_write_1h_per_million_tokens": 4
+              },
+              "usage_profile": "anthropic-cache-v1",
+              "profile_version": "anthropic-v1",
+              "provenance": {
+                "source_id": "fixture",
+                "document_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "adapter_version": "fixture-v1",
+                "observed_at": "2026-10-29T00:00:00.000Z"
+              },
+              "provider_effective_at": null,
+              "active_from": "2026-10-29T00:00:00.000Z",
+              "retired_at": null,
+              "valid_until": null
+            }
+          ]
+        },
+        "provider": "anthropic",
+        "model_id": "example-model",
+        "organization_id": "org-1",
+        "pricing_time": "2026-10-29T00:00:00.000Z",
+        "facts": {
+          "version": 1,
+          "request_id": "response-1",
+          "service_tier": "standard",
+          "request_input_tokens": 100001,
+          "usage_profile": "anthropic-cache-v1",
+          "evidence_source": "provider_response"
+        },
+        "usage": {
+          "inputTokens": 100001,
+          "outputTokens": 100,
+          "cacheReadInputTokens": 0,
+          "cacheCreationEphemeral5mInputTokens": 0,
+          "cacheCreationEphemeral1hInputTokens": 0
+        }
+      },
+      "expected": {
+        "status": "priced",
+        "cost_nano_usd": "400804000",
+        "rule_id": "upper"
+      }
+    },
+    {
+      "name": "future-effective",
+      "input": {
+        "catalog": {
+          "catalog_id": "catalog-1",
+          "generation": 1,
+          "published_at": "2026-10-29T00:00:00.000Z",
+          "required_features": [
+            "exact-identity-v1",
+            "actual-service-tier-v1",
+            "whole-request-input-band-v1",
+            "explicit-cache-rates-v1",
+            "source-precedence-v1",
+            "per-rule-validity-v1"
+          ],
+          "rules": [
+            {
+              "rule_set_id": "set-1",
+              "rule_id": "rule-1",
+              "revision": 1,
+              "provider": "anthropic",
+              "model_id": "example-model",
+              "source": "seed",
+              "conditions": {
+                "service_tier": "standard",
+                "request_input_tokens": {
+                  "min": 0,
+                  "max": null
+                }
+              },
+              "rates": {
+                "input_per_million_tokens": 2,
+                "output_per_million_tokens": 8,
+                "cache_read_per_million_tokens": 0.2,
+                "cache_write_per_million_tokens": 2.5,
+                "cache_write_1h_per_million_tokens": 4
+              },
+              "usage_profile": "anthropic-cache-v1",
+              "profile_version": "anthropic-v1",
+              "provenance": {
+                "source_id": "fixture",
+                "document_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "adapter_version": "fixture-v1",
+                "observed_at": "2026-10-29T00:00:00.000Z"
+              },
+              "provider_effective_at": "2026-10-29T01:00:00Z",
+              "active_from": "2026-10-29T00:00:00.000Z",
+              "retired_at": null,
+              "valid_until": null
+            }
+          ]
+        },
+        "provider": "anthropic",
+        "model_id": "example-model",
+        "organization_id": "org-1",
+        "pricing_time": "2026-10-29T00:00:00.000Z",
+        "facts": {
+          "version": 1,
+          "request_id": "response-1",
+          "service_tier": "standard",
+          "request_input_tokens": 1500,
+          "usage_profile": "anthropic-cache-v1",
+          "evidence_source": "provider_response"
+        },
+        "usage": {
+          "inputTokens": 1000,
+          "outputTokens": 100,
+          "cacheReadInputTokens": 200,
+          "cacheCreationEphemeral5mInputTokens": 300,
+          "cacheCreationEphemeral1hInputTokens": 0
+        }
+      },
+      "expected": {
+        "status": "unpriced",
+        "reason": "no_matching_rule"
+      }
+    },
+    {
+      "name": "expired-at-equality",
+      "input": {
+        "catalog": {
+          "catalog_id": "catalog-1",
+          "generation": 1,
+          "published_at": "2026-10-29T00:00:00.000Z",
+          "required_features": [
+            "exact-identity-v1",
+            "actual-service-tier-v1",
+            "whole-request-input-band-v1",
+            "explicit-cache-rates-v1",
+            "source-precedence-v1",
+            "per-rule-validity-v1"
+          ],
+          "rules": [
+            {
+              "rule_set_id": "set-1",
+              "rule_id": "rule-1",
+              "revision": 1,
+              "provider": "anthropic",
+              "model_id": "example-model",
+              "source": "seed",
+              "conditions": {
+                "service_tier": "standard",
+                "request_input_tokens": {
+                  "min": 0,
+                  "max": null
+                }
+              },
+              "rates": {
+                "input_per_million_tokens": 2,
+                "output_per_million_tokens": 8,
+                "cache_read_per_million_tokens": 0.2,
+                "cache_write_per_million_tokens": 2.5,
+                "cache_write_1h_per_million_tokens": 4
+              },
+              "usage_profile": "anthropic-cache-v1",
+              "profile_version": "anthropic-v1",
+              "provenance": {
+                "source_id": "fixture",
+                "document_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "adapter_version": "fixture-v1",
+                "observed_at": "2026-10-29T00:00:00.000Z"
+              },
+              "provider_effective_at": null,
+              "active_from": "2026-10-29T00:00:00.000Z",
+              "retired_at": null,
+              "valid_until": "2026-10-29T00:00:00.000Z"
+            }
+          ]
+        },
+        "provider": "anthropic",
+        "model_id": "example-model",
+        "organization_id": "org-1",
+        "pricing_time": "2026-10-29T00:00:00.000Z",
+        "facts": {
+          "version": 1,
+          "request_id": "response-1",
+          "service_tier": "standard",
+          "request_input_tokens": 1500,
+          "usage_profile": "anthropic-cache-v1",
+          "evidence_source": "provider_response"
+        },
+        "usage": {
+          "inputTokens": 1000,
+          "outputTokens": 100,
+          "cacheReadInputTokens": 200,
+          "cacheCreationEphemeral5mInputTokens": 300,
+          "cacheCreationEphemeral1hInputTokens": 0
+        }
+      },
+      "expected": {
+        "status": "unpriced",
+        "reason": "no_matching_rule"
+      }
+    },
+    {
+      "name": "retired-at-equality",
+      "input": {
+        "catalog": {
+          "catalog_id": "catalog-1",
+          "generation": 1,
+          "published_at": "2026-10-29T00:00:00.000Z",
+          "required_features": [
+            "exact-identity-v1",
+            "actual-service-tier-v1",
+            "whole-request-input-band-v1",
+            "explicit-cache-rates-v1",
+            "source-precedence-v1",
+            "per-rule-validity-v1"
+          ],
+          "rules": [
+            {
+              "rule_set_id": "set-1",
+              "rule_id": "rule-1",
+              "revision": 1,
+              "provider": "anthropic",
+              "model_id": "example-model",
+              "source": "seed",
+              "conditions": {
+                "service_tier": "standard",
+                "request_input_tokens": {
+                  "min": 0,
+                  "max": null
+                }
+              },
+              "rates": {
+                "input_per_million_tokens": 2,
+                "output_per_million_tokens": 8,
+                "cache_read_per_million_tokens": 0.2,
+                "cache_write_per_million_tokens": 2.5,
+                "cache_write_1h_per_million_tokens": 4
+              },
+              "usage_profile": "anthropic-cache-v1",
+              "profile_version": "anthropic-v1",
+              "provenance": {
+                "source_id": "fixture",
+                "document_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "adapter_version": "fixture-v1",
+                "observed_at": "2026-10-29T00:00:00.000Z"
+              },
+              "provider_effective_at": null,
+              "active_from": "2026-10-29T00:00:00.000Z",
+              "retired_at": "2026-10-29T00:00:00.000Z",
+              "valid_until": null
+            }
+          ]
+        },
+        "provider": "anthropic",
+        "model_id": "example-model",
+        "organization_id": "org-1",
+        "pricing_time": "2026-10-29T00:00:00.000Z",
+        "facts": {
+          "version": 1,
+          "request_id": "response-1",
+          "service_tier": "standard",
+          "request_input_tokens": 1500,
+          "usage_profile": "anthropic-cache-v1",
+          "evidence_source": "provider_response"
+        },
+        "usage": {
+          "inputTokens": 1000,
+          "outputTokens": 100,
+          "cacheReadInputTokens": 200,
+          "cacheCreationEphemeral5mInputTokens": 300,
+          "cacheCreationEphemeral1hInputTokens": 0
+        }
+      },
+      "expected": {
+        "status": "unpriced",
+        "reason": "no_matching_rule"
+      }
+    },
+    {
+      "name": "no-array-order-tiebreaker",
+      "input": {
+        "catalog": {
+          "catalog_id": "catalog-1",
+          "generation": 1,
+          "published_at": "2026-10-29T00:00:00.000Z",
+          "required_features": [
+            "exact-identity-v1",
+            "actual-service-tier-v1",
+            "whole-request-input-band-v1",
+            "explicit-cache-rates-v1",
+            "source-precedence-v1",
+            "per-rule-validity-v1"
+          ],
+          "rules": [
+            {
+              "rule_set_id": "set-1",
+              "rule_id": "rule-1",
+              "revision": 1,
+              "provider": "anthropic",
+              "model_id": "example-model",
+              "source": "seed",
+              "conditions": {
+                "service_tier": "standard",
+                "request_input_tokens": {
+                  "min": 0,
+                  "max": null
+                }
+              },
+              "rates": {
+                "input_per_million_tokens": 2,
+                "output_per_million_tokens": 8,
+                "cache_read_per_million_tokens": 0.2,
+                "cache_write_per_million_tokens": 2.5,
+                "cache_write_1h_per_million_tokens": 4
+              },
+              "usage_profile": "anthropic-cache-v1",
+              "profile_version": "anthropic-v1",
+              "provenance": {
+                "source_id": "fixture",
+                "document_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "adapter_version": "fixture-v1",
+                "observed_at": "2026-10-29T00:00:00.000Z"
+              },
+              "provider_effective_at": null,
+              "active_from": "2026-10-29T00:00:00.000Z",
+              "retired_at": null,
+              "valid_until": null
+            },
+            {
+              "rule_set_id": "set-1",
+              "rule_id": "rule-1",
+              "revision": 1,
+              "provider": "anthropic",
+              "model_id": "example-model",
+              "source": "seed",
+              "conditions": {
+                "service_tier": "standard",
+                "request_input_tokens": {
+                  "min": 0,
+                  "max": null
+                }
+              },
+              "rates": {
+                "input_per_million_tokens": 2,
+                "output_per_million_tokens": 8,
+                "cache_read_per_million_tokens": 0.2,
+                "cache_write_per_million_tokens": 2.5,
+                "cache_write_1h_per_million_tokens": 4
+              },
+              "usage_profile": "anthropic-cache-v1",
+              "profile_version": "anthropic-v1",
+              "provenance": {
+                "source_id": "fixture",
+                "document_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "adapter_version": "fixture-v1",
+                "observed_at": "2026-10-29T00:00:00.000Z"
+              },
+              "provider_effective_at": null,
+              "active_from": "2026-10-29T00:00:00.000Z",
+              "retired_at": null,
+              "valid_until": null
+            }
+          ]
+        },
+        "provider": "anthropic",
+        "model_id": "example-model",
+        "organization_id": "org-1",
+        "pricing_time": "2026-10-29T00:00:00.000Z",
+        "facts": {
+          "version": 1,
+          "request_id": "response-1",
+          "service_tier": "standard",
+          "request_input_tokens": 1500,
+          "usage_profile": "anthropic-cache-v1",
+          "evidence_source": "provider_response"
+        },
+        "usage": {
+          "inputTokens": 1000,
+          "outputTokens": 100,
+          "cacheReadInputTokens": 200,
+          "cacheCreationEphemeral5mInputTokens": 300,
+          "cacheCreationEphemeral1hInputTokens": 0
+        }
+      },
+      "expected": {
+        "status": "unpriced",
+        "reason": "conflicting_rules"
+      }
+    },
+    {
+      "name": "organization-isolation",
+      "input": {
+        "catalog": {
+          "catalog_id": "catalog-1",
+          "generation": 1,
+          "published_at": "2026-10-29T00:00:00.000Z",
+          "required_features": [
+            "exact-identity-v1",
+            "actual-service-tier-v1",
+            "whole-request-input-band-v1",
+            "explicit-cache-rates-v1",
+            "source-precedence-v1",
+            "per-rule-validity-v1"
+          ],
+          "rules": [
+            {
+              "rule_set_id": "set-1",
+              "rule_id": "rule-1",
+              "revision": 1,
+              "provider": "anthropic",
+              "model_id": "example-model",
+              "source": "operator",
+              "conditions": {
+                "service_tier": "standard",
+                "request_input_tokens": {
+                  "min": 0,
+                  "max": null
+                }
+              },
+              "rates": {
+                "input_per_million_tokens": 2,
+                "output_per_million_tokens": 8,
+                "cache_read_per_million_tokens": 0.2,
+                "cache_write_per_million_tokens": 2.5,
+                "cache_write_1h_per_million_tokens": 4
+              },
+              "usage_profile": "anthropic-cache-v1",
+              "profile_version": "anthropic-v1",
+              "provenance": {
+                "source_id": "fixture",
+                "document_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "adapter_version": "fixture-v1",
+                "observed_at": "2026-10-29T00:00:00.000Z"
+              },
+              "provider_effective_at": null,
+              "active_from": "2026-10-29T00:00:00.000Z",
+              "retired_at": null,
+              "valid_until": null,
+              "organization_id": "org-other"
+            }
+          ]
+        },
+        "provider": "anthropic",
+        "model_id": "example-model",
+        "organization_id": "org-1",
+        "pricing_time": "2026-10-29T00:00:00.000Z",
+        "facts": {
+          "version": 1,
+          "request_id": "response-1",
+          "service_tier": "standard",
+          "request_input_tokens": 1500,
+          "usage_profile": "anthropic-cache-v1",
+          "evidence_source": "provider_response"
+        },
+        "usage": {
+          "inputTokens": 1000,
+          "outputTokens": 100,
+          "cacheReadInputTokens": 200,
+          "cacheCreationEphemeral5mInputTokens": 300,
+          "cacheCreationEphemeral1hInputTokens": 0
+        }
+      },
+      "expected": {
+        "status": "unpriced",
+        "reason": "no_matching_rule"
+      }
+    },
+    {
+      "name": "no-model-suffix-guessing",
+      "input": {
+        "catalog": {
+          "catalog_id": "catalog-1",
+          "generation": 1,
+          "published_at": "2026-10-29T00:00:00.000Z",
+          "required_features": [
+            "exact-identity-v1",
+            "actual-service-tier-v1",
+            "whole-request-input-band-v1",
+            "explicit-cache-rates-v1",
+            "source-precedence-v1",
+            "per-rule-validity-v1"
+          ],
+          "rules": [
+            {
+              "rule_set_id": "set-1",
+              "rule_id": "rule-1",
+              "revision": 1,
+              "provider": "anthropic",
+              "model_id": "example-model",
+              "source": "seed",
+              "conditions": {
+                "service_tier": "standard",
+                "request_input_tokens": {
+                  "min": 0,
+                  "max": null
+                }
+              },
+              "rates": {
+                "input_per_million_tokens": 2,
+                "output_per_million_tokens": 8,
+                "cache_read_per_million_tokens": 0.2,
+                "cache_write_per_million_tokens": 2.5,
+                "cache_write_1h_per_million_tokens": 4
+              },
+              "usage_profile": "anthropic-cache-v1",
+              "profile_version": "anthropic-v1",
+              "provenance": {
+                "source_id": "fixture",
+                "document_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "adapter_version": "fixture-v1",
+                "observed_at": "2026-10-29T00:00:00.000Z"
+              },
+              "provider_effective_at": null,
+              "active_from": "2026-10-29T00:00:00.000Z",
+              "retired_at": null,
+              "valid_until": null
+            }
+          ]
+        },
+        "provider": "anthropic",
+        "model_id": "example-model-20261029",
+        "organization_id": "org-1",
+        "pricing_time": "2026-10-29T00:00:00.000Z",
+        "facts": {
+          "version": 1,
+          "request_id": "response-1",
+          "service_tier": "standard",
+          "request_input_tokens": 1500,
+          "usage_profile": "anthropic-cache-v1",
+          "evidence_source": "provider_response"
+        },
+        "usage": {
+          "inputTokens": 1000,
+          "outputTokens": 100,
+          "cacheReadInputTokens": 200,
+          "cacheCreationEphemeral5mInputTokens": 300,
+          "cacheCreationEphemeral1hInputTokens": 0
+        }
+      },
+      "expected": {
+        "status": "unpriced",
+        "reason": "no_matching_rule"
+      }
+    }
+  ]
+}

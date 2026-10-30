@@ -26,7 +26,6 @@ import {
   loadGuardrailTurnSubject,
   parseUsageDelta,
   persistUsage,
-  priceUsageDelta,
   type DbTransaction,
 } from './usage-accounting.js';
 
@@ -414,20 +413,14 @@ export class NativeCompletionCoordinator {
       if (!report.usage) continue;
       const usage = parseUsageDelta(report.usage);
       if (!usage) throw new Error('Invalid normalized native report');
-      const costNanoUsd = report.model
-        ? await priceUsageDelta(
-            tx as unknown as DbClient,
-            o.workspaceId,
-            report.provider,
-            report.model,
-            usage,
-          )
-        : null;
       const result = await persistUsage(tx, {
         workspaceId: o.workspaceId,
         sessionId: o.sessionId,
         usage,
-        costNanoUsd,
+        costNanoUsd: null,
+        ...(report.model
+          ? { pricingContext: { provider: report.provider, modelId: report.model, facts: null } }
+          : {}),
         now: new Date(),
         turnSubject: subject,
         usageEventId: stableId(
