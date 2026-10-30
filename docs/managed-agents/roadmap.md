@@ -28,6 +28,14 @@ and its row in the proposals index together.
 
 Each item is proposed as an OIP pull request; the design is reviewed there before the code lands.
 
+- **Conditional model prices and dynamic provider price sources.**
+  [OIP-015](../../proposals/OIP-015-conditional-model-pricing.md) proposes service-tier and
+  request-input-token-range rules, immutable catalogs/cost provenance, and validated background
+  provider adapters. Trigger: accept the OIP before runtime implementation. Upgrade Engine usage
+  facts, Workspace Registry/SDKs and Spyhop together; retain v1-compatible standard prices and
+  explicit unpriced behavior through version skew. Official source/extractor selection, real
+  provider retrieval, refresh failure/expiry, rollback and end-to-end cost reconciliation remain
+  acceptance gates. This proposal does not change current model authorization or prices.
 - **Self-hosted DSH credential consumer.** Trigger: connect the dormant
   Registry credential issuer/handoff to self-hosted DSH preparation and dispatch.
   Record runner monotonic M0 on the first provisional receipt and set expiry to

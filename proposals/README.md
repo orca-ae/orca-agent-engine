@@ -95,3 +95,4 @@ was first proposed.
 | [012](OIP-012-agent-observability.md) | Agent observability | observability-exporter, registry-service-ts, agent-event-contract, Helm chart | Released in v0.5.0 |
 | [013](OIP-013-registry-api-read-performance.md) | Registry API read performance | registry-service-ts, memory-store | Released in v0.5.0 |
 | [014](OIP-014-exporter-state-and-startup.md) | Exporter state and startup recovery | observability-exporter, Helm chart | Released in v0.5.0 |
+| [015](OIP-015-conditional-model-pricing.md) | Conditional model prices and dynamic provider price sources | registry-service-ts, harness-catalog, usage producers, SDKs, Helm chart, Workspace Registry, Spyhop | Proposed |
