@@ -5,13 +5,14 @@ The files/ directory contains modified source files from OpenSandbox
 
 Copyright 2026 Alibaba Group Holding Ltd.
 (files/batchsandbox_provider.py retains its original 2025 per-file header;
-files/provider_common.py and files/security_context.py retain 2026 headers.)
+files/provider_common.py, files/security_context.py and files/status_helpers.py retain 2026 headers.)
 
 Original paths at commit 207d94c7dc7735c143856fe5c6538b743e478786:
 
   server/opensandbox_server/services/k8s/batchsandbox_provider.py
   server/opensandbox_server/services/k8s/provider_common.py
   server/opensandbox_server/services/k8s/security_context.py
+  server/opensandbox_server/services/k8s/status_helpers.py
 
 Modifications implement Orca's gVisor + in-sandbox FUSE-only contract:
 
@@ -24,6 +25,7 @@ Modifications implement Orca's gVisor + in-sandbox FUSE-only contract:
   hostUsers, procMount, pool mode, and Windows workloads.
 - FUSE uses gVisor's virtual /dev/fuse; no host /dev/fuse mount exists.
 - Pause and resume reject before any BatchSandbox CR patch.
+- Package init failures report fixed reasons and terminate creation with rollback.
 - Security-context conversion preserves seccomp and AppArmor profiles without
   adding procMount handling.
 

@@ -6,11 +6,12 @@ import {
   type SandboxCallOptions,
 } from '../opensandbox-cancellation.js';
 
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import {
   accessSync,
   constants,
+  chmodSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -27,6 +28,12 @@ import { createRequire } from 'node:module';
 import { dirname, join, relative, resolve as resolvePath, sep as pathSep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { parseToolCall } from '../sandbox-runtime.js';
+import {
+  ENVIRONMENT_PACKAGES_EXEC_ROOT,
+  ENVIRONMENT_PACKAGE_COPY_SCRIPT,
+  buildEnvironmentPackageBoundaryProbe,
+  assertEnvironmentPackageMountPaths,
+} from '../environment-packages.js';
 import { killSandboxProcessTree } from '../kill-process-tree.js';
 import type {
   EnvironmentSpec,
@@ -172,6 +179,8 @@ export interface LocalSandboxRuntimeOptions {
 
   /** Linux-only model tools: map the private root to / inside nested bubblewrap. */
   managedToolFilesystem?: boolean;
+  /** Load the provider-prepared workload rootfs; the trusted worker retains its own image. */
+  useEnvironmentPackages?: boolean;
 }
 
 let nextId = 0;
@@ -740,6 +749,25 @@ export class LocalSandboxRuntime implements SandboxRuntime {
       sessionId: id,
     });
     try {
+      if (this.opts.useEnvironmentPackages) {
+        if (!this.opts.managedToolFilesystem)
+          throw new Error('package environments require managed tool isolation');
+        execFileSync(
+          process.execPath,
+          [
+            '-e',
+            ENVIRONMENT_PACKAGE_COPY_SCRIPT,
+            ENVIRONMENT_PACKAGES_EXEC_ROOT,
+            layout.root,
+            'private-root',
+          ],
+          {
+            timeout: 900_000,
+            stdio: 'pipe',
+          },
+        );
+        chmodSync(layout.root, 0o700);
+      }
       const config = this.buildSandboxConfig(layout);
       await this.ensureInitialized(config);
       // Mirror the constructor pattern: only set `binShell` when defined, so
@@ -751,6 +779,7 @@ export class LocalSandboxRuntime implements SandboxRuntime {
         config,
         manager: this.opts.manager,
         managedToolFilesystem: this.opts.managedToolFilesystem === true,
+        useEnvironmentPackages: this.opts.useEnvironmentPackages === true,
       };
       if (this.opts.binShell !== undefined) handleOpts.binShell = this.opts.binShell;
       return new LocalSandboxHandle(handleOpts);
@@ -797,6 +826,7 @@ export class LocalSandboxRuntime implements SandboxRuntime {
 }
 
 interface LocalSandboxHandleOptions {
+  useEnvironmentPackages?: boolean;
   id: string;
   layout: SessionWorkDirLayout;
   config: SandboxManagerInitConfig;
@@ -908,6 +938,7 @@ class LocalSandboxHandle implements SandboxHandle {
   private readonly manager: SandboxManagerLike;
   private readonly binShell?: string;
   private readonly managedToolFilesystem: boolean;
+  private readonly useEnvironmentPackages: boolean;
   private readonly managedRuntimeBinds: MappedToolRuntimeBind[];
   private readonly rootIdentity: string;
   private managedWritePolicy: ValidatedSandboxWritePolicy | undefined;
@@ -919,10 +950,12 @@ class LocalSandboxHandle implements SandboxHandle {
     this.config = opts.config;
     this.manager = opts.manager;
     this.managedToolFilesystem = opts.managedToolFilesystem === true;
+    this.useEnvironmentPackages = opts.useEnvironmentPackages === true;
     this.rootIdentity = filesystemIdentity(this.canonicalRoot);
-    this.managedRuntimeBinds = this.managedToolFilesystem
-      ? prepareManagedRuntimeTargets(this.canonicalRoot)
-      : [];
+    this.managedRuntimeBinds =
+      this.managedToolFilesystem && !this.useEnvironmentPackages
+        ? prepareManagedRuntimeTargets(this.canonicalRoot)
+        : [];
     if (opts.binShell !== undefined) this.binShell = opts.binShell;
     this.files = new LocalSandboxFiles(opts.layout.root, async (operation, fullPath, input) => {
       return await this.runFileOperation(operation, fullPath, input);
@@ -1035,12 +1068,40 @@ class LocalSandboxHandle implements SandboxHandle {
     };
   }
 
-  async prepareFilesystemRoots(_paths: readonly string[]): Promise<void> {
+  async prepareFilesystemRoots(paths: readonly string[]): Promise<void> {
+    if (this.useEnvironmentPackages) {
+      assertEnvironmentPackageMountPaths(paths);
+      for (const path of paths) {
+        const target = resolveUnderRoot(this.canonicalRoot, path);
+        assertNoSymlinkComponents(this.canonicalRoot, target, true);
+        rmSync(target, { recursive: true, force: true });
+      }
+    }
     // LocalSandboxRuntime owns a fresh private workdir for this handle; planned
     // virtual roots cannot be supplied by an external sandbox image.
   }
 
   async prepareWritePolicy(policy: SandboxWritePolicy): Promise<void> {
+    if (this.useEnvironmentPackages) {
+      const validated = validateSandboxWritePolicy(policy);
+      if (!validated.environmentPackages)
+        throw new Error('missing prepared environment package policy');
+      this.validateManagedRoots(validated);
+      const probe = await this.runWrappedWithConfig(
+        buildEnvironmentPackageBoundaryProbe(validated, this.canonicalRoot, true),
+        {
+          ...this.config,
+          filesystem: { ...this.config.filesystem, allowWrite: [this.canonicalRoot] },
+        },
+        this.canonicalRoot,
+        10_000,
+      );
+      if (probe.exit_code !== 0 || probe.stdout?.trim() !== 'orca_package_boundary_ok') {
+        throw new Error('managed environment package filesystem boundary probe failed');
+      }
+      this.managedWritePolicy = validated;
+      return;
+    }
     if (this.managedToolFilesystem) {
       const validated = validateSandboxWritePolicy(policy);
       const hostPidNamespace = readlinkSync('/proc/self/ns/pid');

@@ -56,8 +56,9 @@ isolation prerequisites fail those tests.
 
 The Local runtime's opt-in `managedToolFilesystem` mode requires Linux. Its
 policy shell maps the handle's private tool directory to `/` read-only, overlays
-only declared writable resources and `/mnt/session/outputs`, and exposes a
-small read-only set of system executables, libraries and TLS/DNS data. Bash,
+only declared writable resources and `/mnt/session/outputs`, and exposes either
+the prepared Environment package filesystem or a small read-only set of system
+executables, libraries and TLS/DNS data. Bash,
 glob, grep and file APIs use the same virtual resource paths. Runtime targets
 are pre-created as real files/directories; policy roots reject symlink,
 hard-link and mount aliases. Reserved runtime paths and Skills cannot become
@@ -119,6 +120,7 @@ packages/sandbox-runtime/
   src/
     sandbox-runtime.ts       # interfaces + parseToolCall + policy brand + capability guard
     write-policy.ts          # policy builder/validator, bubblewrap + probe commands, enforced wrapper
+    environment-packages.ts  # bounded package plans, trusted staging and static boundary probe
     read-page.ts             # bounded symlink-safe UTF-8 paging (host + remote-envelope forms)
     skills-materialize.ts    # Skill bundle validation for materializers
     chmod-many.ts            # batched permission application command
@@ -131,8 +133,9 @@ packages/sandbox-runtime/
 ```
 
 `services/session-runner` and Registry import this package.
-`services/harness-server` imports only `composeSkillsCatalog` from it; its own
-sandbox runtimes and write-policy code live under `src/sandbox/**`.
+`services/harness-server` imports `composeSkillsCatalog` and the Environment package
+preparation helpers from it; its own sandbox runtimes and write-policy code live
+under `src/sandbox/**`.
 
 ### Managed resource transfer validation
 
@@ -143,6 +146,24 @@ files, and privileged mode bits. File resources contain exactly one read-only
 file. Transfers allow at most 100 mounts, 10,000 files, 512 MiB per file, and
 2 GiB in total; each decoded chunk is at most 1 MiB. Manifest digests and strict
 base64 decoding provide the shared integrity checks for producers and consumers.
+
+Package-enabled transfers use manifest version 2 and pin the Environment's package
+declaration revision. A runner rejects a mismatch with its provisioned worker before
+writing resources; older runners reject version 2. Changing package declarations
+therefore requires a matching worker generation. Managed model tools copy the prepared
+workload filesystem into their private Session root. The controller and its SDK retain
+the operator image; only tool commands receive the package filesystem and language
+search paths. A static executable from the operator image probes the kernel boundary
+directly. Package declarations can contain unversioned names; each new worker resolves
+them again. Explicit package versions provide stable inputs to the installers.
+
+`node scripts/test-environment-packages-docker.mjs /tmp/orca-test-execd` exercises all six installers,
+prepared-tool execution and malicious installation hooks in temporary Docker containers
+after the workspace is built. Build the Linux execd binary from the pinned OpenSandbox
+source for the Docker host's architecture and pass its path as the argument. The test
+also verifies unauthenticated management API rejection and credential exclusion from
+tool environments, including nested PID 1. It uses a local Docker proc-mask exception for nested
+namespace checks; the production gVisor profile has no `procMount` exception.
 
 The checkpoint parser applies the same byte and path limits to runner-produced
 output and Memory changes. Checkpoints include immutable file identities and

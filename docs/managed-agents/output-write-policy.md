@@ -29,7 +29,10 @@ ephemeral bookkeeping paths (for example Claude's private temp/debug
 directory) are implementation exceptions, not session storage: they are never
 indexed, survive no sandbox teardown, and must not overlap `/mnt`,
 `/workspace`, or a resource mount. SDK user/project setting sources are
-disabled so they cannot add writable paths.
+disabled so they cannot add writable paths. Claude's SDK sandbox is mandatory with
+`allowUnsandboxedCommands: false`. For Environment packages, the Bash hook also
+removes `dangerouslyDisableSandbox` before forwarding the command to the SDK and
+wraps the command in the read-only package filesystem boundary.
 
 The default access for `memory_store` and `github_repository` remains
 `read_write`; callers can set `access=read_only`. This preserves the existing

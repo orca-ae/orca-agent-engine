@@ -14,7 +14,7 @@
 import { E2BSandboxRuntime, type E2BSandboxRuntimeOptions } from '@orca/cloud-sandbox';
 import type { SandboxRuntime } from '@orca/sandbox-runtime';
 import { CloudEnvironmentLauncher } from './cloud-environment-launcher.js';
-import type { EnvironmentLauncher, StartWorkerOptions } from './types.js';
+import type { EnvironmentLauncher, StartWorkerOptions, EnvironmentProvisionSpec } from './types.js';
 
 /** Construction options for {@link E2BEnvironmentLauncher}. */
 export interface E2BEnvironmentLauncherOptions {
@@ -77,8 +77,8 @@ export class E2BEnvironmentLauncher implements EnvironmentLauncher {
     });
   }
 
-  provision(name: string): Promise<string> {
-    return this.inner.provision(name);
+  provision(name: string, spec?: EnvironmentProvisionSpec): Promise<string> {
+    return this.inner.provision(name, spec);
   }
 
   startWorker(environmentId: string, opts: StartWorkerOptions): Promise<void> {

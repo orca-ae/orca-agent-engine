@@ -37,7 +37,8 @@ import {
   type ProcessSpawner,
   type SpawnedProcess,
 } from './process-spawner.js';
-import type { EnvironmentLauncher, StartWorkerOptions } from './types.js';
+import type { EnvironmentLauncher, StartWorkerOptions, EnvironmentProvisionSpec } from './types.js';
+import { normalizeEnvironmentPackages } from '@orca/sandbox-runtime';
 import {
   dialBackEnv,
   ENVIRONMENT_ID_ENV_VAR,
@@ -105,7 +106,10 @@ export class LocalEnvironmentLauncher implements EnvironmentLauncher {
    * `newId`'s use elsewhere in the registry, where a row's id and its
    * human-readable `name` are always orthogonal.
    */
-  async provision(_name: string): Promise<string> {
+  async provision(_name: string, spec?: EnvironmentProvisionSpec): Promise<string> {
+    if (Object.keys(normalizeEnvironmentPackages(spec?.packages)).length > 0) {
+      throw new Error('Local Environment launcher does not support isolated package preparation');
+    }
     const id = newId('local');
     const dir = join(this.opts.baseDir, id);
     mkdirSync(dir, { recursive: true });

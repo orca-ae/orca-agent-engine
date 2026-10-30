@@ -4,6 +4,9 @@
 
 set -eu
 
+# The sibling root execd owns this key. SDKs and their tools must never inherit it.
+unset EXECD_ACCESS_TOKEN
+
 output_dir="${ORCA_OUTPUT_CAPTURE_DIRECTORY:-/mnt/session/outputs}"
 if [ "$output_dir" != "/mnt/session/outputs" ]; then
   echo "unsupported ORCA_OUTPUT_CAPTURE_DIRECTORY: $output_dir" >&2

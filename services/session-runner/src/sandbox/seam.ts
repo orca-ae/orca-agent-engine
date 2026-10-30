@@ -49,6 +49,7 @@ import {
   SandboxManager,
   createManagedToolSandboxManager,
   buildSandboxWritePolicy,
+  currentEnvironmentPackagesRevision,
   type LocalSandboxRuntimeOptions,
   type SandboxRuntime,
 } from '@orca/sandbox-runtime';
@@ -116,6 +117,9 @@ export {
   GIT_PROXY_AUTH_ROOT,
   parseResourceCheckpoint,
   resourceCheckpointDigest,
+  currentEnvironmentPackagesRevision,
+  environmentPackagesRevision,
+  ENVIRONMENT_PACKAGES_ENV,
 } from '@orca/sandbox-runtime';
 
 /** A dedicated model-tool runtime; the trusted native SDK worker uses a separate handle. */
@@ -136,6 +140,7 @@ export function createManagedToolSandboxRuntime(opts: {
     harnessWorkDir: opts.harnessWorkDir,
     allowedNetworkHosts: [...(policy.networkAllowedDomains ?? [])],
     managedToolFilesystem: true,
+    useEnvironmentPackages: currentEnvironmentPackagesRevision() !== undefined,
     ...(opts.networkUnrestricted === true ? { networkUnrestricted: true } : {}),
     manager: createManagedToolSandboxManager(),
   });

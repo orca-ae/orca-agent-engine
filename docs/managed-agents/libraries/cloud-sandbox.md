@@ -22,6 +22,19 @@ nothing in `services/`.
   failed probe destroys the sandbox. A severed command stream is marked
   (`[orca: command stream truncated before completion]`) so an infrastructure
   fault is never mistaken for the command failing with exit 1.
+  Every acquisition uses a fresh management API credential and verifies that the
+  local execd listener returns 401 without it. Model tool processes do not inherit
+  this credential; an execd build without authentication support is rejected.
+- OpenSandbox advertises `supportsEnvironmentPackages`. It sends `apt`, `cargo`,
+  `gem`, `go`, `npm` and `pip` declarations through the versioned
+  `orca.environment.packages.v1` provider extension. Acquire checks the read-only
+  artifact mount and declaration revision before staging the workload filesystem;
+  an older provider that ignores the extension fails closed and is destroyed.
+  Package preparation requires unrestricted Environment networking. Its readiness
+  budget is 15 minutes, added to the requested sandbox lifetime. The provider
+  bounds the artifact volume to 8 GiB and supplies a 16 GiB ephemeral-storage limit
+  when the operator has not configured one. Package failures prevent worker start.
+- E2B rejects nonempty package declarations before calling the provider.
 - Both runtimes take the branded `ValidatedSandboxWritePolicy` on their
   enforcement methods and route tool calls through the shared `parseToolCall`.
   `destroy()` latches only after the remote kill/delete succeeds, so a retry

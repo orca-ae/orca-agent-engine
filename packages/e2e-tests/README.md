@@ -94,6 +94,18 @@ Coverage groups:
   Both assert a real sandbox handle with no Environment worker assignment.
   CI runs both through the same harness-server → sandbox-harness HTTP bridge,
   OpenSandbox image, 250m CPU / 1 GiB reservation, mounts and gVisor write policy.
+  The Environment package scenario creates a cloud Environment with `apt`, `pip`
+  and `npm` declarations through `/v1/environments`, runs those tools through a
+  real Session, and downloads the resulting report through the Files API. It
+  also checks read-only input protection and management credential exclusion.
+
+The OpenSandbox job also runs
+`pnpm -F @orca/harness-server test:e2e:opensandbox` against its isolated kind/gVisor
+cluster. This suite exercises both the harness and cloud-launcher runtime clients,
+all six package managers, malicious installer hooks, the generated Pod contract,
+and failed acquisition cleanup. It uses a dedicated fixture image built from the
+same sandbox-harness image. Missing live-server or kind configuration fails this
+explicit suite instead of skipping it.
 
 ## Invariants under test
 

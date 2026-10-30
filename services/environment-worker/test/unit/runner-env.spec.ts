@@ -13,6 +13,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { ENVIRONMENT_PACKAGES_ENV } from '@orca/sandbox-runtime';
 import {
   RUNNER_PARENT_PID_ENV_VAR,
   RUNNER_REGISTRY_URL_ENV_VAR as HOISTED_RUNNER_REGISTRY_URL_ENV_VAR,
@@ -33,6 +34,7 @@ describe('buildRunnerEnv', () => {
       LANG: 'en_US.UTF-8',
       LC_CTYPE: 'UTF-8',
       SSL_CERT_FILE: '/etc/ssl/cert.pem',
+      [ENVIRONMENT_PACKAGES_ENV]: JSON.stringify({ cargo: ['ripgrep'] }),
       AWS_SECRET_ACCESS_KEY: 'aws-secret',
       SOME_RANDOM_VAR: 'x',
     };
@@ -51,6 +53,7 @@ describe('buildRunnerEnv', () => {
     expect(env.LANG).toBe('en_US.UTF-8');
     expect(env.LC_CTYPE).toBe('UTF-8');
     expect(env.SSL_CERT_FILE).toBe('/etc/ssl/cert.pem');
+    expect(env[ENVIRONMENT_PACKAGES_ENV]).toBe(base[ENVIRONMENT_PACKAGES_ENV]);
     // Non-allowlisted vars are dropped (allowlist, not denylist) — the point.
     expect(env.AWS_SECRET_ACCESS_KEY).toBeUndefined();
     expect(env.SOME_RANDOM_VAR).toBeUndefined();

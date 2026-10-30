@@ -42,6 +42,7 @@ import {
   claudeSandboxSettings,
   parseSandboxWritePolicy,
   writePolicyPermissionHandler,
+  environmentPackageBashHooks,
 } from '../write-policy.js';
 import type {
   CreateRuntimeArgs,
@@ -344,6 +345,7 @@ function createRuntime({
           ? {
               sandbox: claudeSandboxSettings(writePolicy),
               canUseTool: writePolicyPermissionHandler(writePolicy, cwd),
+              hooks: environmentPackageBashHooks(writePolicy),
             }
           : {}),
         // Omit on the first turn so the SDK creates its own session. Never set
@@ -386,7 +388,12 @@ function createRuntime({
         );
         options.agent = primaryBoundary.name;
         options.agents = primaryBoundary.agents;
-        options.hooks = primaryAgentSelfDelegationGuard(primaryBoundary.name);
+        const delegationHooks = primaryAgentSelfDelegationGuard(primaryBoundary.name);
+        options.hooks = {
+          ...options.hooks,
+          ...delegationHooks,
+          PreToolUse: [...(options.hooks?.PreToolUse ?? []), ...(delegationHooks.PreToolUse ?? [])],
+        };
         options.forwardSubagentText = forwardSubagentText ?? true;
       }
 

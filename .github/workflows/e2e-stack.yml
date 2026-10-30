@@ -340,7 +340,7 @@ jobs:
       && needs.changes.outputs.stack != 'false'
       && (github.event_name != 'pull_request'
           || contains(github.event.pull_request.labels.*.name, 'run-e2e')) }}
-    timeout-minutes: 90
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
@@ -361,6 +361,7 @@ jobs:
       OPEN_SANDBOX_TOOL_IMAGE: orca-opensandbox-code-interpreter:e2e
       SANDBOX_HARNESS_IMAGE: sandbox-harness-claude-code:e2e
       SANDBOX_HARNESS_TEMPLATE_IMAGE: ghcr.io/orca-ae/sandbox-harness-claude-code:latest
+      OPEN_SANDBOX_PACKAGE_IMAGE: ghcr.io/orca-ae/sandbox-harness-claude-code:packages-e2e
       # v1.0.19 predates upstream's SSE ping race fix (97a450a7). Pin the
       # e95681e7 nightly artifact containing that fix, then load it under a
       # stable local tag because kind does not retain digest-only references.
@@ -567,7 +568,7 @@ jobs:
           fi
 
           git -C /tmp/OpenSandbox worktree add --detach /tmp/OpenSandbox-overlay-test HEAD
-          for file in batchsandbox_provider.py provider_common.py security_context.py; do
+          for file in batchsandbox_provider.py provider_common.py security_context.py status_helpers.py; do
             install -m 0644 \
               "${GITHUB_WORKSPACE}/charts/opensandbox-patches/files/${file}" \
               "/tmp/OpenSandbox-overlay-test/server/opensandbox_server/services/k8s/${file}"
@@ -575,10 +576,14 @@ jobs:
           install -m 0644 \
             "${GITHUB_WORKSPACE}/charts/opensandbox-patches/test/test_orca_patch.py" \
             /tmp/OpenSandbox-overlay-test/server/tests/k8s/test_orca_patch.py
+          install -m 0644 \
+            "${GITHUB_WORKSPACE}/charts/opensandbox-patches/test/environment-packages.json" \
+            /tmp/OpenSandbox-overlay-test/server/tests/k8s/environment-packages.json
           python3 -m py_compile \
             /tmp/OpenSandbox-overlay-test/server/opensandbox_server/services/k8s/batchsandbox_provider.py \
             /tmp/OpenSandbox-overlay-test/server/opensandbox_server/services/k8s/provider_common.py \
-            /tmp/OpenSandbox-overlay-test/server/opensandbox_server/services/k8s/security_context.py
+            /tmp/OpenSandbox-overlay-test/server/opensandbox_server/services/k8s/security_context.py \
+            /tmp/OpenSandbox-overlay-test/server/opensandbox_server/services/k8s/status_helpers.py
           # Fetch the pinned interpreter separately so transient GitHub 5xx
           # failures retry setup without retrying failed overlay tests.
           for attempt in 1 2 3; do
@@ -600,6 +605,7 @@ jobs:
               /tmp/OpenSandbox-overlay-test/server/opensandbox_server/services/k8s/batchsandbox_provider.py \
               /tmp/OpenSandbox-overlay-test/server/opensandbox_server/services/k8s/provider_common.py \
               /tmp/OpenSandbox-overlay-test/server/opensandbox_server/services/k8s/security_context.py \
+              /tmp/OpenSandbox-overlay-test/server/opensandbox_server/services/k8s/status_helpers.py \
               /tmp/OpenSandbox-overlay-test/server/tests/k8s/test_orca_patch.py
 
       - name: Build and validate OpenSandbox server and agent images
@@ -620,6 +626,10 @@ jobs:
             --build-arg DEFAULT_AGENT=claude-code \
             -f services/sandbox-harness/Dockerfile \
             .
+          for image in "${OPEN_SANDBOX_TOOL_IMAGE}" "${SANDBOX_HARNESS_IMAGE}"; do
+            docker run --rm --entrypoint /usr/bin/test "${image}" \
+              -x /usr/local/libexec/orca-environment-probe
+          done
           docker run --rm --privileged \
             --entrypoint /bin/bash \
             "${OPEN_SANDBOX_TOOL_IMAGE}" -lc '
@@ -737,6 +747,16 @@ jobs:
             "${SANDBOX_HARNESS_TEMPLATE_IMAGE}" \
             "${KIND_CLUSTER_NAME}"
 
+      - name: Build and load package installer E2E fixtures
+        if: matrix.harness == 'claude_agent_sdk'
+        run: |
+          docker build \
+            --build-arg "BASE_IMAGE=${SANDBOX_HARNESS_TEMPLATE_IMAGE}" \
+            --tag "${OPEN_SANDBOX_PACKAGE_IMAGE}" \
+            services/harness-server/test/fixtures/environment-packages
+          bash .github/scripts/load-kind-image-with-retry.sh \
+            "${OPEN_SANDBOX_PACKAGE_IMAGE}" "${KIND_CLUSTER_NAME}"
+
       - name: Preload OpenSandbox runtime images
         run: |
           set -euo pipefail
@@ -800,6 +820,10 @@ jobs:
                   mountPath: /app/opensandbox_server/services/k8s/security_context.py
                   subPath: security_context.py
                   readOnly: true
+                - name: opensandbox-server-gvisor-fuse-patch
+                  mountPath: /app/opensandbox_server/services/k8s/status_helpers.py
+                  subPath: status_helpers.py
+                  readOnly: true
               volumes:
                 - name: opensandbox-server-gvisor-fuse-patch
                   configMap:
@@ -857,7 +881,7 @@ jobs:
             opensandbox-server-gvisor-fuse-patch -o json > "${patch_configmap}"
           jq -e '
             (.data | keys | sort) ==
-              ["batchsandbox_provider.py", "provider_common.py", "security_context.py"]
+              ["batchsandbox_provider.py", "provider_common.py", "security_context.py", "status_helpers.py"]
             and (.data["batchsandbox_provider.py"] | contains("ORCA_TRUSTED_SANDBOX_WORKLOADS"))
             and (.data["batchsandbox_provider.py"] | contains("_GVISOR_RUNTIME_CLASS"))
             and (.data["batchsandbox_provider.py"] | contains("orca.fuse.device"))
@@ -878,7 +902,7 @@ jobs:
               | select(.name == "opensandbox-server-gvisor-fuse-patch")
               | .subPath
             ] | sort) ==
-              ["batchsandbox_provider.py", "provider_common.py", "security_context.py"]
+              ["batchsandbox_provider.py", "provider_common.py", "security_context.py", "status_helpers.py"]
             and ([
               .spec.template.spec.containers[]
               | select(.name == "main")
@@ -888,7 +912,8 @@ jobs:
             ] | sort) == [
               "/app/opensandbox_server/services/k8s/batchsandbox_provider.py",
               "/app/opensandbox_server/services/k8s/provider_common.py",
-              "/app/opensandbox_server/services/k8s/security_context.py"
+              "/app/opensandbox_server/services/k8s/security_context.py",
+              "/app/opensandbox_server/services/k8s/status_helpers.py"
             ]
             and ([
               .spec.template.spec.containers[]
@@ -898,7 +923,7 @@ jobs:
               | .readOnly
             ] | all(. == true))
           '
-          for file in batchsandbox_provider.py provider_common.py security_context.py; do
+          for file in batchsandbox_provider.py provider_common.py security_context.py status_helpers.py; do
             configmap_sha="$(
               jq -j --arg file "${file}" '.data[$file]' "${patch_configmap}" \
                 | sha256sum \
@@ -1409,6 +1434,16 @@ jobs:
             echo "::endgroup::"
           done
 
+      - name: Environment packages — live server and gVisor isolation
+        if: matrix.harness == 'claude_agent_sdk'
+        timeout-minutes: 45
+        env:
+          OPEN_SANDBOX_DOMAIN: localhost:18080
+          OPEN_SANDBOX_PROTOCOL: http
+          OPEN_SANDBOX_API_KEY: ${{ env.OPEN_SANDBOX_API_KEY }}
+          OPEN_SANDBOX_IMAGE: ${{ env.OPEN_SANDBOX_PACKAGE_IMAGE }}
+        run: pnpm -F @orca/harness-server test:e2e:opensandbox
+
       - name: Layer B — ${{ env.ORCA_E2E_AGENT_HARNESS }} separate on OpenSandbox
         env:
           ANTHROPIC_API_KEY: ${{ matrix.harness != 'codex_sdk' && secrets.ANTHROPIC_API_KEY || '' }}
@@ -1468,9 +1503,19 @@ jobs:
           echo "::endgroup::"
           echo "::group::opensandbox sandbox resources"
           kubectl -n opensandbox get batchsandboxes,pods -o wide 2>&1 || true
-          kubectl -n opensandbox get batchsandboxes -o yaml 2>&1 || true
-          kubectl -n opensandbox describe batchsandboxes 2>&1 || true
-          kubectl -n opensandbox describe pods 2>&1 || true
+          # Full specs/descriptions include the per-sandbox execd credential.
+          # Keep lifecycle and init diagnostics without printing environment values.
+          kubectl -n opensandbox get batchsandboxes -o json \
+            | jq '{items: [.items[] | {name: .metadata.name, status: .status}]}' || true
+          kubectl -n opensandbox get pods -o json | jq '{items: [.items[] | {
+            name: .metadata.name,
+            runtimeClassName: .spec.runtimeClassName,
+            shareProcessNamespace: .spec.shareProcessNamespace,
+            automountServiceAccountToken: .spec.automountServiceAccountToken,
+            initContainers: [.spec.initContainers[]? | {name, image, resources, securityContext, volumeMounts}],
+            containers: [.spec.containers[] | {name, image, resources, securityContext, volumeMounts}],
+            status: .status
+          }]}' || true
           kubectl -n opensandbox get events --sort-by=.lastTimestamp 2>&1 || true
           echo "::endgroup::"
           echo "::group::opensandbox sandbox pods"

@@ -102,6 +102,13 @@
 version: 1
 
 exemptions:
+  - name: KIND_CLUSTER_NAME
+    reason: wired-elsewhere
+    site: services/harness-server/test/e2e/environment-packages.e2e.ts
+    note: >-
+      Selects the isolated kind context for live OpenSandbox package E2E Pod inspection.
+      The stack workflow supplies it; the test never uses the caller's current context.
+
   # ---------------------------------------------------------------------------
   # not-an-env-var — exported constants and platform identifiers that the doc
   # regex collects because they are SCREAMING_SNAKE in backticks.
@@ -478,6 +485,13 @@ exemptions:
     site: services/harness-server/src/sandbox/local/runtime.ts
     note: >-
       The third spelling, set at runtime.ts:383 for the same reason.
+
+  - name: ORCA_ENVIRONMENT_PACKAGES
+    reason: wired-elsewhere
+    site: packages/sandbox-runtime/src/environment-packages.ts
+    note: >-
+      Provider-injected prepared package declarations, read through ENVIRONMENT_PACKAGES_ENV
+      and compared with the resource manifest before runner setup. It is not an operator knob.
 
   - name: ORCA_GIT_CREDS_URL
     reason: wired-elsewhere

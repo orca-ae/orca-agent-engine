@@ -103,9 +103,15 @@ this catches bind-mount and hard-link aliases that canonical path comparison
 cannot reveal. They also reject nested mount points below every readable or
 writable session root. Because current remote providers do not expose a sealed
 filesystem namespace for setup, `colocated` accepts only the operator catalog
-image; Environment-supplied custom images fail closed. All managed sandbox
-executions reject Environment package installers until the same sealing
-primitive is available.
+image; Environment-supplied custom images fail closed. OpenSandbox prepares
+Environment packages in a separate credential-free init container. That container
+terminates before the runtime starts and its filesystem enters the runtime through
+a read-only volume. The trusted runtime copies only regular files, directories and
+symlinks into a bounded workload tree, strips privileged mode bits, and rebuilds the
+resource and Skill targets. A static platform probe verifies the nested execution
+boundary without trusting package-provided shells or libraries. Resource mounts for
+package-enabled Sessions cannot overlap platform system, application, home or scratch
+roots. Other runtimes reject package preparation.
 
 Agent-facing file reads are restricted to the exact resource, output, and
 Skill roots in the same sandbox policy. Resolved targets outside those roots,

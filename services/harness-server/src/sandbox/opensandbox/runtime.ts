@@ -3,8 +3,20 @@
 
 import { runCancellableOpenSandboxCommand, type SandboxCallOptions } from '@orca/sandbox-runtime';
 
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
+import {
+  ENVIRONMENT_PACKAGE_TIMEOUT_MS,
+  buildOpenSandboxAcquireRequest,
+  waitUntilOpenSandboxReady,
+  OPENSANDBOX_READY_TIMEOUT_MS as READY_TIMEOUT_MS,
+  buildEnvironmentPackagesProbe,
+  buildStageEnvironmentPackagesCommand,
+  buildEnvironmentPackageMountTargets,
+  assertEnvironmentPackageMountPaths,
+  buildEnvironmentPackageBoundaryProbe,
+  buildOpenSandboxExecdAuthenticationProbeCommand,
+} from '@orca/sandbox-runtime';
 import type {
   EnvironmentSpec,
   SandboxCapabilities,
@@ -38,16 +50,7 @@ import {
 } from '../write-policy.js';
 
 const DEFAULT_EXECD_PORT = 44772;
-const DEFAULT_RESOURCE_LIMITS: Record<string, string> = {
-  cpu: '1',
-  memory: '2Gi',
-};
-const DEFAULT_ENTRYPOINT = ['tail', '-f', '/dev/null'];
-const READY_TIMEOUT_MS = 60_000;
-const READY_POLL_MS = 500;
-const EXECD_ISOLATION_EXTENSION = 'bootstrap.execd.isolation';
 const MAX_COMMAND_STREAM_BYTES = 1024 * 1024;
-const FUSE_DEVICE_EXTENSION = 'orca.fuse.device';
 const WRITE_POLICY_PROBE_FAILURE = 'orca_write_policy_probe_failed:';
 type CommandPurpose = 'command' | 'fuse_prerequisites' | 'filesystem_roots' | 'write_policy';
 
@@ -104,20 +107,21 @@ export class OpenSandboxRuntime implements SandboxRuntime {
       supportsFuse: true,
       supportsWritePolicy: true,
       supportsPerCallCancellation: true,
+      supportsEnvironmentPackages: true,
     };
   }
 
   async acquire(env: EnvironmentSpec): Promise<SandboxHandle> {
-    if (hasRequestedPackages(env)) {
-      throw new Error(
-        'OpenSandbox does not allow runtime package installation before the agent isolation boundary; use an operator-approved prebuilt image',
-      );
-    }
-    const body = buildOpenSandboxAcquireBody(env, {
+    const execdAccessToken = randomBytes(32).toString('hex');
+    const { body, packagePlan } = buildOpenSandboxAcquireRequest(env, {
+      execdAccessToken,
       image: this.opts.image,
-      entrypoint: this.opts.entrypoint,
+      ...(this.opts.entrypoint !== undefined ? { entrypoint: this.opts.entrypoint } : {}),
       timeoutSeconds: this.opts.timeoutSeconds,
-      resourceLimits: this.opts.resourceLimits,
+      ...(this.opts.resourceLimits !== undefined
+        ? { resourceLimits: this.opts.resourceLimits }
+        : {}),
+      enableFuse: true,
     });
 
     const created = await this.requestJson<{ id?: string }>('/sandboxes', {
@@ -131,11 +135,15 @@ export class OpenSandboxRuntime implements SandboxRuntime {
     const handle = new OpenSandboxHandle({
       id: created.id,
       runtime: this,
+      environmentPackages: packagePlan !== undefined,
+      execdAccessToken,
       ...(env.fileUploadOwnership ? { fileUploadOwnership: env.fileUploadOwnership } : {}),
     });
     try {
-      await handle.waitUntilReady();
+      await handle.waitUntilReady(packagePlan ? ENVIRONMENT_PACKAGE_TIMEOUT_MS : READY_TIMEOUT_MS);
+      await handle.verifyExecdAuthentication();
       await handle.verifyFusePrerequisites();
+      if (packagePlan) await handle.prepareEnvironmentPackages(packagePlan.packages);
       return handle;
     } catch (e) {
       await handle.destroy().catch(() => undefined);
@@ -220,58 +228,11 @@ export class OpenSandboxRuntime implements SandboxRuntime {
   }
 }
 
-function hasRequestedPackages(env: EnvironmentSpec): boolean {
-  if (!env.packages) return false;
-  return Object.values(env.packages).some((packages) =>
-    (packages ?? []).some((pkg) => pkg.trim().length > 0),
-  );
-}
-
-/**
- * Build the POST /sandboxes request body for OpenSandbox `acquire`. Exported as
- * a pure function so it can be unit-tested without provisioning a real sandbox
- * (the production `acquire` calls this so test + prod share one implementation).
- *
- * Merges `env.harnessEnv` (gateway LLM vars) into
- * the container env map, honors a per-acquire `env.image` / `env.exposePorts`
- * override (falling back to the constructor image), and treats undefined
- * `harnessEnv` as `{}`. A per-acquire entrypoint travels with an in-sandbox
- * harness image instead of inheriting the constructor image's entrypoint.
- */
 export function buildOpenSandboxAcquireBody(
   env: EnvironmentSpec,
-  opts: {
-    image: string;
-    entrypoint?: string[];
-    timeoutSeconds: number;
-    resourceLimits?: Record<string, string>;
-  },
+  opts: Omit<Parameters<typeof buildOpenSandboxAcquireRequest>[1], 'enableFuse'>,
 ): Record<string, unknown> {
-  // Merge harnessEnv (gateway LLM vars, etc.) into the container env map.
-  // Treat undefined as {} per the backward-compat contract.
-  const containerEnv: Record<string, string> = { ...(env.harnessEnv ?? {}) };
-  // Per-acquire image override takes precedence over the constructor image.
-  const image = env.image ?? opts.image;
-  const body: Record<string, unknown> = {
-    image: { uri: image },
-    entrypoint: env.entrypoint ?? opts.entrypoint ?? DEFAULT_ENTRYPOINT,
-    resourceLimits: opts.resourceLimits ?? DEFAULT_RESOURCE_LIMITS,
-    secureAccess: false,
-    timeout: opts.timeoutSeconds,
-    metadata: { owner: 'orca-managed-agents' },
-    env: containerEnv,
-    // OpenSandbox grants this operator-allowlisted workload only SETFCAP and
-    // SYS_ADMIN for Bubblewrap and gVisor's in-sandbox FUSE. /dev/fuse comes
-    // from gVisor; no host device or privileged Pod is used.
-    extensions: {
-      [EXECD_ISOLATION_EXTENSION]: 'enable',
-      [FUSE_DEVICE_EXTENSION]: 'enable',
-    },
-  };
-  if (env.exposePorts?.length) {
-    body['exposePorts'] = env.exposePorts;
-  }
-  return body;
+  return buildOpenSandboxAcquireRequest(env, { ...opts, enableFuse: true }).body;
 }
 
 class OpenSandboxHandle implements SandboxHandle {
@@ -285,6 +246,8 @@ class OpenSandboxHandle implements SandboxHandle {
     private readonly opts: {
       id: string;
       runtime: OpenSandboxRuntime;
+      environmentPackages: boolean;
+      execdAccessToken: string;
       fileUploadOwnership?: { owner: string; group: string };
     },
   ) {
@@ -295,23 +258,44 @@ class OpenSandboxHandle implements SandboxHandle {
     return this.opts.id;
   }
 
-  async waitUntilReady(): Promise<void> {
-    const deadline = Date.now() + READY_TIMEOUT_MS;
-    let lastError: unknown;
-    while (Date.now() < deadline) {
-      try {
+  async waitUntilReady(timeoutMs = READY_TIMEOUT_MS): Promise<void> {
+    await waitUntilOpenSandboxReady({
+      id: this.id,
+      timeoutMs,
+      ...(this.opts.environmentPackages
+        ? {
+            getLifecycle: () =>
+              this.opts.runtime.requestJson(`/sandboxes/${encodeURIComponent(this.id)}`),
+          }
+        : {}),
+      ping: async () => {
         await this.refreshExecdEndpoint();
-        const response = await this.execdFetch('/ping', { method: 'GET' });
-        if (response.ok) return;
-        lastError = new Error(`execd ping returned ${response.status}`);
-      } catch (e) {
-        lastError = e;
-      }
-      await sleep(READY_POLL_MS);
+        return this.execdFetch('/ping', { method: 'GET' });
+      },
+    });
+  }
+
+  async verifyExecdAuthentication(): Promise<void> {
+    const result = await this.runCommand(buildOpenSandboxExecdAuthenticationProbeCommand(), {
+      timeoutMs: 10_000,
+    });
+    if (result.exitCode !== 0) throw new Error('OpenSandbox execd authentication probe failed');
+  }
+
+  async prepareEnvironmentPackages(
+    packages: NonNullable<EnvironmentSpec['packages']>,
+  ): Promise<void> {
+    for (const command of [
+      buildEnvironmentPackagesProbe(packages),
+      buildStageEnvironmentPackagesCommand(),
+    ]) {
+      const result = await this.runCommand(command, {
+        timeoutMs: ENVIRONMENT_PACKAGE_TIMEOUT_MS,
+        requestTimeoutSeconds: ENVIRONMENT_PACKAGE_TIMEOUT_MS / 1000 + 5,
+      });
+      if (result.exitCode !== 0)
+        throw new Error('OpenSandbox isolated environment package preparation failed');
     }
-    throw new Error(
-      `OpenSandbox sandbox ${this.id} did not become ready: ${errorMessage(lastError)}`,
-    );
   }
 
   async verifyFusePrerequisites(): Promise<void> {
@@ -380,6 +364,7 @@ class OpenSandboxHandle implements SandboxHandle {
   }
 
   async prepareFilesystemRoots(paths: readonly string[]): Promise<void> {
+    if (this.opts.environmentPackages) assertEnvironmentPackageMountPaths(paths);
     const result = await this.runCommand(buildSandboxFilesystemRootPreflightCommand(paths), {
       purpose: 'filesystem_roots',
       envs: { ...SANDBOX_READ_COMMAND_ENVS },
@@ -394,6 +379,28 @@ class OpenSandboxHandle implements SandboxHandle {
   }
 
   async prepareWritePolicy(policy: SandboxWritePolicy): Promise<void> {
+    if (Boolean(policy.environmentPackages) !== this.opts.environmentPackages) {
+      throw new Error('environment package write policy does not match the prepared sandbox');
+    }
+    if (policy.environmentPackages) {
+      const prepared = await this.runCommand(
+        buildEnvironmentPackageMountTargets([
+          ...policy.readonlyPaths,
+          ...policy.writablePaths.map((root) => root.path),
+        ]),
+      );
+      if (prepared.exitCode !== 0)
+        throw new Error('environment package resource targets are unsafe');
+      const boundary = await this.runCommand(
+        'setpriv --reuid 1000 --regid 1000 --clear-groups --bounding-set=-all --no-new-privs -- ' +
+          buildEnvironmentPackageBoundaryProbe(policy),
+      );
+      if (boundary.exitCode !== 0 || boundary.stdout.trim() !== 'orca_package_boundary_ok') {
+        throw new Error(
+          `environment package filesystem boundary probe failed (exit=${boundary.exitCode}): ${summarizeCommandOutput(boundary.stderr)}`,
+        );
+      }
+    }
     const envs = Object.entries(SANDBOX_READ_COMMAND_ENVS)
       .map(([name, value]) => shellQuote(name + '=' + value))
       .join(' ');
@@ -645,7 +652,7 @@ class OpenSandboxHandle implements SandboxHandle {
     const endpoint = await this.opts.runtime.getExecdEndpoint(this.id);
     const resolved = this.opts.runtime.buildExecdBaseUrl(endpoint);
     this.execdBaseUrl = resolved.baseUrl;
-    this.execdHeaders = resolved.headers;
+    this.execdHeaders = { ...resolved.headers, 'X-EXECD-ACCESS-TOKEN': this.opts.execdAccessToken };
   }
 }
 
@@ -957,14 +964,6 @@ function normalizeFileMode(mode: number): number {
 function summarizeCommandOutput(s: string): string {
   if (s.length === 0) return '<empty>';
   return JSON.stringify(s.length > 500 ? `${s.slice(0, 500)}…` : s);
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function errorMessage(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
 }
 
 function shellQuote(value: string): string {
