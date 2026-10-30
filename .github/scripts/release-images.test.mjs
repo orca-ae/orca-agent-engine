@@ -20,6 +20,7 @@ const imageNames = [
   'orca-observability-exporter',
   'orca-registry-service-ts',
   'orca-harness-server',
+  'orca-environment',
   'sandbox-harness-claude-code',
   'sandbox-harness-dsh',
 ];
@@ -74,6 +75,16 @@ test('both architectures build natively without weakening validation or attestat
 });
 
 test('digest artifacts are isolated by image and platform', () => {
+  assert.deepEqual(
+    jobs['build-images'].strategy.matrix.include.find(
+      (entry) => entry.image === 'orca-environment',
+    ),
+    {
+      image: 'orca-environment',
+      dockerfile: 'services/environment-image/Dockerfile',
+      build_args: '',
+    },
+  );
   assert.equal(
     stepUsing(jobs['build-images'], 'actions/upload-artifact').with.name,
     'release-digest-${{ matrix.image }}-${{ matrix.platform.pair }}',

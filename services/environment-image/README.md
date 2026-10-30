@@ -35,6 +35,13 @@ only the image's side of that boundary.
 
 ## Build
 
+The release workflow builds `orca-environment` natively for `linux/amd64` and
+`linux/arm64`, publishes their verified manifest to
+`ghcr.io/orca-ae/orca-environment:<version>` (without the leading `v`), and includes
+it in the optional Docker Hub mirror. Publication uses the same release-wide
+build gate, provenance and SBOM settings as the service images. The image remains
+a toolbox: starting a container does not start the worker automatically.
+
 Build context is the **repo root** (the image compiles the two binaries + their
 workspace deps from source, like the other service images):
 
