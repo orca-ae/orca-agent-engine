@@ -205,9 +205,9 @@ Repository trust relies on publisher ACLs and proxy integrity, not cryptographic
 release verification: tags remain mutable and this policy installs no signing
 infrastructure. See [OpenSandbox trust configuration](../opensandbox/README.md#repository-and-exact-image-trust)
 for defaults and custom operator authorization. OpenSandbox API is not
-tenant-facing, runtime package
-installation rejects before agent isolation, every acquisition uses gVisor
-FUSE, and pause/resume rejects before lifecycle or CR patch.
+tenant-facing. OpenSandbox prepares Environment packages in a separate credential-free
+init container; other runtimes reject nonempty package declarations. Every acquisition
+uses gVisor FUSE, and pause/resume rejects before lifecycle or CR patch.
 
 The sandbox-harness image also installs `bubblewrap` and `socat`, the Claude
 Agent SDK's Linux sandbox dependencies. Its image entrypoint uses

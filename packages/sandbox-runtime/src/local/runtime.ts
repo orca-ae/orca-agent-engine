@@ -6,7 +6,7 @@ import {
   type SandboxCallOptions,
 } from '../opensandbox-cancellation.js';
 
-import { execFileSync, spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import {
   accessSync,
@@ -27,6 +27,7 @@ import {
 import { createRequire } from 'node:module';
 import { dirname, join, relative, resolve as resolvePath, sep as pathSep } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { promisify } from 'node:util';
 import { parseToolCall } from '../sandbox-runtime.js';
 import {
   ENVIRONMENT_PACKAGES_EXEC_ROOT,
@@ -182,6 +183,8 @@ export interface LocalSandboxRuntimeOptions {
   /** Load the provider-prepared workload rootfs; the trusted worker retains its own image. */
   useEnvironmentPackages?: boolean;
 }
+
+const execFileAsync = promisify(execFile);
 
 let nextId = 0;
 
@@ -752,7 +755,7 @@ export class LocalSandboxRuntime implements SandboxRuntime {
       if (this.opts.useEnvironmentPackages) {
         if (!this.opts.managedToolFilesystem)
           throw new Error('package environments require managed tool isolation');
-        execFileSync(
+        await execFileAsync(
           process.execPath,
           [
             '-e',
@@ -763,7 +766,7 @@ export class LocalSandboxRuntime implements SandboxRuntime {
           ],
           {
             timeout: 900_000,
-            stdio: 'pipe',
+            maxBuffer: 1024 * 1024,
           },
         );
         chmodSync(layout.root, 0o700);

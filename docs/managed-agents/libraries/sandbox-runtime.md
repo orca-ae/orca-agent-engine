@@ -151,11 +151,13 @@ Package-enabled transfers use manifest version 2 and pin the Environment's packa
 declaration revision. A runner rejects a mismatch with its provisioned worker before
 writing resources; older runners reject version 2. Changing package declarations
 therefore requires a matching worker generation. Managed model tools copy the prepared
-workload filesystem into their private Session root. The controller and its SDK retain
-the operator image; only tool commands receive the package filesystem and language
-search paths. A static executable from the operator image probes the kernel boundary
-directly. Package declarations can contain unversioned names; each new worker resolves
-them again. Explicit package versions provide stable inputs to the installers.
+workload filesystem into their private Session root through an awaited child process,
+so staging does not block the runner's event loop. Copy failures
+trigger private-root cleanup and prevent sandbox-manager initialization.
+The controller and its SDK retain the operator image; only tool commands receive the
+package filesystem and language search paths. A static executable from the operator
+image probes the kernel boundary directly. Package declarations can contain unversioned
+names; each new worker resolves them again. Explicit package versions provide stable inputs to the installers.
 
 `node scripts/test-environment-packages-docker.mjs /tmp/orca-test-execd` exercises all six installers,
 prepared-tool execution and malicious installation hooks in temporary Docker containers

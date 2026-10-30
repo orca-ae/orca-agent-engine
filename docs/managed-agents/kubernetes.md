@@ -424,7 +424,7 @@ requests its default `tail -f /dev/null`, which the patched server does not trus
 so sandbox acquisition fails.
 
 Install [`charts/opensandbox-patches`](../../charts/opensandbox-patches) beside
-the upstream OpenSandbox chart and mount its three ConfigMap keys over the
+the upstream OpenSandbox chart and mount its four ConfigMap keys over the
 server v0.2.2 Kubernetes provider modules. OpenSandbox config must set
 `secure_runtime.type=gvisor` and `secure_runtime.k8s_runtime_class=gvisor`.
 Every isolation request must match operator repository or exact-image trust
