@@ -28,6 +28,27 @@ and its row in the proposals index together.
 
 Each item is proposed as an OIP pull request; the design is reviewed there before the code lands.
 
+- **Child session inspection coverage.**
+  The DSH reader lists descendants and reads bounded history from attached Session objects.
+  Trigger for other readers: parent agents need the same verification on another runtime.
+  Claude and coordinator readers reuse existing history and policy paths.
+  Deployment validation requires an updated DSH image and the live inspection smoke against a
+  configured model route; the standard stack E2E matrix does not select DSH.
+  Preserve descendant isolation, cancellation and single canonical tool observations. Missing
+  recovery history is reported per target and does not block warm inspection. Initial DSH
+  reads cover attached Session objects. Recovery resumes the root and rebuilds the child
+  catalog without attaching dormant children: those children remain listed with unavailable
+  history until normal execution attaches them; inspection never wakes them. Normal native
+  completion also detaches children, so post-completion history needs the same cold-read
+  prerequisite even without a restart. The initial acceptance bar covers in-flight inspection,
+  not verification after completion. Post-completion and recovery history require
+  a native load that enforces a byte bound during acquisition and returns the captured
+  source's revision; do not substitute a custom file reader.
+  Other adapters add a private history-read path only for a demonstrated recovery requirement.
+  Codex/Pi reader wiring follows separately implemented managed delegation; do not build a new
+  delegation system just for inspection. CLI/custom readers use scoped owner callbacks.
+  Cross-Session full-text search waits for a separate retrieval requirement.
+
 - **DSH SDK colocated rollout.**
   Target-platform image validation, real-provider managed Session execution and sandbox
   replacement validation remain prerequisites to enabling it in a deployment. Verify strict

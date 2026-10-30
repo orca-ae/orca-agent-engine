@@ -7,6 +7,27 @@ import { expect, it, vi } from 'vitest';
 import { DshSdkWorker } from '../../src/worker.js';
 import { exerciseNativeTree } from '../support/native-tree.js';
 
+it.each(['list_child_sessions', 'read_child_session'])(
+  'reserves %s against managed tool collisions before spawning a worker',
+  async (name) => {
+    const worker = new DshSdkWorker(() => {});
+    await expect(
+      worker.handle({
+        type: 'start',
+        root: '/unused',
+        sessionId: 'session',
+        model: 'deepseek-v4-flash',
+        system: '',
+        apiKey: 'jwt',
+        dshGatewayUrl: 'http://gateway.test',
+        archivedThreadSubpaths: [],
+        tools: [{ name, inputSchema: { type: 'object' } }],
+      }),
+    ).rejects.toThrow('Reserved DSH native tool name');
+    await worker.close();
+  },
+);
+
 it('official Claude adapter preserves scoped refresh, native children and cold restore', async () => {
   const failures: string[] = [];
   try {

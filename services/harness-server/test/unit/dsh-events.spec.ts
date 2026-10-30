@@ -17,6 +17,68 @@ function declaration(subpath: string, parent = '') {
 }
 
 describe('DSH canonical tree admission', () => {
+  it('admits inspection only on supported readers and keeps embedded child records opaque', () => {
+    const projection = new DshEventProjection('ws', 'ses', ['read_child_session']);
+    projection.restoreTree([{ subpath: child, parentSubpath: '' }]);
+    const input = { agent_id: nativeThreadId(child)! };
+    const use = {
+      id: 'evt_inspect',
+      subpath: '',
+      kind: 'agent.tool_use',
+      payload: { turn_event_id: 'evt_turn', name: 'read_child_session', input },
+    };
+    projection.authorize({
+      type: 'orchestration_request',
+      id: 'request',
+      name: 'read_child_session',
+      arguments: input,
+      origin: { eventId: use.id, subpath: '' },
+    });
+    expect(projection.validate(use, 'evt_turn').kind).toBe('agent.tool_use');
+    const content = [
+      {
+        type: 'text',
+        text: JSON.stringify({
+          records: [
+            {
+              source_id: 'child-1',
+              kind: 'agent.tool_use',
+              tool_call_id: 'nested',
+              content: 'opaque',
+            },
+          ],
+        }),
+      },
+    ];
+    expect(
+      projection.validate(
+        {
+          id: 'evt_inspected',
+          subpath: '',
+          kind: 'agent.tool_result',
+          payload: {
+            turn_event_id: 'evt_turn',
+            tool_use_id: use.id,
+            content,
+            is_error: false,
+          },
+        },
+        'evt_turn',
+      ),
+    ).toMatchObject({ payload: { content } });
+    const old = new DshEventProjection('ws', 'ses', ['spawn', 'fork']);
+    expect(() => old.validate(use, 'evt_turn')).toThrow('approved orchestration');
+    expect(() =>
+      old.authorize({
+        type: 'orchestration_request',
+        id: 'old',
+        name: 'read_child_session',
+        arguments: input,
+        origin: { eventId: 'evt_old', subpath: '' },
+      }),
+    ).toThrow('Unsupported');
+  });
+
   it('validates bounded names and structured idle reasons', () => {
     const projection = new DshEventProjection('ws', 'ses', []);
     const named = declaration(child);

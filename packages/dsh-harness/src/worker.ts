@@ -19,12 +19,12 @@ import {
 import { gatewayBase, assertDshProtocol } from './transport.js';
 import { boundedLines } from './bounds.js';
 import {
-  orchestration,
-  orchestrationArguments,
+  nativeTools,
+  nativeArguments,
   type DshWorkerCommand,
   type DshWorkerEvent,
   type DshStartCommand,
-  type OrchestrationName,
+  type NativeName,
 } from './orchestration.js';
 import { archivedSubpaths, assertNotArchived } from './archive.js';
 
@@ -183,6 +183,8 @@ export class DshSdkWorker implements SdkWorker {
   }
 
   private async start(input: DshStartCommand): Promise<void> {
+    if (input.tools.some((tool) => nativeTools.has(tool.name)))
+      throw new Error('Reserved DSH native tool name');
     this.archived = archivedSubpaths(input.archivedThreadSubpaths);
     // Host admission requires effective always_deny for web_fetch; never expose its executable.
     input = {
@@ -351,8 +353,9 @@ export class DshSdkWorker implements SdkWorker {
         this.closing ||
         this.fatal ||
         (authorization
-          ? !orchestration.has(String(value.name))
-          : !input.tools.some((tool) => tool.name === value.name))
+          ? !nativeTools.has(String(value.name))
+          : nativeTools.has(String(value.name)) ||
+            !input.tools.some((tool) => tool.name === value.name))
       )
         throw new Error('DSH tool is unavailable');
       const id = String(value.id);
@@ -401,14 +404,14 @@ export class DshSdkWorker implements SdkWorker {
         throw new Error('DSH call origin outside owned tree');
       assertNotArchived(origin.subpath, this.archived, (path) => this.parents.get(path));
       const args = authorization
-        ? orchestrationArguments(String(value.name), value.arguments)
+        ? nativeArguments(String(value.name), value.arguments)
         : (value.arguments as Record<string, unknown>);
       return new Promise((resolve) => {
         this.pending.set(id, { resolve, subpath: origin.subpath, authorization });
         this.emit({
           type: authorization ? 'orchestration_request' : 'tool_call',
           id,
-          name: String(value.name) as OrchestrationName,
+          name: String(value.name) as NativeName,
           arguments: args,
           origin,
         });

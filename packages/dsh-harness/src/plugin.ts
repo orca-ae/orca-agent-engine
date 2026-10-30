@@ -3,6 +3,7 @@
 
 import type { Context } from '@deepseek-ai/cordis';
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent';
+import type { ToolExecution } from '@deepseek-ai/dsh-tools';
 import type {} from '@deepseek-ai/dsh-session-projection';
 import type {} from '@deepseek-ai/dsh-session-query';
 import type {} from '@deepseek-ai/dsh-working-directory';
@@ -24,7 +25,16 @@ import { assertSdkTerminalUsage } from '@orca/sdk-harness';
 import { captureCheckpoint, MAX_STATE_BYTES, MAX_STATE_FILES, NATIVE_ID } from './checkpoint.js';
 import { boundedLines } from './bounds.js';
 import { gatewayBase, installManagedFetch } from './transport.js';
-import { orchestration, orchestrationArguments, type DshStartCommand } from './orchestration.js';
+import {
+  orchestration,
+  orchestrationArguments,
+  inspection,
+  inspectionArguments,
+  nativeTools,
+  nativeArguments,
+  type DshStartCommand,
+} from './orchestration.js';
+import { ChildInspectionRuntime, type DeclaredChild } from './inspection-runtime.js';
 import { archivedSubpaths, assertNotArchived } from './archive.js';
 import { settlementFailures } from './settlement.js';
 import {
@@ -72,16 +82,31 @@ export function apply(ctx: Context): void {
   const terminals = new Map<string, string>();
   const calls = new Map<string, { seq: number; name: string }>();
   const compactions = new CompactionFacts();
-  const declaredChildren = new Map<string, string>();
+  const declaredChildren = new Map<string, DeclaredChild>();
+  let nextChildKey = 0;
   const pendingChildEvents = new Map<string, object[]>();
   const toolOrigin = new AsyncLocalStorage<string>();
   const emit = (event: object): void => rpc.notify('orca.event', event);
   const subpath = (id: string): string => (id === handle?.agent.id ? '' : 'subagents/' + id);
   const assertAvailable = (id: string): void =>
     assertNotArchived(subpath(id), archived, (path) => {
-      const parent = declaredChildren.get(path.slice('subagents/'.length));
+      const parent = declaredChildren.get(path.slice('subagents/'.length))?.parent;
       return parent === undefined ? undefined : subpath(parent);
     });
+  const childInspection = new ChildInspectionRuntime(
+    ctx,
+    declaredChildren,
+    (id) => {
+      try {
+        assertAvailable(id);
+        return false;
+      } catch (error) {
+        if (error instanceof Error && error.message === 'DSH thread is archived') return true;
+        throw error;
+      }
+    },
+    terminals,
+  );
   const fenceThread = (id: unknown): void => {
     if (typeof id !== 'string' || !NATIVE_ID.test(id) || !declaredChildren.has(id))
       throw new Error('DSH archive fence target outside tree');
@@ -103,7 +128,10 @@ export function apply(ctx: Context): void {
     parent ??= ctx.agents.get(SessionId(id))?.session.header.parentSession;
     if (
       kind === 'session.thread_created' &&
-      (!parent || (!declaredChildren.has(id) && declaredChildren.size >= 127))
+      (!NATIVE_ID.test(id) ||
+        !parent ||
+        (parent !== handle?.agent.id && !declaredChildren.has(parent)) ||
+        (!declaredChildren.has(id) && declaredChildren.size >= 127))
     )
       throw new Error('Invalid or oversized DSH child tree');
     const notification = {
@@ -131,7 +159,14 @@ export function apply(ctx: Context): void {
     } else {
       emit(notification);
       if (kind === 'session.thread_created') {
-        declaredChildren.set(id, parent!);
+        const previous = declaredChildren.get(id);
+        if (previous && previous.parent !== parent) throw new Error('DSH child lineage changed');
+        if (!previous)
+          declaredChildren.set(id, {
+            parent: parent!,
+            key: nextChildKey++,
+            ...(typeof payload.agent_name === 'string' ? { label: payload.agent_name } : {}),
+          });
         for (const pending of pendingChildEvents.get(id) ?? []) emit(pending);
         pendingChildEvents.delete(id);
       }
@@ -186,8 +221,29 @@ export function apply(ctx: Context): void {
     // commits once and injects a non-waking notice (dsh-agent-loop AgentLoopMachine.inject).
     // Await before tools/publication or lazy-child input; unrecoverable cwd rejects setup.
     await ctx.workingDirectory.ensure(agent);
+    const inspectionCaller = (exec: ToolExecution): (() => void) => {
+      const call = calls.get(agent.id + ':' + exec.callId);
+      const source = sourceEventId;
+      return () => {
+        assertAvailable(String(agent.id));
+        if (
+          !active ||
+          retired ||
+          interrupted ||
+          exec.signal.aborted ||
+          source !== sourceEventId ||
+          !call ||
+          call.name !== exec.name ||
+          calls.get(agent.id + ':' + exec.callId) !== call ||
+          exec.agent !== agent ||
+          ctx.agents.get(agent.id) !== agent ||
+          (agent.id !== handle?.agent.id && !declaredChildren.has(String(agent.id)))
+        )
+          throw new Error('DSH inspection source changed or cancelled');
+      };
+    };
     for (const tool of input.tools) {
-      if (orchestration.has(tool.name) || tool.name === 'web_fetch')
+      if (nativeTools.has(tool.name) || tool.name === 'web_fetch')
         throw new Error('Reserved DSH tool name');
       agentCtx.tools.register({
         name: tool.name,
@@ -233,6 +289,38 @@ export function apply(ctx: Context): void {
         },
       });
     }
+    for (const toolName of inspection) {
+      const read = toolName === 'read_child_session';
+      agentCtx.tools.register({
+        name: toolName,
+        description: read
+          ? 'Read visible execution history of an owned descendant without activating it.'
+          : 'List owned descendants and their current state without activating them.',
+        parameters: {
+          type: 'object',
+          properties: {
+            ...(read ? { agent_id: { type: 'string' } } : {}),
+            continuation: { type: 'string', maxLength: 2048 },
+          },
+          ...(read ? { required: ['agent_id'] } : {}),
+          additionalProperties: false,
+        },
+        output: { schema: {}, render: (_args, value) => [{ type: 'text', text: value as string }] },
+        execute: async (value, exec) => {
+          const args = inspectionArguments(toolName, value);
+          const check = inspectionCaller(exec);
+          return read
+            ? childInspection.read(
+                String(agent.id),
+                args.agent_id!,
+                check,
+                exec.signal,
+                args.continuation,
+              )
+            : childInspection.list(String(agent.id), check, args.continuation);
+        },
+      });
+    }
     await agentCtx.plugin({
       name: 'orca-orchestration',
       inject: ['tools', 'subagents', 'systemPrompt', 'sessionProjections', 'llm'],
@@ -251,14 +339,28 @@ export function apply(ctx: Context): void {
       },
     });
     agentCtx.on('tools/pre-execute', async (exec, next) => {
+      const args = nativeTools.has(exec.name)
+        ? nativeArguments(exec.name, exec.arguments)
+        : undefined;
       assertAvailable(String(agent.id));
-      if (!orchestration.has(exec.name) && !input!.tools.some((tool) => tool.name === exec.name))
+      if (!nativeTools.has(exec.name) && !input!.tools.some((tool) => tool.name === exec.name))
         throw new Error('DSH tool outside fixed grant');
-      if (orchestration.has(exec.name)) {
+      if (args) {
         const call = calls.get(agent.id + ':' + exec.callId);
         const source = sourceEventId;
-        const args = orchestrationArguments(exec.name, exec.arguments);
+        const checkInspection = inspectionCaller(exec);
         const validate = async () => {
+          if (inspection.has(exec.name)) {
+            checkInspection();
+            if (
+              JSON.stringify(inspectionArguments(exec.name, exec.arguments)) !==
+              JSON.stringify(args)
+            )
+              throw new Error('DSH inspection arguments changed');
+            if (args.agent_id !== undefined)
+              childInspection.assertDescendant(String(agent.id), args.agent_id);
+            return;
+          }
           assertAvailable(String(agent.id));
           if (
             !active ||
@@ -346,7 +448,7 @@ export function apply(ctx: Context): void {
       }
     }
     const call = calls.get(exec.agent?.id + ':' + exec.callId);
-    return call && orchestration.has(exec.name)
+    return call && nativeTools.has(exec.name)
       ? toolOrigin.run(identity(String(exec.agent!.id), 'tool:' + call.seq), next)
       : next();
   });
@@ -413,7 +515,7 @@ export function apply(ctx: Context): void {
       }
     if (event.type === 'tool/call') {
       calls.set(id + ':' + event.data.callId, { seq: event.seq, name: event.data.name });
-      if (orchestration.has(event.data.name))
+      if (nativeTools.has(event.data.name))
         canonical(
           id,
           'tool:' + event.seq,
@@ -424,7 +526,7 @@ export function apply(ctx: Context): void {
     }
     if (event.type === 'tool/result') {
       const call = calls.get(id + ':' + event.data.message.toolCallId);
-      if (call && orchestration.has(call.name))
+      if (call && nativeTools.has(call.name))
         canonical(
           id,
           'result:' + event.seq,
@@ -444,7 +546,7 @@ export function apply(ctx: Context): void {
         const sender = source.senderSessionId;
         if (
           !declaredChildren.has(sender) ||
-          declaredChildren.get(sender) !== id ||
+          declaredChildren.get(sender)?.parent !== id ||
           typeof event.data.id !== 'string' ||
           !event.data.id ||
           event.data.id.length > 128
@@ -576,15 +678,23 @@ export function apply(ctx: Context): void {
       handle = input.checkpoint
         ? await ctx.agents.resume({ resumeSessionId: id, agentOptions: options, setup })
         : await ctx.agents.create({ sessionId: id, agentOptions: options, setup });
-      const threads = (await tree()).map((row) => ({
+      const restoredChildren = await tree();
+      declaredChildren.clear();
+      nextChildKey = 0;
+      childInspection.generation = randomUUID();
+      const threads = restoredChildren.map((row) => ({
         subpath: subpath(row.id),
         parentSubpath: subpath(row.parentId),
       }));
-      for (const thread of threads)
-        declaredChildren.set(
-          thread.subpath.slice('subagents/'.length),
-          thread.parentSubpath ? thread.parentSubpath.slice('subagents/'.length) : String(id),
-        );
+      for (const row of restoredChildren) {
+        if (row.kind !== 'child') throw new Error('Unsupported DSH native tree');
+        const label = catalogName(row.label).agent_name;
+        declaredChildren.set(String(row.id), {
+          parent: String(row.parentId),
+          key: nextChildKey++,
+          ...(label === undefined ? {} : { label }),
+        });
+      }
       return { threadId: String(id), threads };
     }
     if (!input || !handle) throw new Error('DSH not initialized');

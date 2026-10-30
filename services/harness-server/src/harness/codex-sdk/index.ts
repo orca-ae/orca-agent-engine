@@ -4,7 +4,12 @@
 import { assertSdkTerminalUsage as assertCodexTerminalUsage } from '@orca/sdk-harness';
 import { stableSessionThreadId, AgentThreadEventKind } from '@orca/agent-event-contract';
 import { DshEventProjection, nativeThreadId } from './dsh-events.js';
-import { assertDshCheckpointInstructions } from '@orca/dsh-harness';
+import {
+  assertDshCheckpointInstructions,
+  nativeArguments,
+  nativeTools,
+  inspection,
+} from '@orca/dsh-harness';
 import { PiSdkWorker, assertPiCheckpointInstructions } from '@orca/pi-harness';
 import type { HarnessTurnAction, HarnessTurnReceipt } from '@orca/harness-catalog';
 import { recoverCodexTurn, receiptTerminalEvents, type CodexTurnStore } from './turn-receipt.js';
@@ -249,10 +254,7 @@ export class CodexSdkHarness implements AgentHarness {
           throw new Error('dsh_sdk requires agent_toolset web_fetch permission_policy always_deny');
       }
       this.dshProjection = new DshEventProjection(input.workspaceId, input.sessionId, [
-        'spawn',
-        'fork',
-        'send_message',
-        'interrupt_agent',
+        ...nativeTools,
       ]);
     }
     if (this.opts.checkpoint)
@@ -402,6 +404,7 @@ export class CodexSdkHarness implements AgentHarness {
       });
     }
     for (const name of allowed) {
+      if (this.dshProjection && nativeTools.has(name)) continue;
       if (!this.bindings.has(name)) throw new Error(`sandbox tool is unavailable: ${name}`);
     }
     for (const tool of input.agentSnapshot.custom_tools ?? []) {
@@ -1392,6 +1395,7 @@ export class CodexSdkHarness implements AgentHarness {
   ): Promise<void> {
     let reason: string | undefined;
     const subpath = event.origin.subpath;
+    const turnId = this.turnId;
     this.toolOrigins.set(event.id, subpath);
     try {
       if (
@@ -1405,46 +1409,48 @@ export class CodexSdkHarness implements AgentHarness {
       )
         throw new Error('Orchestration requires a unique active DSH call');
       this.orchestrationCalls.add(event.id);
+      const args = nativeArguments(event.name, event.arguments);
       this.dshProjection.authorize(event);
-      const args = { ...event.arguments };
+      const readOnly = inspection.has(event.name);
       const dispatch = event.name === 'spawn' || event.name === 'fork';
-      const fields = dispatch
-        ? ['description', 'prompt']
-        : event.name === 'send_message'
-          ? ['agent_id', 'message']
-          : ['agent_id'];
       if (
-        !args ||
-        typeof args !== 'object' ||
-        Array.isArray(args) ||
-        Object.keys(args).some((key) => !fields.includes(key)) ||
-        fields.some((key) => typeof args[key] !== 'string' || !String(args[key]).trim()) ||
+        (!readOnly && Object.values(args).some((value) => !value.trim())) ||
         Buffer.byteLength(JSON.stringify(args)) > 1024 * 1024
       )
         throw new Error('Unsupported DSH orchestration arguments');
-      const target = dispatch
-        ? undefined
-        : args.agent_id === this.nativeRootId
-          ? ''
-          : `subagents/${String(args.agent_id)}`;
+      const target =
+        dispatch || event.name === 'list_child_sessions'
+          ? undefined
+          : args.agent_id === this.nativeRootId
+            ? ''
+            : `subagents/${String(args.agent_id)}`;
       if (target !== undefined) {
         nativeThreadId(target);
-        if (target === subpath) throw new Error('DSH control cannot target the originating thread');
-        const parent = this.dshProjection.parentSubpath(target);
-        if (
-          event.name === 'send_message'
-            ? parent !== subpath && this.dshProjection.parentSubpath(subpath) !== target
-            : !this.dshProjection.subtree(subpath).includes(target) || target === subpath
-        )
-          throw new Error('DSH control target is outside source authority');
+        if (readOnly) {
+          if (target === subpath || !this.dshProjection.subtree(subpath).includes(target))
+            throw new Error('DSH inspection target is outside source authority');
+        } else {
+          if (target === subpath)
+            throw new Error('DSH control cannot target the originating thread');
+          const parent = this.dshProjection.parentSubpath(target);
+          if (
+            event.name === 'send_message'
+              ? parent !== subpath && this.dshProjection.parentSubpath(subpath) !== target
+              : !this.dshProjection.subtree(subpath).includes(target) || target === subpath
+          )
+            throw new Error('DSH control target is outside source authority');
+        }
       }
       const checkLive = () => {
         if (
+          this.stopped ||
+          this.failed ||
+          this.turnId !== turnId ||
           this.abort?.signal.aborted ||
           this.cancelledToolCalls.has(event.id) ||
           this.cancelledSubpaths.has(subpath) ||
           this.isArchived(subpath) ||
-          (target !== undefined && this.isArchived(target)) ||
+          (!readOnly && target !== undefined && this.isArchived(target)) ||
           this.receipt?.phase !== 'pending'
         )
           throw new Error('DSH call interrupted or thread archived');
@@ -1593,6 +1599,8 @@ export class CodexSdkHarness implements AgentHarness {
     );
   }
   private addBinding(name: string, binding: Binding): void {
+    if (this.dshProjection && nativeTools.has(name))
+      throw new Error(`reserved DSH native tool: ${name}`);
     if (this.bindings.has(name)) throw new Error(`duplicate tool: ${name}`);
     this.bindings.set(name, binding);
   }
