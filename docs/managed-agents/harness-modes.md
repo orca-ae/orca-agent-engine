@@ -393,9 +393,12 @@ custom image could otherwise leave a process racing trusted resource and Skill
 materialization. Operators change the Environment image at deployment time
 instead. Any operator-trusted Environment image must preserve the corresponding
 account-to-1000 mapping because execd rejects numeric owner strings.
-`separate` mode does not use the Environment image. Any execution that actually
-acquires a managed sandbox also rejects Environment package installers, because
-an installer hook could likewise leave a process racing setup.
+`separate` mode does not use the Environment image. OpenSandbox prepares Environment
+packages in a separate init container with no runtime credentials. After it exits,
+tool commands use the prepared workload filesystem through a read-only kernel
+boundary; resource materialization and the SDK retain the operator image. All six
+package managers are supported with unrestricted networking. Other runtimes reject
+nonempty package declarations. See [resource mounting](resource-mounting.md).
 
 ## The cloud Claude Code in-sandbox bridge
 
@@ -459,9 +462,12 @@ custom image could otherwise leave a process racing trusted resource and Skill
 materialization. Operators change the catalog image at deployment time instead.
 Any operator-trusted catalog image must preserve the corresponding account-to-1000
 mapping because execd rejects numeric owner strings.
-`separate` mode does not use the Environment image. Any execution that actually
-acquires a managed sandbox also rejects Environment package installers, because
-an installer hook could likewise leave a process racing setup.
+`separate` mode does not use the Environment image. OpenSandbox prepares Environment
+packages in a separate init container with no runtime credentials. After it exits,
+tool commands use the prepared workload filesystem through a read-only kernel
+boundary; resource materialization and the SDK retain the operator image. All six
+package managers are supported with unrestricted networking. Other runtimes reject
+nonempty package declarations. See [resource mounting](resource-mounting.md).
 
 `SandboxHandle.endpoint(port)` resolves a reachable URL for a port the sandbox exposes. It is optional on the interface; only runtimes that actually expose ports implement it. `InSandboxHarness` calls it at `start()` to obtain the URL before opening the `DialInTransport`.
 

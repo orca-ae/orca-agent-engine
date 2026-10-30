@@ -287,6 +287,12 @@ initial clone; a Registry host grant alone does not authorize upstream Git traff
 native SDK worker uses a separate trusted handle, with its home, temporary
 files, native history and checkpoints outside the model tool root.
 
+For a package-enabled OpenSandbox worker, managed tools copy the provider-prepared
+filesystem into their private root. The runner requires resource manifest version 2
+with the same package declaration revision as `ORCA_ENVIRONMENT_PACKAGES`; missing
+or mismatched metadata fails before resource staging. The SDK stays in the original
+operator image. Providers without managed resource support reject these workers.
+
 The Claude Agent SDK's own built-ins would otherwise execute on the runner
 **host** — `process.cwd()`, the runner's network. The in-process providers
 therefore bind every file and exec tool to the session's `SandboxHandle` through

@@ -155,6 +155,10 @@ opensandbox-server:
         mountPath: /app/opensandbox_server/services/k8s/security_context.py
         subPath: security_context.py
         readOnly: true
+      - name: opensandbox-server-gvisor-fuse-patch
+        mountPath: /app/opensandbox_server/services/k8s/status_helpers.py
+        subPath: status_helpers.py
+        readOnly: true
     volumes:
       - name: opensandbox-server-gvisor-fuse-patch
         configMap:

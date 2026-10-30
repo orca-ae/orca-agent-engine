@@ -10,9 +10,9 @@ delay_seconds="${PNPM_INSTALL_RETRY_DELAY_SECONDS:-10}"
 for attempt in $(seq 1 "${attempts}"); do
   if pnpm install --frozen-lockfile; then
     exit 0
+  else
+    status="$?"
   fi
-
-  status="$?"
   if [[ "${attempt}" == "${attempts}" ]]; then
     exit "${status}"
   fi

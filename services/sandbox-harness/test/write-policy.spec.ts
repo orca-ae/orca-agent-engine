@@ -10,6 +10,7 @@ import {
   assertNoWritableAliasToSkills,
   bubblewrapProbeArgs,
   claudeSandboxSettings,
+  environmentPackageBashHooks,
   isReadable,
   isWritable,
   OUTPUT_WRITABLE_PATH,
@@ -28,6 +29,46 @@ const encodedPolicy = JSON.stringify({
 });
 
 describe('in-sandbox write policy', () => {
+  it('wraps package Bash commands without granting a permission bypass', async () => {
+    const policy = parseSandboxWritePolicy({
+      [SANDBOX_WRITE_POLICY_ENV]: JSON.stringify({
+        ...JSON.parse(encodedPolicy),
+        environmentPackages: true,
+      }),
+    })!;
+    expect(environmentPackageBashHooks({ ...policy, environmentPackages: false })).toEqual({});
+    const hook = environmentPackageBashHooks(policy).PreToolUse![0]!.hooks[0]!;
+    const input = {
+      hook_event_name: 'PreToolUse' as const,
+      tool_name: 'Bash',
+      tool_input: {
+        command: 'python -c "print(1)"',
+        timeout: 1000,
+        dangerouslyDisableSandbox: true,
+      },
+      tool_use_id: 'tool_packages',
+      session_id: 'session',
+      transcript_path: '/tmp/history',
+      cwd: OUTPUT_WRITABLE_PATH,
+    };
+    const result = await hook(input, undefined, { signal: new AbortController().signal });
+    expect(result).toMatchObject({
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        updatedInput: {
+          command: expect.stringContaining("'/opt/orca-environment-rootfs'"),
+          timeout: 1000,
+        },
+      },
+    });
+    expect(result).not.toHaveProperty('hookSpecificOutput.permissionDecision');
+    expect(result).not.toHaveProperty('hookSpecificOutput.updatedInput.dangerouslyDisableSandbox');
+    expect(claudeSandboxSettings(policy).allowUnsandboxedCommands).toBe(false);
+    expect(
+      await hook({ ...input, tool_input: {} }, undefined, { signal: new AbortController().signal }),
+    ).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
+  });
+
   it('strictly decodes the dispatcher policy', () => {
     const policy = parseSandboxWritePolicy({ [SANDBOX_WRITE_POLICY_ENV]: encodedPolicy });
     expect(policy).toBeDefined();

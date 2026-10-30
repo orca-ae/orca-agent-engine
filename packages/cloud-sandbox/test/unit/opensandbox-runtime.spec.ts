@@ -15,7 +15,11 @@
 // itself against a mocked `fetch`, mirroring
 // services/harness-server/test/unit/sandbox-harness-env.spec.ts.
 
-import { buildSandboxWritePolicy } from '@orca/sandbox-runtime';
+import {
+  buildSandboxWritePolicy,
+  ENVIRONMENT_PACKAGES_ENV,
+  ENVIRONMENT_PACKAGES_EXTENSION,
+} from '@orca/sandbox-runtime';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   OpenSandboxRuntime,
@@ -25,6 +29,7 @@ import {
 import type { EnvironmentSpec } from '@orca/sandbox-runtime';
 
 const BASE_OPTS = {
+  execdAccessToken: 'a'.repeat(64),
   image: 'ghcr.io/orca-ae/sandbox-harness-claude-code:latest',
   timeoutSeconds: 60,
 };
@@ -78,7 +83,7 @@ describe('buildOpenSandboxAcquireBody', () => {
     expect(env['LITELLM_DEFAULT_MODEL']).toBe('claude-3-5-sonnet-20241022');
   });
 
-  it('does not pass packages through the container env', () => {
+  it('passes a bounded provider plan and canonical prepared metadata to the runtime', () => {
     const spec: EnvironmentSpec = {
       packages: { apt: ['git', 'curl'], npm: ['typescript'] },
       harnessEnv: {
@@ -88,9 +93,23 @@ describe('buildOpenSandboxAcquireBody', () => {
     };
     const body = buildOpenSandboxAcquireBody(spec, BASE_OPTS);
     const env = body['env'] as Record<string, string>;
-    expect(env['ORCA_ENV_PACKAGES_JSON']).toBeUndefined();
+    const packages = { apt: ['git', 'curl'], npm: ['typescript'] };
+    expect(JSON.parse(env[ENVIRONMENT_PACKAGES_ENV]!)).toEqual(packages);
+    expect(
+      JSON.parse((body['extensions'] as Record<string, string>)[ENVIRONMENT_PACKAGES_EXTENSION]!),
+    ).toEqual({ version: 1, packages });
+    expect(body['timeout']).toBe(BASE_OPTS.timeoutSeconds + 900);
     expect(env['LITELLM_API_BASE']).toBe('http://gw.local/v1/llm');
     expect(env['LITELLM_API_KEY']).toBe('tok');
+  });
+
+  it('discards forged prepared metadata when no package plan exists', () => {
+    const body = buildOpenSandboxAcquireBody(
+      { harnessEnv: { [ENVIRONMENT_PACKAGES_ENV]: '{"npm":["forged"]}' } },
+      BASE_OPTS,
+    );
+    expect(body['env']).not.toHaveProperty(ENVIRONMENT_PACKAGES_ENV);
+    expect(body['extensions']).not.toHaveProperty(ENVIRONMENT_PACKAGES_EXTENSION);
   });
 
   it('uses env.image override over constructor image', () => {
@@ -141,10 +160,10 @@ describe('buildOpenSandboxAcquireBody', () => {
     expect(body['exposePorts']).toBeUndefined();
   });
 
-  it('treats undefined harnessEnv as empty (no extra keys in env)', () => {
+  it('seeds only the internal management credential when harnessEnv is absent', () => {
     const body = buildOpenSandboxAcquireBody({}, BASE_OPTS);
     const env = body['env'] as Record<string, string>;
-    expect(Object.keys(env)).toHaveLength(0);
+    expect(env).toEqual({ EXECD_ACCESS_TOKEN: BASE_OPTS.execdAccessToken });
   });
 
   it('includes the full real body shape (resourceLimits, metadata, etc.)', () => {
@@ -197,14 +216,138 @@ describe('buildOpenSandboxEndpointUrl', () => {
 });
 
 describe('OpenSandboxRuntime.acquire hardening', () => {
-  it('rejects runtime package installation before creating an isolated workload', async () => {
+  it.each([
+    ['Failed', 'ENVIRONMENT_PACKAGES_INSTALL_FAILED'],
+    ['Failed', 'ENVIRONMENT_PACKAGES_START_FAILED'],
+    ['Failed', 'ENVIRONMENT_PACKAGES_STORAGE_LIMIT'],
+    ['Terminated', 'installer-private-output'],
+  ])('cleans up immediately on package lifecycle %s / %s', async (state, reason) => {
+    const calls = mockOpenSandboxFetch([], undefined, {
+      lifecycleStatus: { state, reason, message: 'installer-private-output' },
+    });
+    const outcome = await newTestRuntime({ enableFuse: false })
+      .acquire({ packages: { apt: ['jq'] } })
+      .catch((error: unknown) => error);
+    expect(outcome).toBeInstanceOf(Error);
+    const message = (outcome as Error).message;
+    expect(message).toMatch(/isolated environment package preparation failed/);
+    if (reason.startsWith('ENVIRONMENT_PACKAGES_')) expect(message).toContain(reason);
+    expect(message).not.toContain('installer-private-output');
+    expect(calls.filter((call) => call.method === 'DELETE')).toHaveLength(1);
+    expect(
+      calls.some((call) => call.url.includes('execd.test') || call.url.includes('/endpoints/')),
+    ).toBe(false);
+  });
+
+  it('uses a fresh management credential per sandbox and keeps it on execd requests', async () => {
+    const tokens: string[] = [];
+    mockOpenSandboxFetch([], (url, init) => {
+      if (url.endsWith('/sandboxes') && init?.method === 'POST') {
+        const token = JSON.parse(String(init.body)).env.EXECD_ACCESS_TOKEN as string;
+        expect(token).toMatch(/^[0-9a-f]{64}$/);
+        tokens.push(token);
+      }
+      if (url.startsWith('http://execd.test:44772'))
+        expect(new Headers(init?.headers).get('X-EXECD-ACCESS-TOKEN')).toBe(tokens.at(-1));
+    });
+    const runtime = newTestRuntime({ enableFuse: false });
+    await runtime.acquire({ harnessEnv: { EXECD_ACCESS_TOKEN: 'forged' } });
+    const handle = await runtime.acquire({});
+    await handle.run({ tool: 'bash', args: { command: 'true' } });
+    expect(tokens).toHaveLength(2);
+    expect(tokens[0]).not.toBe(tokens[1]);
+  });
+
+  it('observes a failed installer after an earlier preparing state', async () => {
+    const calls = mockOpenSandboxFetch([], undefined, {
+      lifecycleStatuses: [
+        { state: 'Allocated', reason: 'ENVIRONMENT_PACKAGES_PREPARING' },
+        { state: 'Failed', reason: 'ENVIRONMENT_PACKAGES_INSTALL_FAILED' },
+      ],
+      pingStatuses: [503],
+    });
+    await expect(
+      newTestRuntime({ enableFuse: false }).acquire({ packages: { apt: ['jq'] } }),
+    ).rejects.toThrow(/ENVIRONMENT_PACKAGES_INSTALL_FAILED/);
+    expect(
+      calls.filter((call) => call.method === 'GET' && call.url.endsWith('/sandboxes/sb_test')),
+    ).toHaveLength(2);
+    expect(calls.filter((call) => call.method === 'DELETE')).toHaveLength(1);
+  });
+
+  it('destroys a sandbox whose local execd accepts unauthenticated requests', async () => {
+    const calls = mockOpenSandboxFetch([], undefined, {
+      authProbeResponse: commandStream({ exitCode: 1 }),
+    });
+    await expect(newTestRuntime({ enableFuse: false }).acquire({})).rejects.toThrow(
+      /authentication probe failed/,
+    );
+    expect(calls.some((call) => call.method === 'DELETE')).toBe(true);
+  });
+
+  it('retains the package boundary failure and its exit status', async () => {
+    mockOpenSandboxFetch([
+      commandStream({ exitCode: 0 }),
+      commandStream({ exitCode: 0 }),
+      commandStream({ exitCode: 0 }),
+      commandStream({ exitCode: 76, stderr: 'output write denied' }),
+    ]);
+    const handle = await newTestRuntime({ enableFuse: false }).acquire({
+      packages: { apt: ['jq'] },
+    });
+    await expect(
+      handle.prepareWritePolicy!({
+        environmentPackages: true,
+        writablePaths: [{ path: '/mnt/session/outputs', kind: 'session_output' }],
+        readonlyPaths: [],
+      }),
+    ).rejects.toThrow(/filesystem boundary probe failed \(exit=76\).*output write denied/);
+  });
+
+  it('rejects unsupported installation networking before creating a workload', async () => {
     const calls = mockOpenSandboxFetch([]);
     const runtime = newTestRuntime({ enableFuse: false });
 
-    await expect(runtime.acquire({ packages: { pip: ['requests'] } })).rejects.toThrow(
-      /does not allow runtime package installation before the agent isolation boundary/,
-    );
+    await expect(
+      runtime.acquire({ packages: { pip: ['requests'] }, networking: { type: 'limited' } }),
+    ).rejects.toThrow(/requires unrestricted environment networking/);
     expect(calls).toEqual([]);
+  });
+
+  it('destroys a sandbox when an old provider ignores the package extension', async () => {
+    const calls = mockOpenSandboxFetch([commandStream({ exitCode: 1 })]);
+    const runtime = newTestRuntime({ enableFuse: false });
+    await expect(runtime.acquire({ packages: { apt: ['jq'] } })).rejects.toThrow(
+      /package preparation failed/,
+    );
+    expect(calls.some((call) => call.method === 'DELETE')).toBe(true);
+  });
+
+  it('verifies and stages packages before returning a handle', async () => {
+    const calls = mockOpenSandboxFetch([
+      commandStream({ exitCode: 0 }),
+      commandStream({ exitCode: 0 }),
+    ]);
+    const runtime = newTestRuntime({ enableFuse: false });
+    await runtime.acquire({
+      packages: {
+        apt: ['jq'],
+        cargo: ['ripgrep'],
+        gem: ['rake'],
+        go: ['example.com/tool@v1.0.0'],
+        npm: ['typescript'],
+        pip: ['requests'],
+      },
+    });
+    const create = calls.find((call) => call.method === 'POST' && call.url.endsWith('/sandboxes'))!;
+    expect(JSON.parse(create.body!).extensions['orca.environment.packages.v1']).toContain(
+      'ripgrep',
+    );
+    const commands = calls
+      .filter((call) => call.url.endsWith('/command'))
+      .map((call) => JSON.parse(call.body!).command as string);
+    expect(commands[0]).toContain('mountinfo');
+    expect(commands[1]).toContain('package staging root');
   });
 
   it('probes FUSE prerequisites before returning an enabled runtime handle', async () => {
@@ -343,7 +486,7 @@ describe('OpenSandboxRuntime.acquire hardening', () => {
     expect(commands).toHaveLength(6);
     for (const command of commands.slice(2)) {
       expect(command).toMatch(
-        /^setpriv --reuid 1000 --regid 1000 --clear-groups --bounding-set=-all --no-new-privs -- 'bwrap'/,
+        /^setpriv --reuid 1000 --regid 1000 --clear-groups --bounding-set=-all --no-new-privs -- '\/usr\/bin\/env' '-u' 'EXECD_ACCESS_TOKEN' 'bwrap'/,
       );
       expect(command).toContain("'--unshare-user'");
       expect(command).toContain("'--cap-drop' 'ALL'");
@@ -516,25 +659,42 @@ interface FetchCall {
 function mockOpenSandboxFetch(
   commandResponses: Array<Response | Error>,
   inspect?: (url: string, init?: RequestInit) => Promise<void> | void,
+  options: {
+    authProbeResponse?: Response;
+    lifecycleStatus?: unknown;
+    lifecycleStatuses?: unknown[];
+    pingStatuses?: number[];
+  } = {},
 ): FetchCall[] {
   const calls: FetchCall[] = [];
   vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
     const url = String(input);
     const method = init?.method ?? 'GET';
+    if (
+      url.endsWith('/command') &&
+      init?.body?.toString().includes('orca_execd_authentication_probe')
+    )
+      return options.authProbeResponse ?? commandStream({ exitCode: 0 });
     await inspect?.(url, init);
     calls.push({ url, method, body: init?.body?.toString() });
 
     if (method === 'POST' && url === 'http://opensandbox.test/v1/sandboxes') {
       return jsonResponse({ id: 'sb_test' });
     }
+    if (method === 'GET' && url === 'http://opensandbox.test/v1/sandboxes/sb_test') {
+      return jsonResponse({
+        status: options.lifecycleStatuses?.shift() ??
+          options.lifecycleStatus ?? { state: 'Allocated' },
+      });
+    }
     if (method === 'DELETE' && url === 'http://opensandbox.test/v1/sandboxes/sb_test') {
-      return new Response('', { status: 204 });
+      return new Response(null, { status: 204 });
     }
     if (method === 'GET' && url.endsWith('/sandboxes/sb_test/endpoints/44772')) {
       return jsonResponse({ endpoint: 'execd.test:44772' });
     }
     if (method === 'GET' && url === 'http://execd.test:44772/ping') {
-      return new Response('', { status: 200 });
+      return new Response('', { status: options.pingStatuses?.shift() ?? 200 });
     }
     if (method === 'POST' && url === 'http://execd.test:44772/command') {
       const next = commandResponses.shift();

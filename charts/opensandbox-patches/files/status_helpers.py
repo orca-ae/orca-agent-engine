@@ -1,0 +1,45 @@
+# Copyright 2026 Alibaba Group Holding Ltd.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from __future__ import annotations
+
+from typing import Any, Dict
+
+from fastapi import HTTPException, status
+
+
+def _normalize_create_status(status_info: Dict[str, Any]) -> Dict[str, Any]:
+    # Creation otherwise waits only for Running/Allocated or unschedulability.
+    # Reject package failures before an ID is returned so create_sandbox rolls back.
+    reason = status_info.get("reason")
+    if status_info.get("state") == "Failed" and reason in (
+        "ENVIRONMENT_PACKAGES_INSTALL_FAILED", "ENVIRONMENT_PACKAGES_START_FAILED",
+        "ENVIRONMENT_PACKAGES_STORAGE_LIMIT", "ENVIRONMENT_PACKAGES_POD_EVICTED",
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"code": reason, "message": "Isolated Environment package preparation failed"},
+        )
+    if status_info.get("state") != "Allocated":
+        return status_info
+    return {
+        **status_info,
+        "state": "Running",
+        "message": "Pod has IP assigned and sandbox is ready for requests",
+    }
+
+
+def _is_unschedulable_status(status_info: Dict[str, Any]) -> bool:
+    reason = str(status_info.get("reason") or "")
+    return reason == "POD_PLATFORM_UNSCHEDULABLE"

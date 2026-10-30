@@ -5,6 +5,7 @@ import type { CanUseTool, Options } from '@anthropic-ai/claude-agent-sdk';
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, posix as path, resolve as resolveHostPath, sep } from 'node:path';
+import { buildBubblewrapCommand, validateSandboxWritePolicy } from '@orca/sandbox-runtime';
 
 export const SANDBOX_WRITE_POLICY_ENV = 'ORCA_SANDBOX_WRITE_POLICY';
 export const OUTPUT_WRITABLE_PATH = '/mnt/session/outputs';
@@ -13,6 +14,7 @@ export const SKILLS_READONLY_PATH = '/workspace/skills';
 type WritablePathKind = 'session_output' | 'memory_store' | 'github_repository';
 
 export interface SandboxWritePolicy {
+  environmentPackages?: boolean;
   writablePaths: ReadonlyArray<{ path: string; kind: WritablePathKind }>;
   readonlyPaths: readonly string[];
   networkAllowedDomains?: readonly string[];
@@ -60,6 +62,9 @@ export function parseSandboxWritePolicy(
     return canonicalPolicyPath(entry);
   });
   const networkAllowedDomains = parseNetworkAllowedDomains(value.networkAllowedDomains);
+  if (value.environmentPackages !== undefined && typeof value.environmentPackages !== 'boolean') {
+    throw new Error(`invalid ${SANDBOX_WRITE_POLICY_ENV}: environmentPackages must be boolean`);
+  }
 
   if (!writablePaths.some((entry) => entry.path === OUTPUT_WRITABLE_PATH)) {
     throw new Error(`invalid ${SANDBOX_WRITE_POLICY_ENV}: ${OUTPUT_WRITABLE_PATH} is not writable`);
@@ -82,6 +87,7 @@ export function parseSandboxWritePolicy(
   }
 
   return Object.freeze({
+    ...(value.environmentPackages === true ? { environmentPackages: true } : {}),
     writablePaths: Object.freeze(writablePaths),
     readonlyPaths: Object.freeze(readonlyPaths),
     ...(networkAllowedDomains.length > 0
@@ -112,6 +118,47 @@ export function claudeSandboxSettings(policy: SandboxWritePolicy): NonNullable<O
           },
         }
       : {}),
+  };
+}
+
+/** Rewrite workload commands inside the SDK's existing mandatory network sandbox. */
+export function environmentPackageBashHooks(
+  policy: SandboxWritePolicy,
+): NonNullable<Options['hooks']> {
+  if (!policy.environmentPackages) return {};
+  const validated = validateSandboxWritePolicy(policy);
+  return {
+    PreToolUse: [
+      {
+        matcher: 'Bash',
+        hooks: [
+          async (input) => {
+            if (input.hook_event_name !== 'PreToolUse' || input.tool_name !== 'Bash') return {};
+            const raw = input.tool_input;
+            if (!isRecord(raw) || typeof raw.command !== 'string') {
+              return {
+                hookSpecificOutput: {
+                  hookEventName: 'PreToolUse',
+                  permissionDecision: 'deny',
+                  permissionDecisionReason: 'invalid package-environment Bash command',
+                },
+              };
+            }
+            const updatedInput: Record<string, unknown> = {
+              ...raw,
+              command: buildBubblewrapCommand(raw.command, validated),
+            };
+            delete updatedInput.dangerouslyDisableSandbox;
+            return {
+              hookSpecificOutput: {
+                hookEventName: 'PreToolUse',
+                updatedInput,
+              },
+            };
+          },
+        ],
+      },
+    ],
   };
 }
 
