@@ -32,6 +32,7 @@ COPY patches ./patches
 COPY packages/codex-harness/package.json ./packages/codex-harness/
 COPY packages/sdk-harness/package.json ./packages/sdk-harness/
 COPY packages/pi-harness/package.json ./packages/pi-harness/
+COPY packages/dsh-harness/package.json ./packages/dsh-harness/
 # pnpm deploy resolves the runner workspace references, including test-only catalog imports.
 COPY packages/harness-catalog/package.json ./packages/harness-catalog/
 COPY services/environment-worker/package.json ./services/environment-worker/
@@ -52,6 +53,9 @@ COPY packages/sdk-harness/tsconfig.json ./packages/sdk-harness/
 COPY packages/sdk-harness/src ./packages/sdk-harness/src
 COPY packages/pi-harness/tsconfig.json ./packages/pi-harness/
 COPY packages/pi-harness/src ./packages/pi-harness/src
+COPY packages/dsh-harness/tsconfig.json ./packages/dsh-harness/
+COPY packages/dsh-harness/src ./packages/dsh-harness/src
+COPY packages/dsh-harness/profile ./packages/dsh-harness/profile
 COPY packages/harness-catalog/tsconfig.json ./packages/harness-catalog/
 COPY packages/harness-catalog/src ./packages/harness-catalog/src
 COPY packages/guardrails/tsconfig.json ./packages/guardrails/
@@ -64,6 +68,7 @@ COPY packages/transcript-store-types/tsconfig.json ./packages/transcript-store-t
 COPY packages/transcript-store-types/src ./packages/transcript-store-types/src
 RUN pnpm -F @orca/sdk-harness build && \
     pnpm -F @orca/harness-catalog build && \
+    pnpm -F @orca/dsh-harness build && \
     pnpm -F @orca/pi-harness build && \
     pnpm -F @orca/codex-harness build && \
     pnpm -F @orca/guardrails build && \
@@ -175,6 +180,9 @@ COPY --from=build /deploy/environment-worker /opt/orca/environment-worker
 COPY --from=build /app/services/environment-worker/dist /opt/orca/environment-worker/dist
 COPY --from=build /deploy/session-runner /opt/orca/session-runner
 COPY --from=build /app/services/session-runner/dist /opt/orca/session-runner/dist
+
+# Verify the runner's DSH dependency and profile in the self-contained runtime.
+RUN node --input-type=module -e "import { createRequire } from 'node:module'; import { readFileSync } from 'node:fs'; const runner = createRequire('/opt/orca/session-runner/package.json'); await import(runner.resolve('@orca/dsh-harness')); readFileSync(runner.resolve('@orca/dsh-harness/profile/orca-managed/cordis.patch.yml'));"
 
 # The SDK runs in a private worker handle; model Bash uses this SRT executable.
 # Resolve through the deployed workspace package so the lockfile selects SRT.

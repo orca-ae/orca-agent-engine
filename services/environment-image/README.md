@@ -49,13 +49,15 @@ workspace deps from source, like the other service images):
 docker build -f services/environment-image/Dockerfile -t ghcr.io/orca-ae/orca-environment:<tag> .
 ```
 
-Multi-stage: stage 1 does `pnpm install` + builds `@orca/guardrails`, `@orca/harness-tunnel`,
-`@orca/sandbox-runtime`, `@orca/transcript-store-types`, then
+Multi-stage: stage 1 does `pnpm install` + builds the SDK harness libraries,
+including DSH and its pinned profile, plus `@orca/guardrails`, `@orca/harness-tunnel`,
+`@orca/sandbox-runtime` and `@orca/transcript-store-types`, then
 `environment-worker` + `session-runner`, then `pnpm deploy --prod` into
 self-contained dirs. The runtime uses pinned Node 22 Trixie, Git, SRT from the workspace lockfile, and
 the same pinned Bubblewrap build and gVisor compatibility wrapper as the sandbox-harness
 image. These executables support isolated model-tool filesystem, PID and network namespaces.
-The two deploy directories contain the worker and runner.
+The two deploy directories contain the worker and runner. The runtime build
+checks that the deployed DSH dependency loads and its profile is present.
 
 Smoke-test locally (both binaries load without the entrypoint guard misfiring):
 
