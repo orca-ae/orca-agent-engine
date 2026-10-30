@@ -36,7 +36,7 @@ function normalizeEntry(root: string, entry: SandboxFileMode): SandboxFileMode {
   if (normalizedPath !== root && !normalizedPath.startsWith(`${root}/`)) {
     throw new Error(`chmod path is outside root ${root}: ${entry.path}`);
   }
-  if (entry.mode !== 0o444 && entry.mode !== 0o555) {
+  if (!Number.isInteger(entry.mode) || entry.mode < 0 || entry.mode > 0o777) {
     throw new Error(`invalid file mode: ${entry.mode}`);
   }
   return { path: normalizedPath, mode: entry.mode };
@@ -88,7 +88,7 @@ try {
       !entry ||
       typeof entry !== 'object' ||
       typeof entry.path !== 'string' ||
-      (entry.mode !== ${0o444} && entry.mode !== ${0o555})
+      !Number.isInteger(entry.mode) || entry.mode < 0 || entry.mode > ${0o777}
     ) {
       throw new Error('chmod manifest contains an invalid entry');
     }
