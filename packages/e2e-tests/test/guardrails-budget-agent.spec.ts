@@ -1,7 +1,7 @@
 // Copyright The Orca Authors
 // SPDX-License-Identifier: Apache-2.0
 
-/** Paid smoke: a priced text turn crosses the cap; the next request never reaches the model. */
+/** Paid model smoke at configured Registry rates (including local fixtures), not retail billing. */
 import { randomUUID } from 'node:crypto';
 import { collectTurnEvents } from './turn-events-helpers.js';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
@@ -21,9 +21,11 @@ const model =
   process.env['ORCA_E2E_BUDGET_MODEL'] ??
   (REAL_AGENT.isNativeSdk ? REAL_AGENT.model.id : 'claude-sonnet-4-6');
 const topologies =
-  process.env['ORCA_E2E_SANDBOX_HARNESS'] === '1'
-    ? (['separate', 'colocated'] as const)
-    : (['separate'] as const);
+  REAL_AGENT.harness === 'dsh_sdk'
+    ? (['colocated'] as const)
+    : process.env['ORCA_E2E_SANDBOX_HARNESS'] === '1'
+      ? (['separate', 'colocated'] as const)
+      : (['separate'] as const);
 
 describe(`Layer B: priced request budget (${REAL_AGENT.harness})`, () => {
   let cfg: OrcaClientConfig;
@@ -32,16 +34,31 @@ describe(`Layer B: priced request budget (${REAL_AGENT.harness})`, () => {
   const priceIdentity = `${encodeURIComponent(model)}?provider=${REAL_AGENT.model.provider}`;
 
   beforeAll(async () => {
+    // Only the default local stack may seed; an explicit endpoint is pre-provisioned.
+    const endpoint = process.env['ORCA_BASE_URL'];
+    const hosted = endpoint !== undefined;
+    if (endpoint !== undefined && !endpoint.trim())
+      throw new Error('Budget smoke requires a non-empty ORCA_BASE_URL when provided.');
+    if (hosted && !process.env['ORCA_API_KEY'])
+      throw new Error(
+        'Budget smoke with ORCA_BASE_URL requires ORCA_API_KEY (x-api-key); ORCA_ACCESS_TOKEN is not supported.',
+      );
     requireRealAgentKey();
-    const seeded = await seedWorkspaceApiKey();
-    cfg = buildClientFromConfig({ apiKey: seeded.apiKey });
+    cfg = buildClientFromConfig({
+      apiKey: hosted ? process.env['ORCA_API_KEY']! : (await seedWorkspaceApiKey()).apiKey,
+    });
     await ensureStackReachable(cfg);
     if (REAL_AGENT.isNativeSdk) {
       const quote = await apiCall(cfg, `/apis/pricing.runorca.ai/v1/modelprices/${priceIdentity}`);
       expect([200, 404], quote.text).toContain(quote.status);
       if (quote.status === 404) {
+        if (hosted)
+          throw new Error(
+            'Hosted budget qualification requires an existing model price and pricing API. ' +
+              'No fixture price is provisioned against a pre-provisioned stack.',
+          );
         // Clean stacks seed Anthropic prices only. These organization-scoped
-        // fixture rates exercise accounting; they are not OpenAI's retail prices.
+        // fixture rates exercise accounting; they are not provider retail prices.
         const admin = await seedOrganizationAdminApiKey();
         const adminCfg = buildClientFromConfig({
           baseURL: process.env['ORCA_ADMIN_BASE_URL'] ?? 'http://localhost:8082',
@@ -59,6 +76,9 @@ describe(`Layer B: priced request budget (${REAL_AGENT.harness})`, () => {
         // A concurrent creator owns its row. Never replace or clean up that price.
         if (created.status === 201) fixturePriceAdmin = adminCfg;
         expect([201, 409], created.text).toContain(created.status);
+        console.info(
+          'Budget smoke uses organization fixture pricing; provider billing is unverified.',
+        );
       }
     }
   });
@@ -94,6 +114,11 @@ describe(`Layer B: priced request budget (${REAL_AGENT.harness})`, () => {
       }>(cfg, `/apis/pricing.runorca.ai/v1/modelprices/${priceIdentity}`);
       expect(price.input_per_million_tokens).toBeGreaterThan(0);
       expect(price.output_per_million_tokens).toBeGreaterThan(0);
+      console.info('Budget smoke effective Registry price (provider billing unverified):', {
+        provider: REAL_AGENT.model.provider,
+        model,
+        ...price,
+      });
       const environmentId = await createTestEnvironment(cfg, `budget-${topology}`);
       resources.push(`/v1/environments/${environmentId}`);
       const guardrail = await request(cfg, '/apis/policy.runorca.ai/v1/guardrails', {
