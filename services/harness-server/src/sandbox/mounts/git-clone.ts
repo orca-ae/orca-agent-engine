@@ -1,10 +1,10 @@
 // Copyright The Orca Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { readFile, readdir } from 'node:fs/promises';
+import { readFile, readdir, stat } from 'node:fs/promises';
 import { join, relative, sep } from 'node:path';
 import type { MountHandle, MountResource, MountStrategy, TornDownState } from './mount-strategy.js';
-import type { SandboxHandle } from '../sandbox-runtime.js';
+import type { SandboxFileMode, SandboxHandle } from '../sandbox-runtime.js';
 import type { GitWorker } from '../../git/git-worker.js';
 import type { WorkDirManager } from '../../git/work-dir.js';
 import { harnessGitCloneSeconds, harnessGitCloneTotal } from '../../metrics.js';
@@ -30,7 +30,8 @@ export interface GitCloneStrategyConfig {
  *   1. activate(): acquire host-side work dir → resolve PAT → `git clone
  *      --filter=blob:none --depth=1 [--branch <ref>]` into work dir → walk
  *      the work dir recursively (working tree + .git/) →
- *      `sandbox.files.write(mount_path/<rel>, bytes)` for each file. The
+ *      `sandbox.files.write(mount_path/<rel>, bytes)` for each file, then
+ *      restore its ordinary permission bits (without special bits). The
  *      sandbox FS layer creates parent dirs implicitly, so no explicit
  *      `mkdir -p mount_path` step is required. The .git/ dir IS shipped so
  *      in-sandbox `git status` and `git push` work without re-init.
@@ -96,10 +97,22 @@ export class GitCloneStrategy implements MountStrategy {
       //    + InMemoryFiles both `mkdir -p` the dirname before writing) — no
       //    explicit `mkdir -p` step is needed.
       const allFiles = await listAllFiles(dest);
+      const modes: SandboxFileMode[] = [];
       for (const rel of allFiles) {
-        const buf = await readFile(join(dest, rel));
+        const source = join(dest, rel);
+        const mode = (await stat(source)).mode & 0o777;
+        const buf = await readFile(source);
         const target = `${stripTrailingSlash(resource.mountPath)}/${rel}`;
         await sandbox.files.write(target, buf);
+        modes.push({ path: target, mode });
+      }
+      // Restore permissions only after writing; never copy host ownership or special bits.
+      if (sandbox.files.chmodMany) {
+        await sandbox.files.chmodMany(stripTrailingSlash(resource.mountPath), modes);
+      } else {
+        for (const entry of modes) {
+          await sandbox.files.chmod(entry.path, entry.mode);
+        }
       }
 
       const handle: MountHandle = {
