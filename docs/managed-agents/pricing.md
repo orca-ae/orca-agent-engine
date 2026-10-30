@@ -6,8 +6,129 @@ negotiate rates, and a self-hosted deployment may serve models no public catalog
 has ever listed.
 
 This document defines where prices come from, how they are resolved, and the
-`pricing.runorca.ai/v1` API group operators use to manage them. The cost
+`pricing.runorca.ai/v1` and `pricing.runorca.ai/v2` API groups. The v1 behavior below
+applies to models without explicit conditional activation. The cost
 guardrails that consume this are defined in [`guardrails.md`](./guardrails.md).
+
+## Conditional pricing v2
+
+The Engine provides conditional model catalogs, resolution, operator management, source
+acquisition and HTTP usage accounting.
+`CONDITIONAL_PRICING_ENABLED` defaults to `false`. Publishing a dormant rule set does not convert
+a model or change legacy accounting. An organization administrator explicitly requests `activate`
+when the deployment switch permits conversion. The switch is an operator rollout gate: qualification
+of each writer and downstream consumer is an operational prerequisite. Missing facts fail closed
+as unpriced after conversion, including reports from the native aggregate writers.
+
+Rules match exact provider/model identity, an actual canonical service tier and the full input
+count of one request. Bands use integer `[min, max)` bounds; both keys are required and `null` is
+an unbounded maximum. The winning tuple prices the whole request. Source precedence is
+`operator > upstream > seed`, with organization-scoped operator candidates. Overlapping winning
+rules, missing facts, unsupported profiles/features, expired candidates and uncovered bands return
+structured unpriced reasons. OpenAI's reviewed `openai-v1` profile maps response `default` to
+`standard`, and `fast`/`priority` to `priority`; `auto` remains unknown. No model-name fallback runs.
+
+Cache rates are explicit numbers or `null` (unsupported). The admitted `anthropic-cache-v1`
+profile prices the 5m and 1h buckets separately. Its explicit
+`cache_write_1h_per_million_tokens` field preserves legacy per-rate rounding even when rounding a
+derived 5m rate and multiplying it by 1.6 would differ. `materializeLegacyPriceRates` preserves the
+legacy arithmetic; the operator independently supplies reviewed context coverage. It does not
+convert rows automatically. A nonzero unsupported bucket makes the request unpriced.
+
+Workspace discovery advertises `pricing.runorca.ai/v2` beside v1. Authenticated
+`GET /apis/pricing.runorca.ai/v2/modelpricerules` returns at most 100 candidates per page,
+`catalog_id`, generation, digest, publication/expiry times, required features and activated model
+identities. Cursors bind an immutable snapshot to the authenticated workspace and organization;
+`conditional_models` is the conversion authority; other published rules are shadow candidates.
+publication between pages cannot mix generations. Unknown/expired snapshots return 410. Clients
+validate every page and required feature before replacing a cache, and enforce each rule's own
+activation/retirement/freshness bounds. Fetch snapshots last one hour; accounting catalog versions
+remain retained independently. Each workspace/organization retains at most 16 fetch snapshots;
+evicted cursors also return 410. Digests use SHA-256 over JSON with recursively sorted object keys
+and preserved array order; `digest` covers the combined generation, publication time, features,
+rules and conditional model identities.
+
+Organization administration uses these routes on the admin listener:
+
+| Method           | Path                                        | Behavior                                                          |
+| ---------------- | ------------------------------------------- | ----------------------------------------------------------------- |
+| GET/POST         | `/v1/organizations/modelpricerulesets`      | List candidates/status or publish one complete operator model set |
+| GET/PATCH/DELETE | `/v1/organizations/modelpricerulesets/{id}` | Read, replace or retire an operator set                           |
+
+Writes require `org:admin` or `model_prices:write`; reads require `model_prices:read`.
+The server assigns organization, source, set/rule IDs and revisions. PATCH replaces the full set;
+PATCH and DELETE require its quoted revision in `If-Match`. A stale revision returns 409.
+`Idempotency-Key` replays the original status/body/ETag for 24 hours within the same organization,
+principal and operation; changing the body or precondition under that key returns 409. Publication,
+idempotency and immutable audit evidence commit in one transaction. Future-effective replacements
+retain the previous set until the boundary, subject to its original freshness. A second replacement
+while one is scheduled returns 409. First activation requires a currently effective set.
+
+Converted models retain an activation marker through retirement. Their v1 writes return 400
+directing administrators to rule-set management. A v1 read projects a model only if standard rates
+are identical over the entire input domain, all legacy buckets are representable and the 1h
+arithmetic agrees; otherwise list omits it and item GET returns the existing unpriced 404. Candidate
+legacy family matches cannot reuse a converted model's old flat row.
+
+The internal usage endpoint accepts optional `pricing_facts` version 1 only with
+`x-orca-pricing-capability: request-facts-v1` and a stable `usage_event_id`; it returns the capability
+header on accepted reports. Facts carry request identity, actual tier, full request input,
+usage-profile/evidence source and optional observed time/unsupported-dimension marker. The input
+count must equal all exclusive input/cache buckets exactly once; complete safe-integer buckets
+are required. Requested tier and client timestamps do not choose tariffs. Existing workload/session
+authority still selects the writer. Public usage and SSE shapes remain unchanged.
+
+Accounting resolves after durable report deduplication in the same transaction as session, thread
+and budget counters. Its server clock runs after reading the selected catalog and is shared with
+SDK request admission and UTC daily budget windows. Each first-accepted
+report stores facts, rule/revision, immutable scope catalog IDs, time, rates, integer nano-USD cost
+and API-equivalent estimate basis, or an unpriced reason. Replays reuse the existing receipt and
+move no counters, even after publication or retirement. Historical costs remain unchanged.
+New receipts expose nullable `global_catalog_id` and `org_catalog_id` fields for direct queries;
+the opaque `catalog_id` remains available for existing receipt readers. Legacy-price receipts
+leave both scope IDs null.
+
+### Conditional provider sources
+
+`PRICE_SOURCES_JSON` is a deployment-owned JSON array; its default is empty. It cannot coexist with
+`PRICE_REFRESH_URL`. The legacy URL/provider/interval path retains its previous behavior. Helm
+maps `registry.pricing.conditionalEnabled` and `registry.pricing.sources` onto the two new variables.
+Each source has unique `id`/`provider`, an adapter and an HTTPS `url` without credentials or query
+parameters. The initial bound is one source per provider, 20 sources and concurrency two. Polling
+defaults to six hours, a fetch to 30 seconds, decoded data to 4 MiB, rules to 10,000, pages to 100,
+and accepted model age to seven days. Deployment configuration can tighten these bounds.
+Each scoped catalog also has a 10,000-rule publication budget, including scheduled bindings.
+Source credentials are not accepted by these public-list-price adapters.
+
+The packaged adapters and declared coverage are:
+
+| Adapter               | Source and coverage                                                                                                                                                                                                                                                                                                    |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `openai-public-v1`    | [Official Markdown pricing](https://developers.openai.com/api/docs/pricing): exact `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6.1-terra`, `gpt-6-sol` rows in standard, batch, flex, fast and available ultrafast tables, split at 272,001 input tokens. 30m/12h cache writes are unsupported.                                 |
+| `anthropic-public-v1` | [Official Markdown pricing](https://platform.claude.com/docs/en/about-claude/pricing): exact Claude Sonnet 4.6 and Opus 4.6 base tables, standard tier through 1,000,000 input tokens, with explicit 5m/1h/read rates.                                                                                                 |
+| `normalized-v1`       | Operator-approved public feed with `schema_version: 1`, `price_scope: public_list`, provider, USD/per-million units, `complete: true`, upstream document SHA-256, models, explicit withdrawals and `next_page`. Every model declares profile, effective time and complete rules. All pages share one upstream version. |
+
+These are global public list-price profiles; region-specific or additional billing dimensions are
+not admitted usage facts. Model discovery and inference admission remain independent of pricing.
+The document extractors require their reviewed headers and context semantics. Unknown condition
+keys and malformed models enter quarantine; unknown source shape, lost pages, resource bounds,
+all-invalid or unapproved empty snapshots fail the refresh. DNS is checked at socket connection,
+TLS verification remains enabled, redirects are refused, and pagination stays on the approved
+origin. Compressed responses are refused and both transfer/body sizes are bounded.
+One configured fetch deadline covers DNS, TLS and complete response bodies across all pages,
+including bodies that continue sending small chunks. Downloads and page parsing finish before
+the publication transaction acquires the scope lock shared with accounting.
+
+A fenced database lease prevents stale replicas from publishing. Each model changes atomically;
+a quarantined set keeps its previous expiry while healthy models publish. A 10x rate guard compares
+the same condition key. Partition/profile/source changes require a reviewed exact document digest
+in `approved_change_digests`; empty withdrawal requires `approve_empty`. Source replacement also
+declares the current owner in `replaces_source_id`, preventing older replicas from reclaiming it.
+Only complete validated snapshots withdraw omitted models. A complete single-page ETag/Last-Modified baseline supports
+304 revalidation, creating a new catalog attestation with unchanged rule revisions. A quarantined
+or failed baseline cannot renew stale data through 304. Transient failures retry with bounded
+backoff/jitter, retain last-good data within its age, and expose source result/accepted-time metrics.
+After expiry, independent valid candidates may win; otherwise existing `on_unpriced` behavior applies.
 
 ## What is priced
 

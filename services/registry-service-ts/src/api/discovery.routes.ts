@@ -1,7 +1,12 @@
 // Copyright The Orca Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { HARNESS_CATALOG, HARNESS_CAPABILITIES, type HarnessType } from '@orca/harness-catalog';
+import {
+  HARNESS_CATALOG,
+  HARNESS_CAPABILITIES,
+  PRICING_V2_FEATURES,
+  type HarnessType,
+} from '@orca/harness-catalog';
 import type { FastifyInstance } from 'fastify';
 import type { z } from 'zod';
 import type {
@@ -56,6 +61,11 @@ const GROUP_VERSIONS: readonly GroupVersion[] = [
     version: 'v1',
     resources: [{ name: 'modelprices', namespaced: false, kind: 'ModelPrice' }],
   },
+  {
+    group: 'pricing.runorca.ai',
+    version: 'v2',
+    resources: [{ name: 'modelpricerules', namespaced: false, kind: 'ModelPriceRule' }],
+  },
 ];
 
 function resourceList(entry: GroupVersion): z.infer<typeof ApiResourceList> {
@@ -63,14 +73,21 @@ function resourceList(entry: GroupVersion): z.infer<typeof ApiResourceList> {
     kind: 'APIResourceList',
     group_version: `${entry.group}/${entry.version}`,
     resources: entry.resources,
+    ...(entry.group === 'pricing.runorca.ai' && entry.version === 'v2'
+      ? { required_features: [...PRICING_V2_FEATURES] }
+      : {}),
   };
 }
 
 function groupList(): z.infer<typeof ApiGroupList>['groups'] {
-  return GROUP_VERSIONS.map((entry) => {
+  const groups: z.infer<typeof ApiGroupList>['groups'] = [];
+  for (const entry of GROUP_VERSIONS) {
     const version = { group_version: `${entry.group}/${entry.version}`, version: entry.version };
-    return { name: entry.group, versions: [version], preferred_version: version };
-  });
+    const existing = groups.find((g) => g.name === entry.group);
+    if (existing) existing.versions.push(version);
+    else groups.push({ name: entry.group, versions: [version], preferred_version: version });
+  }
+  return groups;
 }
 
 export function registerDiscoveryRoutes(app: FastifyInstance): void {

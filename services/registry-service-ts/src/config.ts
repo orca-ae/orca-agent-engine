@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import { isIP } from 'node:net';
 import type { ConnectionOptions as TlsConnectionOptions } from 'node:tls';
 import { SEED_PRICE_PROVIDER } from '@orca/harness-catalog';
+import { parsePriceSources, type PriceSourceConfig } from './pricing/provider-sources.js';
 import {
   validateTopicPrefix,
   parseKafkaTranscriptConfig,
@@ -221,6 +222,8 @@ export interface ServiceConfig {
   /** Which provider `PRICE_REFRESH_URL` serves. One feed prices one vendor. */
   priceRefreshProvider: string;
   priceRefreshIntervalMs: number;
+  conditionalPricingEnabled: boolean;
+  priceSources: PriceSourceConfig[];
 }
 
 export interface SessionJwtLlmPolicy {
@@ -797,5 +800,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServiceConfig 
     priceRefreshUrl: parsePriceRefreshUrl(env),
     priceRefreshProvider: parsePriceRefreshProvider(env),
     priceRefreshIntervalMs: parsePriceRefreshIntervalMs(env),
+    conditionalPricingEnabled: parseBooleanEnv(env, 'CONDITIONAL_PRICING_ENABLED'),
+    priceSources: parsePriceSources(
+      optionalEnv(env, 'PRICE_SOURCES_JSON'),
+      optionalEnv(env, 'PRICE_REFRESH_URL'),
+    ),
   };
 }

@@ -44,7 +44,7 @@ that does the comparing, so a claim here cannot outrun the mechanism behind it.
 |  | Source | Operations |
 | --- | --- | --- |
 | Anthropic | [`anthropic-f89e311096c42998ada5ab5580a2a3b0519265f1c005af625be7a0d11ad49d3c.yml`](https://storage.googleapis.com/stainless-sdk-openapi-specs/anthropic/anthropic-f89e311096c42998ada5ab5580a2a3b0519265f1c005af625be7a0d11ad49d3c.yml)<br>sha256 `a97790bd7f185213830f19daf7392c9c1390be8811d507417398a0bf519e20f5` (computed locally) | 121 |
-| Orca | `services/registry-service-ts/openapi/managed-agents.yaml`<br>generated from `src/contracts/*.contract.ts` | 110 |
+| Orca | `services/registry-service-ts/openapi/managed-agents.yaml`<br>generated from `src/contracts/*.contract.ts` | 112 |
 
 Operation counts are distinct `(method, normalized path)` pairs. Anthropic publishes a handful
 of operations in both GA and beta form under the same path; those collapse to one, beta winning.
@@ -55,7 +55,7 @@ of operations in both GA and beta form under the same path; those collapse to on
 | --- | --- | --- |
 | `core` | 72 | operation exists in both specs |
 | `missing` | 49 | Anthropic publishes it, we do not serve it |
-| `extension` | 38 | we serve it, Anthropic does not publish it |
+| `extension` | 40 | we serve it, Anthropic does not publish it |
 | `success-codes` | 0 | 2xx codes differ (compared strictly) |
 | `response-media` | 2 | the media types a 2xx body is offered under differ |
 | `required-params` | 2 | required query/header/body parameters differ |
@@ -66,9 +66,9 @@ of operations in both GA and beta form under the same path; those collapse to on
 | `error-codes` | 72 (21 distinct deltas) | declared error statuses differ (informational) |
 | `prose-invariant` | 7 | documented behaviour their spec does not encode — hand-transcribed |
 
-Every difference carries a decision: **352** rows across 11 classes.
+Every difference carries a decision: **354** rows across 11 classes.
 
-Decisions registered across all differences: `accepted-deviation` 247, `fix-later` 40, `keep` 37, `not-implemented` 28.
+Decisions registered across all differences: `accepted-deviation` 247, `fix-later` 40, `keep` 39, `not-implemented` 28.
 
 ## Core — served by both (72)
 
@@ -203,7 +203,7 @@ These operations exist in both specs. Differences *within* them are listed in th
 | `POST /v1/user_profiles/{user_profile_id}` | `BetaUpdateUserProfile` | `not-implemented` | docs/managed-agents/roadmap.md#anthropic-surface-not-implemented | `a97790bd7f18` |
 | `POST /v1/user_profiles/{user_profile_id}/enrollment_url` | `BetaCreateEnrollmentUrl` | `not-implemented` | docs/managed-agents/roadmap.md#anthropic-surface-not-implemented | `a97790bd7f18` |
 
-## Extension — we serve it, Anthropic does not publish it (38)
+## Extension — we serve it, Anthropic does not publish it (40)
 
 | Operation | Decision | Reference | Anthropic spec |
 | --- | --- | --- | --- |
@@ -220,6 +220,8 @@ These operations exist in both specs. Differences *within* them are listed in th
 | `GET /apis/pricing.runorca.ai/v1` | `keep` | docs/managed-agents/pricing.md | `a97790bd7f18` |
 | `GET /apis/pricing.runorca.ai/v1/modelprices` | `keep` | docs/managed-agents/pricing.md | `a97790bd7f18` |
 | `GET /apis/pricing.runorca.ai/v1/modelprices/{model_id}` | `keep` | docs/managed-agents/pricing.md | `a97790bd7f18` |
+| `GET /apis/pricing.runorca.ai/v2` | `keep` | docs/managed-agents/pricing.md#conditional-pricing-v2 | `a97790bd7f18` |
+| `GET /apis/pricing.runorca.ai/v2/modelpricerules` | `keep` | docs/managed-agents/pricing.md#conditional-pricing-v2 | `a97790bd7f18` |
 | `GET /apis/runtime.runorca.ai/v1` | `keep` | docs/managed-agents/api-groups-and-extensions.md | `a97790bd7f18` |
 | `GET /apis/runtime.runorca.ai/v1/harnesses` | `keep` | docs/managed-agents/api-groups-and-extensions.md | `a97790bd7f18` |
 | `GET /healthz` | `keep` | docs/managed-agents/api-groups-and-extensions.md#probes | `a97790bd7f18` |

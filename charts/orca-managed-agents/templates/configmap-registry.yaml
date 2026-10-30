@@ -8,6 +8,10 @@ metadata:
     {{- include "orca-managed-agents.labels" . | nindent 4 }}
 data:
   NODE_ENV: production
+  CONDITIONAL_PRICING_ENABLED: {{ .Values.registry.pricing.conditionalEnabled | quote }}
+  {{- if .Values.registry.pricing.sources }}
+  PRICE_SOURCES_JSON: {{ .Values.registry.pricing.sources | toJson | quote }}
+  {{- end }}
   HTTP_PORT: {{ .Values.registry.httpPort | quote }}
   INTERNAL_HTTP_PORT: {{ .Values.registry.internalHttpPort | quote }}
   ADMIN_HTTP_PORT: {{ .Values.registry.adminHttpPort | quote }}

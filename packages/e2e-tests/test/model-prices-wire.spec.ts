@@ -219,7 +219,10 @@ describe('Layer A: model prices (live Registry, isolated organizations)', () => 
     expect(groups.status, groups.text).toBe(200);
     expect(groups.json<{ groups: unknown[] }>().groups).toContainEqual({
       name: 'pricing.runorca.ai',
-      versions: [{ group_version: 'pricing.runorca.ai/v1', version: 'v1' }],
+      versions: [
+        { group_version: 'pricing.runorca.ai/v1', version: 'v1' },
+        { group_version: 'pricing.runorca.ai/v2', version: 'v2' },
+      ],
       preferred_version: { group_version: 'pricing.runorca.ai/v1', version: 'v1' },
     });
     const resources = await apiCall(workspaceA.cfg, '/apis/pricing.runorca.ai/v1');
@@ -228,6 +231,21 @@ describe('Layer A: model prices (live Registry, isolated organizations)', () => 
       kind: 'APIResourceList',
       group_version: 'pricing.runorca.ai/v1',
       resources: [{ name: 'modelprices', namespaced: false, kind: 'ModelPrice' }],
+    });
+    const conditional = await apiCall(workspaceA.cfg, '/apis/pricing.runorca.ai/v2');
+    expect(conditional.status, conditional.text).toBe(200);
+    expect(conditional.json()).toEqual({
+      kind: 'APIResourceList',
+      group_version: 'pricing.runorca.ai/v2',
+      resources: [{ name: 'modelpricerules', namespaced: false, kind: 'ModelPriceRule' }],
+      required_features: [
+        'exact-identity-v1',
+        'actual-service-tier-v1',
+        'whole-request-input-band-v1',
+        'explicit-cache-rates-v1',
+        'source-precedence-v1',
+        'per-rule-validity-v1',
+      ],
     });
     const prices = await apiCall(workspaceA.cfg, PRICES);
     expect(prices.status, prices.text).toBe(200);

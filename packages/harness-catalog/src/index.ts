@@ -5,6 +5,7 @@ export * from './catalog.js';
 export * from './snapshot-composition.js';
 export * from './model-controls.js';
 export * from './pricing.js';
+export * from './conditional-pricing.js';
 export * from './catalog-wire.js';
 
 export * from './harness-models.js';

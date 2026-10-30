@@ -73,6 +73,9 @@ import {
   type ExecuteOrganizationAgentObservabilityDisableResult,
 } from '../domain/agent-observability-organization-disable-service.js';
 import { newId } from '../domain/versioning.js';
+import { registerAdminModelPriceRuleSetRoutes } from './model-price-rule-sets.routes.js';
+import { createPostgresPricingCatalogStore } from '../pricing/catalog-store.js';
+import { modelUsesConditionalPrices } from '../pricing/rule-sets.js';
 import type { DbClient } from '../persistence/postgres/client.js';
 import { nameConflictMessage } from '../persistence/postgres/name-conflict.js';
 import {
@@ -150,6 +153,7 @@ export function registerAdminRoutes(
   db: DbClient,
   store: TranscriptStore,
   secretStore?: SecretStore,
+  conditionalPricingEnabled = false,
 ): void {
   app.get('/v1/organizations/me', async (req, reply) => {
     const principal = req.adminAuth!;
@@ -754,6 +758,7 @@ export function registerAdminRoutes(
 
   registerAdminGuardrailRoutes(app, db);
   registerAdminModelPriceRoutes(app, db);
+  registerAdminModelPriceRuleSetRoutes(app, db, writeAudit, conditionalPricingEnabled);
 }
 
 /**
@@ -784,6 +789,16 @@ export function registerAdminModelPriceRoutes(app: FastifyInstance, db: DbClient
     if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
 
     const write = modelPriceWriteFromCreate(parsed.data);
+    if (
+      modelUsesConditionalPrices(
+        await createPostgresPricingCatalogStore(db).read(organizationId),
+        write.provider,
+        write.modelId,
+      )
+    )
+      return reply
+        .code(400)
+        .send({ error: 'conditional model prices require /v1/organizations/modelpricerulesets' });
     // PATCH is how an existing entry changes. Letting POST overwrite one would
     // make "create" silently destructive on a retry with a different body.
     if (await prices.get(write.provider, write.modelId, 'operator', organizationId)) {
@@ -797,6 +812,8 @@ export function registerAdminModelPriceRoutes(app: FastifyInstance, db: DbClient
     // privileged mutation, and one that landed with no immutable record of who
     // made it is worse than one that failed outright.
     const created = await db.transaction(async (tx) => {
+      if (!(await legacyPriceWriteAllowed(tx, organizationId, write.provider, write.modelId)))
+        return null;
       const txPrices = createPostgresModelPriceStore(tx);
       await txPrices.upsert('operator', [write], now, organizationId);
       const row = await txPrices.get(write.provider, write.modelId, 'operator', organizationId);
@@ -808,6 +825,10 @@ export function registerAdminModelPriceRoutes(app: FastifyInstance, db: DbClient
       });
       return row;
     });
+    if (!created)
+      return reply
+        .code(400)
+        .send({ error: 'conditional model prices require /v1/organizations/modelpricerulesets' });
     return reply.code(201).send(modelPriceEntryToWire(created));
   });
 
@@ -866,6 +887,19 @@ export function registerAdminModelPriceRoutes(app: FastifyInstance, db: DbClient
     const organizationId = req.adminAuth!.organizationId;
     const parsed = ModelPriceUpdate.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
+    const modelId = (req.params as { modelId: string }).modelId;
+    const provider = adminPriceProvider(req);
+    if (
+      provider !== null &&
+      modelUsesConditionalPrices(
+        await createPostgresPricingCatalogStore(db).read(organizationId),
+        provider,
+        modelId,
+      )
+    )
+      return reply
+        .code(400)
+        .send({ error: 'conditional model prices require /v1/organizations/modelpricerulesets' });
 
     // Absent means there is no operator override to patch. The upstream or seed
     // row that may exist for this model is not this route's to edit — POST an
@@ -875,6 +909,8 @@ export function registerAdminModelPriceRoutes(app: FastifyInstance, db: DbClient
 
     const write = modelPriceWriteFromUpdate(parsed.data, existing);
     const updated = await db.transaction(async (tx) => {
+      if (!(await legacyPriceWriteAllowed(tx, organizationId, write.provider, write.modelId)))
+        return null;
       const txPrices = createPostgresModelPriceStore(tx);
       await txPrices.upsert('operator', [write], new Date(), organizationId);
       const row = await txPrices.get(
@@ -891,6 +927,10 @@ export function registerAdminModelPriceRoutes(app: FastifyInstance, db: DbClient
       });
       return row;
     });
+    if (!updated)
+      return reply
+        .code(400)
+        .send({ error: 'conditional model prices require /v1/organizations/modelpricerulesets' });
     return modelPriceEntryToWire(updated);
   });
 
@@ -906,6 +946,8 @@ export function registerAdminModelPriceRoutes(app: FastifyInstance, db: DbClient
     // this model takes over immediately, so the model does not become unpriced
     // as a side effect of withdrawing an override.
     const removed = await db.transaction(async (tx) => {
+      if (!(await legacyPriceWriteAllowed(tx, organizationId, provider, modelId)))
+        return 'conditional' as const;
       const txPrices = createPostgresModelPriceStore(tx);
       if (!(await txPrices.delete(provider, modelId, 'operator', organizationId))) return false;
       await writeAudit(tx, req, 'model_price.deleted', 'model_price', modelId, null, {
@@ -914,17 +956,33 @@ export function registerAdminModelPriceRoutes(app: FastifyInstance, db: DbClient
       });
       return true;
     });
+    if (removed === 'conditional')
+      return reply
+        .code(400)
+        .send({ error: 'conditional model prices require /v1/organizations/modelpricerulesets' });
     if (!removed) return reply.code(404).send({ error: 'model price not found' });
     return reply.send({ provider, model_id: modelId, type: 'model_price_entry_deleted' });
   });
 }
 
-/**
- * The table has no surrogate id, so the composite key is both the sort key and
- * the cursor. A space sorts below every character a provider or model id may
- * contain, which keeps the string order identical to the
- * (provider, model, source) tuple order.
- */
+/** Serialize legacy management with explicit conditional conversion. */
+async function legacyPriceWriteAllowed(
+  db: Parameters<Parameters<DbClient['transaction']>[0]>[0],
+  organizationId: string,
+  provider: string,
+  modelId: string,
+): Promise<boolean> {
+  await db.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${`pricing:${organizationId}`}, 0))`,
+  );
+  return !modelUsesConditionalPrices(
+    await createPostgresPricingCatalogStore(db).read(organizationId),
+    provider,
+    modelId,
+  );
+}
+
+/** Composite legacy identity, ordered independently of its printable separator. */
 function entryCursor(row: StoredModelPrice): string {
   return `${row.provider} ${row.modelId} ${row.source}`;
 }

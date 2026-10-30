@@ -2,7 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { SEED_PRICE_PROVIDER, resolveModelPricing } from '@orca/harness-catalog';
+import {
+  SEED_PRICE_PROVIDER,
+  resolveModelPricing,
+  projectConditionalPriceToV1,
+} from '@orca/harness-catalog';
+import { combinePriceCatalogs, type PricingCatalogStore } from '../pricing/catalog-store.js';
 import { buildClaudeErrorResponse, type ClaudeErrorType } from '../contracts/common.js';
 import {
   ModelProviderId,
@@ -44,6 +49,7 @@ export function registerModelPricesRoutes(
   app: FastifyInstance,
   store: ModelPriceStore,
   organizationForWorkspace: ModelPriceOrganizationResolver,
+  catalogs?: PricingCatalogStore,
 ): void {
   app.get(`${PRICING_API_PREFIX}/modelprices`, async (req, reply) => {
     const organizationId = await organizationForWorkspace(req.auth!.workspaceId);
@@ -59,9 +65,25 @@ export function registerModelPricesRoutes(
     // one price, and paging the rows would split it across pages. The page key
     // is the whole identity — the same id under two providers is two prices, so
     // paging on the id alone would collapse them into one entry.
-    const entries = toPriceEntries(await store.list(organizationId));
+    const catalog = catalogs
+      ? combinePriceCatalogs(
+          await catalogs.read(''),
+          await catalogs.read(organizationId),
+          new Date(),
+        )
+      : null;
+    const allEntries = toPriceEntries(await store.list(organizationId));
+    const conditional = (provider: string, modelId: string) =>
+      catalog?.conditional_models.some((m) => m.provider === provider && m.model_id === modelId) ??
+      false;
+    const entries = allEntries.filter((e) => !conditional(e.provider, e.modelId));
     const keys = [
-      ...new Set(entries.map((entry) => modelKey(entry.provider, entry.modelId))),
+      ...new Set([
+        ...allEntries.map((entry) => modelKey(entry.provider, entry.modelId)),
+        ...(catalog?.conditional_models ?? [])
+          .filter((m) => !m.model_id.includes('/'))
+          .map((m) => modelKey(m.provider, m.model_id)),
+      ]),
     ].sort();
     const after = q.page;
     if (after !== undefined && !keys.includes(after)) {
@@ -72,7 +94,16 @@ export function registerModelPricesRoutes(
 
     const data = page.flatMap((key) => {
       const { provider, modelId } = splitModelKey(key);
-      const pricing = resolveModelPricing(provider, modelId, entries, organizationId);
+      const pricing =
+        conditional(provider, modelId) && catalog
+          ? projectConditionalPriceToV1(
+              catalog,
+              provider,
+              modelId,
+              organizationId,
+              new Date().toISOString(),
+            )
+          : resolveModelPricing(provider, modelId, entries, organizationId);
       // A stored row whose family match is ambiguous resolves to unpriced. It
       // is omitted rather than served at some invented rate.
       return pricing ? [resolvedModelPriceToWire(provider, modelId, pricing)] : [];
@@ -92,12 +123,32 @@ export function registerModelPricesRoutes(
     // out, and the id stays a single addressable path segment.
     const provider = parseProvider((req.query as { provider?: string }).provider);
     if (provider === null) return badRequest(reply, req, 'invalid provider');
-    const pricing = resolveModelPricing(
-      provider,
-      modelId,
-      toPriceEntries(await store.list(organizationId)),
-      organizationId,
-    );
+    const catalog = catalogs
+      ? combinePriceCatalogs(
+          await catalogs.read(''),
+          await catalogs.read(organizationId),
+          new Date(),
+        )
+      : null;
+    const conditional = (p: string, m: string) =>
+      catalog?.conditional_models.some((v) => v.provider === p && v.model_id === m) ?? false;
+    const pricing =
+      conditional(provider, modelId) && catalog
+        ? projectConditionalPriceToV1(
+            catalog,
+            provider,
+            modelId,
+            organizationId,
+            new Date().toISOString(),
+          )
+        : resolveModelPricing(
+            provider,
+            modelId,
+            toPriceEntries(await store.list(organizationId)).filter(
+              (e) => !conditional(e.provider, e.modelId),
+            ),
+            organizationId,
+          );
     if (!pricing) return unpriced(reply, req, provider, modelId);
     return reply.send(resolvedModelPriceToWire(provider, modelId, pricing));
   });
