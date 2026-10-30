@@ -16,11 +16,11 @@ import {
   asLocalSandboxHandle,
   LocalSandboxRuntime,
   type SandboxManagerLike,
-} from '../../src/local/runtime.js';
+} from '../../../src/local/runtime.js';
 
 const fixture = vi.hoisted(() => ({ root: '' }));
-vi.mock('../../src/environment-packages.js', async (importOriginal) => {
-  const original = await importOriginal<typeof import('../../src/environment-packages.js')>();
+vi.mock('../../../src/environment-packages.js', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../../../src/environment-packages.js')>();
   const fs = await import('node:fs');
   const { tmpdir } = await import('node:os');
   const { join } = await import('node:path');
