@@ -46,7 +46,7 @@ export interface ToolConfirmationVerdict {
   /**
    * The decision the body carried, classified tri-state for OBSERVABILITY only.
    * `allow` / `deny` are explicit recognized verdicts; `ambiguous` is a body with
-   * no recognizable decision (no `decision` string and no `approved` boolean) —
+   * no recognizable canonical result or legacy decision —
    * still a denial (`approved` is `false`), but flagged so the handler can log a
    * decision-less push apart from a deliberate `deny`. Does NOT relax fail-closed.
    */
@@ -76,8 +76,9 @@ export class ToolConfirmationParseError extends Error {
  * The body is the transcript event JSON. The `tool_use_id` is REQUIRED (without it
  * the verdict cannot be routed to a parked tool call) — its absence is a
  * {@link ToolConfirmationParseError} the handler maps to a 400. The decision is
- * normalized fail-closed: `decision` of `allow`/`approve`/`accept` (any case), or an
- * `approved: true` boolean, is the only path to `approved: true`; everything else
+ * normalized fail-closed: canonical `result: 'allow'` takes precedence over the
+ * legacy `decision` and `approved` aliases. Without `result`, a `decision` of
+ * `allow`/`approve`/`accept` (any case), or `approved: true`, allows; everything else
  * (an explicit `deny`, an unknown string, or no decision at all) is `approved: false`.
  *
  * @param body The confirmation push body (JSON).
@@ -109,7 +110,8 @@ export function parseToolConfirmation(body: Uint8Array): ToolConfirmationVerdict
 }
 
 /**
- * Classify a confirmation object's decision tri-state. Recognizes the allow
+ * Classify a confirmation object's decision tri-state. Canonical `result` wins;
+ * only its exact `allow` / `deny` values are accepted. Without it, recognizes the allow
  * spellings (`decision: 'allow' | 'approve' | 'accept'`, case-insensitive) and an
  * `approved: true` boolean as `allow`; the deny spellings (`decision: 'deny' |
  * 'reject' | 'decline'`, case-insensitive) and an `approved: false` boolean as
@@ -122,6 +124,10 @@ export function parseToolConfirmation(body: Uint8Array): ToolConfirmationVerdict
  * decision-less push when logging; it never relaxes the gate.
  */
 function classifyDecision(obj: Record<string, unknown>): ConfirmationDecision {
+  // Public events carry `result`; never let a legacy alias override it.
+  if ('result' in obj) {
+    return obj['result'] === 'allow' || obj['result'] === 'deny' ? obj['result'] : 'ambiguous';
+  }
   const decision = obj['decision'];
   if (typeof decision === 'string') {
     const normalized = decision.trim().toLowerCase();

@@ -37,6 +37,39 @@ function confirmationBody(value: Record<string, unknown>): Uint8Array {
 }
 
 describe('parseToolConfirmation — reads the verdict off the transcript event', () => {
+  it.each(['allow', 'deny'] as const)(
+    'honors canonical result %s over legacy aliases',
+    (result) => {
+      expect(
+        parseToolConfirmation(
+          confirmationBody({
+            type: 'user.tool_confirmation',
+            tool_use_id: 'toolu_canonical',
+            result,
+            decision: result === 'allow' ? 'deny' : 'allow',
+            approved: result !== 'allow',
+          }),
+        ),
+      ).toEqual({ toolUseId: 'toolu_canonical', approved: result === 'allow', decision: result });
+    },
+  );
+
+  it.each([null, true, '', 'ALLOW', 'approve', 'unknown'])(
+    'denies malformed canonical result %j despite legacy allow',
+    (result) => {
+      expect(
+        parseToolConfirmation(
+          confirmationBody({
+            tool_use_id: 'toolu_invalid',
+            result,
+            decision: 'allow',
+            approved: true,
+          }),
+        ),
+      ).toEqual({ toolUseId: 'toolu_invalid', approved: false, decision: 'ambiguous' });
+    },
+  );
+
   it('parses an ALLOW decision keyed by tool_use_id', () => {
     const v = parseToolConfirmation(
       confirmationBody({

@@ -271,7 +271,19 @@ a foreign one all deny. It
 classifies the tri-state (`allow` / `deny` / `ambiguous`) alongside that boolean
 purely so an operator can tell a malformed producer apart from a deliberate
 refusal. The verdict's durable source of truth is the transcript; the pushed
-confirmation is only the live delivery that unparks the call.
+confirmation is only the live delivery that unparks the call. The runner reads the
+canonical `result: "allow" | "deny"` before the legacy `decision` and `approved`
+aliases; an invalid canonical result fails closed even when an alias says allow.
+
+The credential-free `session-event-bridge.spec.ts` approval regression drives an
+explicit `mcp__orca__bash` call through the Claude Code provider, real MCP bridge
+and sandbox, then delivers client confirmations through the registry transport,
+runner serve loop and confirmation route. It checks parked writes, allow/deny, call
+and turn identity, duplicate and stale verdicts, and canonical permission precedence.
+Its CLI, transcript store and in-process tunnel peer are fixtures; it does not exercise a worker, WebSocket
+handshake or real model. Legacy CLI `Bash`/`Write` built-ins are distinct from Orca
+tools. The controlled native Pi File profile disables built-ins and keeps its
+separate launch, admission and File-policy regressions.
 
 ### Terminals
 
@@ -527,6 +539,16 @@ turn-completed marker under the current ownership fence. The bridge stamps the s
 user-event ID on callback records, so later queued messages retain their own turn. It does not re-run that call
 or bind an old result to a new call. A new message can start an unguarded turn; existing
 uncertain-usage markers continue to block guarded requests.
+
+The credential-free Registry unit suite exercises this round trip with the installed
+Codex SDK and a local Responses HTTP fixture, through the production bridge, tunnel
+serve loop, handlers and provider. It checks waiting before the matching result,
+Session/call/turn identity, stale and duplicate results, and callback abandonment on
+reconnect, including a result persisted during the disconnect. Transcript storage,
+checkpoint persistence and the tunnel connector are fixtures; this does not exercise
+the public HTTP API, worker/WebSocket handshake, a real model or deployed environment.
+The separate-path real-model scenario remains gated by `ORCA_E2E_REAL_CUSTOM_TOOL=1`.
+Custom-tool support does not qualify a snapshot for the native Pi File-only profile.
 
 Checkpoints include a SHA-256 fingerprint of the effective Orca developer
 instructions, including the managed Skill catalog. Both Codex adapters and the
