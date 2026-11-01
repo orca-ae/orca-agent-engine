@@ -1,8 +1,9 @@
 // Copyright The Orca Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { chmodSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, statSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { InMemorySandboxRuntime } from '../../src/sandbox/in-memory/runtime.js';
@@ -11,6 +12,8 @@ import type { GitWorker } from '../../src/git/git-worker.js';
 import { GitCloneStrategy } from '../../src/sandbox/mounts/git-clone.js';
 import type { MountResource } from '../../src/sandbox/mounts/mount-strategy.js';
 import { registry } from '../../src/metrics.js';
+import { serializeSandboxFileModes } from '../../src/sandbox/chmod-many.js';
+import type { SandboxFileMode } from '../../src/sandbox/sandbox-runtime.js';
 
 describe('GitCloneStrategy', () => {
   let workBase: string;
@@ -92,6 +95,137 @@ describe('GitCloneStrategy', () => {
 
     const gitHead = await sandbox.files.read('/workspace/repo/.git/HEAD');
     expect(gitHead.toString()).toContain('refs/heads/main');
+  });
+
+  it.each([true, false])('preserves real Git file modes (batch=%s)', async (batch) => {
+    const sandbox = await runtime.acquire({});
+    const mountPath = join(workBase, 'sandbox-repo');
+    const git = (cwd: string, ...args: string[]) =>
+      execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8' }).trim();
+    const worker: GitWorker = {
+      async cloneInto({ dest }) {
+        git(dest, 'init', '-q');
+        git(dest, 'config', 'core.fileMode', 'true');
+        writeFileSync(join(dest, 'plain.txt'), 'plain\n');
+        writeFileSync(join(dest, 'run.sh'), '#!/bin/sh\nprintf executable\n');
+        chmodSync(join(dest, 'plain.txt'), 0o644);
+        chmodSync(join(dest, 'run.sh'), 0o755);
+        git(dest, 'add', '.');
+        git(
+          dest,
+          '-c',
+          'user.name=Fixture',
+          '-c',
+          'user.email=fixture@example.com',
+          '-c',
+          'commit.gpgsign=false',
+          'commit',
+          '-qm',
+          'fixture',
+        );
+        expect(git(dest, 'status', '--porcelain')).toBe('');
+        // Special bits are not part of the sandbox copy contract.
+        chmodSync(join(dest, 'run.sh'), 0o6755);
+        chmodSync(join(dest, '.git/config'), 0o640);
+        return { commit: git(dest, 'rev-parse', 'HEAD') };
+      },
+      async listWorkingTree() {
+        return [];
+      },
+    };
+    sandbox.files.write = async (path, content) => {
+      if (!Buffer.isBuffer(content)) throw new Error('expected buffered copy');
+      mkdirSync(join(path, '..'), { recursive: true });
+      writeFileSync(path, content);
+      // Invert both tracked files' execution bits in every copy.
+      chmodSync(path, path.endsWith('/run.sh') ? 0o644 : 0o755);
+    };
+    const chmod = vi.fn(async (path: string, mode: number) => {
+      chmodSync(path, mode);
+    });
+    const chmodMany = vi.fn(async (root: string, entries: readonly SandboxFileMode[]) => {
+      serializeSandboxFileModes(root, entries);
+      for (const entry of entries) chmodSync(entry.path, entry.mode);
+    });
+    sandbox.files.chmod = chmod;
+    if (batch) sandbox.files.chmodMany = chmodMany;
+    const strategy = new GitCloneStrategy({
+      workspaceId: 'ws_modes',
+      sessionId: 'ses_modes',
+      worker,
+      workDir,
+      resolvePat: async () => 'fake-pat',
+    });
+    try {
+      await strategy.activate(sandbox, {
+        id: 'repo_modes',
+        type: 'github_repository',
+        url: 'https://github.com/org/repo',
+        mountPath: `${mountPath}/`,
+        access: 'read_write',
+        gitCredentialId: 'cred',
+        repoIdx: 0,
+      });
+      expect(statSync(join(mountPath, 'plain.txt')).mode & 0o7777).toBe(0o644);
+      expect(statSync(join(mountPath, 'run.sh')).mode & 0o7777).toBe(0o755);
+      expect(statSync(join(mountPath, '.git/config')).mode & 0o7777).toBe(0o640);
+      expect(git(mountPath, 'config', '--get', 'core.fileMode')).toBe('true');
+      expect(git(mountPath, 'status', '--porcelain')).toBe('');
+      expect(execFileSync(join(mountPath, 'run.sh'), { encoding: 'utf8' })).toBe('executable');
+      // Prove the fixture detects execution-bit drift instead of hiding it.
+      chmodSync(join(mountPath, 'plain.txt'), 0o755);
+      expect(git(mountPath, 'status', '--porcelain')).toContain('M plain.txt');
+      if (batch) {
+        expect(chmodMany).toHaveBeenCalledTimes(1);
+        expect(chmod).not.toHaveBeenCalled();
+      } else {
+        expect(chmod).toHaveBeenCalled();
+      }
+    } finally {
+      await sandbox.destroy();
+    }
+  });
+
+  it.each([true, false])('rejects permission restoration failure (batch=%s)', async (batch) => {
+    const sandbox = await runtime.acquire({});
+    const failure = vi.fn().mockRejectedValue(new Error('chmod denied'));
+    if (batch) sandbox.files.chmodMany = failure;
+    else sandbox.files.chmod = failure;
+    const workspaceId = `ws_chmod_failure_${batch}`;
+    const strategy = new GitCloneStrategy({
+      workspaceId,
+      sessionId: 'ses_y',
+      worker: makeFakeWorker({ 'README.md': 'x' }),
+      workDir,
+      resolvePat: async () => 'pat',
+    });
+    try {
+      await expect(
+        strategy.activate(sandbox, {
+          id: 'repo',
+          type: 'github_repository',
+          url: 'https://github.com/org/repo',
+          mountPath: '/workspace/repo',
+          access: 'read_write',
+          gitCredentialId: 'cred',
+          repoIdx: 0,
+        }),
+      ).rejects.toThrow('chmod denied');
+      expect(
+        await readCounterCell({
+          name: 'harness_git_clone_total',
+          labels: { workspace_id: workspaceId, result: 'ok' },
+        }),
+      ).toBe(0);
+      expect(
+        await readCounterCell({
+          name: 'harness_git_clone_total',
+          labels: { workspace_id: workspaceId, result: 'error' },
+        }),
+      ).toBe(1);
+    } finally {
+      await sandbox.destroy();
+    }
   });
 
   it('throws on non-github_repository resource', async () => {

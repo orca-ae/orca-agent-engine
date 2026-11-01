@@ -211,6 +211,13 @@ A `TarballPrefetchStrategy`-shaped mount driven by
 server-side `git clone --filter=blob:none --depth=1 [--sparse]` into a
 per-session host work dir, then stream the working tree (and `.git/`) into
 the sandbox FS via `sandbox.files.write`. No S3-FUSE for repos in v1.
+After writing, the mount restores each copied file's ordinary permission bits
+(`mode & 0777`), including files under `.git/`, using the runtime's batch chmod
+when available and individual chmod otherwise. This preserves executable scripts
+and keeps unchanged tracked files clean with `core.fileMode=true`. Special bits
+(setuid, setgid, sticky) and host UID/GID are not copied; directory creation and
+the existing ownership and write policy remain unchanged. Permission restoration
+failure fails the mount.
 
 Cold-start cost is linear in working-tree size; fine for repos up to a few
 hundred MB. The bytes live in the sandbox FS, which E2B persists across
