@@ -257,7 +257,7 @@ export function resolveConditionalPrice(input: {
     time(catalog.published_at) > at
   )
     return unpriced('catalog_not_published');
-  if (!facts?.service_tier || facts.service_tier === 'auto')
+  if (!facts?.service_tier || facts.service_tier === 'auto' || facts.service_tier === 'unknown')
     return unpriced('unknown_service_tier');
   if (!count(facts.request_input_tokens)) return unpriced('unknown_request_input');
   if (

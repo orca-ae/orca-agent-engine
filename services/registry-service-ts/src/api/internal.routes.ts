@@ -1304,12 +1304,13 @@ export function registerInternalRoutes(
     if (
       facts &&
       (!facts.success ||
+        typeof model !== 'string' ||
         req.headers['x-orca-pricing-capability'] !== 'request-facts-v1' ||
         typeof usageEventId !== 'string')
     ) {
-      return reply
-        .code(400)
-        .send({ error: 'pricing facts require request-facts-v1 and a stable usage event id' });
+      return reply.code(400).send({
+        error: 'pricing facts require a model, request-facts-v1 and a stable usage event id',
+      });
     }
     if (facts?.success) {
       const raw = body.usage ?? {};
@@ -1355,7 +1356,7 @@ export function registerInternalRoutes(
     // and what is recorded never changes afterwards. A model with no price data
     // yields `null` — the tokens are still recorded, the cost is not, and
     // nothing anywhere substitutes zero for "unknown".
-    const now = new Date();
+    let now = new Date();
     const outcome = await db.transaction(async (tx) => {
       // Serialize with negotiated authority changes, including shared-token writers
       // that passed the outer check before the Registry claimed this execution.
@@ -1367,6 +1368,7 @@ export function registerInternalRoutes(
         .for('update');
       if (await hasNativeUsageAuthority(tx as unknown as DbClient, workspaceId, id))
         return 'native_registry_owned' as const;
+      now = new Date();
       return persistUsage(tx, {
         workspaceId,
         sessionId: id,
@@ -1381,7 +1383,11 @@ export function registerInternalRoutes(
               },
             }
           : {}),
-        now: new Date(),
+        now,
+        pricingClock: () => {
+          now = new Date();
+          return now;
+        },
         turnSubject,
         ...(typeof threadId === 'string' ? { threadId } : {}),
         ...(typeof subagentId === 'string' ? { subagentId } : {}),

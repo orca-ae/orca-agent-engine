@@ -234,6 +234,83 @@
       }
     },
     {
+      "name": "unknown-is-unknown",
+      "input": {
+        "catalog": {
+          "catalog_id": "catalog-1",
+          "generation": 1,
+          "published_at": "2026-10-29T00:00:00.000Z",
+          "required_features": [
+            "exact-identity-v1",
+            "actual-service-tier-v1",
+            "whole-request-input-band-v1",
+            "explicit-cache-rates-v1",
+            "source-precedence-v1",
+            "per-rule-validity-v1"
+          ],
+          "rules": [
+            {
+              "rule_set_id": "set-1",
+              "rule_id": "rule-1",
+              "revision": 1,
+              "provider": "anthropic",
+              "model_id": "example-model",
+              "source": "seed",
+              "conditions": {
+                "service_tier": "standard",
+                "request_input_tokens": {
+                  "min": 0,
+                  "max": null
+                }
+              },
+              "rates": {
+                "input_per_million_tokens": 2,
+                "output_per_million_tokens": 8,
+                "cache_read_per_million_tokens": 0.2,
+                "cache_write_per_million_tokens": 2.5,
+                "cache_write_1h_per_million_tokens": 4
+              },
+              "usage_profile": "anthropic-cache-v1",
+              "profile_version": "anthropic-v1",
+              "provenance": {
+                "source_id": "fixture",
+                "document_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "adapter_version": "fixture-v1",
+                "observed_at": "2026-10-29T00:00:00.000Z"
+              },
+              "provider_effective_at": null,
+              "active_from": "2026-10-29T00:00:00.000Z",
+              "retired_at": null,
+              "valid_until": null
+            }
+          ]
+        },
+        "provider": "anthropic",
+        "model_id": "example-model",
+        "organization_id": "org-1",
+        "pricing_time": "2026-10-29T00:00:00.000Z",
+        "facts": {
+          "version": 1,
+          "request_id": "response-1",
+          "service_tier": "unknown",
+          "request_input_tokens": 1500,
+          "usage_profile": "anthropic-cache-v1",
+          "evidence_source": "provider_response"
+        },
+        "usage": {
+          "inputTokens": 1000,
+          "outputTokens": 100,
+          "cacheReadInputTokens": 200,
+          "cacheCreationEphemeral5mInputTokens": 300,
+          "cacheCreationEphemeral1hInputTokens": 0
+        }
+      },
+      "expected": {
+        "status": "unpriced",
+        "reason": "unknown_service_tier"
+      }
+    },
+    {
       "name": "priority-is-not-standard",
       "input": {
         "catalog": {

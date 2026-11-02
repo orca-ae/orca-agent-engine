@@ -1,15 +1,19 @@
 // Copyright The Orca Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { beforeAll, afterAll, describe, it, expect } from 'vitest';
+import { beforeAll, afterAll, describe, it, expect, vi } from 'vitest';
 import { and, eq } from 'drizzle-orm';
+import { drizzle } from 'drizzle-orm/node-postgres';
 import type { FastifyInstance } from 'fastify';
 import type { DbClient } from '../../src/persistence/postgres/client.js';
+import * as schema from '../../src/persistence/postgres/schema.js';
 import {
   agents,
   agentVersions,
   sessions,
   sessionUsageEvents,
+  sessionEventsIndex,
+  guardrailCounters,
   pricingCatalogHeads,
   pricingCatalogVersions,
   pricingFetchSnapshots,
@@ -29,6 +33,7 @@ import { createPostgresPricingCatalogStore } from '../../src/pricing/catalog-sto
 import { publishOperatorRuleSet } from '../../src/pricing/rule-sets.js';
 import { PriceRuleSetCreateSchema } from '../../src/contracts/model-price-rules.contract.js';
 import { persistUsage } from '../../src/domain/usage-accounting.js';
+import { priceUsageReceipt } from '../../src/pricing/usage-receipt.js';
 import { createTestApiKey, TEST_ORGANIZATION_ID as org, uniqueWorkspace } from './fixtures.js';
 import {
   getTestDb,
@@ -458,6 +463,26 @@ describe('conditional pricing PostgreSQL/API/accounting', () => {
         })
       ).statusCode,
     ).toBe(400);
+    expect(
+      (
+        await publicApp.inject({
+          ...request,
+          headers,
+          payload: { ...payload, model: undefined },
+        })
+      ).statusCode,
+    ).toBe(400);
+    expect(
+      await db
+        .select()
+        .from(sessionUsageEvents)
+        .where(
+          and(
+            eq(sessionUsageEvents.workspaceId, workspace),
+            eq(sessionUsageEvents.sessionId, sessionId),
+          ),
+        ),
+    ).toEqual([]);
     const accepted = await publicApp.inject({ ...request, headers });
     expect(accepted.statusCode, accepted.body).toBe(200);
     expect(accepted.headers['x-orca-pricing-capability']).toBe('request-facts-v1');
@@ -465,5 +490,135 @@ describe('conditional pricing PostgreSQL/API/accounting', () => {
     const [session] = await db.select().from(sessions).where(eq(sessions.id, sessionId));
     expect(session!.usageCostNanoUsd).toBe(20000n);
     expect(session!.usageInputTokens).toBe(1);
+  });
+
+  it('returns the daily budget window selected by receipt pricing across UTC midnight', async () => {
+    const sessionId = `ses_midnight_${workspace}`;
+    const agentId = `agt_midnight_${workspace}`;
+    await db.insert(agents).values({
+      id: agentId,
+      workspaceId: workspace,
+      name: uniqueWorkspace('midnight-agent'),
+      modelProvider: 'anthropic',
+      modelId,
+    });
+    await db.insert(agentVersions).values({
+      id: `version_midnight_${workspace}`,
+      workspaceId: workspace,
+      agentId,
+      version: 1,
+      snapshot: {},
+    });
+    await db
+      .insert(sessions)
+      .values({ id: sessionId, workspaceId: workspace, agentId, agentVersion: 1 });
+    const turnEventId = 'evt_midnight_turn';
+    const subject = 'api-key:midnight';
+    await db.insert(sessionEventsIndex).values({
+      workspaceId: workspace,
+      sessionId,
+      seq: 1,
+      eventId: turnEventId,
+      producedAt: new Date().toISOString(),
+      producedBy: 'client',
+      kind: 'user.message',
+      visibility: 'public',
+      guardrailSubject: subject,
+    });
+
+    const afterMidnight = new Date();
+    afterMidnight.setUTCDate(afterMidnight.getUTCDate() + 1);
+    afterMidnight.setUTCHours(0, 0, 0, 25);
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(afterMidnight.getTime() - 50));
+    const transaction = db.transaction.bind(db);
+    const transactionSpy = vi.spyOn(db, 'transaction').mockImplementation((callback, config) => {
+      vi.setSystemTime(afterMidnight);
+      return transaction(callback, config);
+    });
+    try {
+      const response = await publicApp.inject({
+        method: 'POST',
+        url: `/internal/v1/workspaces/${workspace}/sessions/${sessionId}/usage`,
+        headers: { 'x-orca-pricing-capability': 'request-facts-v1' },
+        payload: {
+          model: modelId,
+          provider: 'anthropic',
+          usage_event_id: 'evt_midnight_usage',
+          turn_event_id: turnEventId,
+          pricing_facts: {
+            version: 1,
+            request_id: 'response-midnight',
+            service_tier: 'standard',
+            request_input_tokens: 1,
+            usage_profile: 'anthropic-cache-v1',
+            evidence_source: 'provider_response',
+          },
+          usage: {
+            input_tokens: 1,
+            output_tokens: 0,
+            cache_read_input_tokens: 0,
+            cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 0 },
+          },
+        },
+      });
+      expect(response.statusCode, response.body).toBe(200);
+      const [event] = await db
+        .select()
+        .from(sessionUsageEvents)
+        .where(
+          and(
+            eq(sessionUsageEvents.workspaceId, workspace),
+            eq(sessionUsageEvents.eventId, 'evt_midnight_usage'),
+          ),
+        );
+      expect(event!.pricingReceipt).toMatchObject({ pricing_time: afterMidnight.toISOString() });
+      const [counter] = await db
+        .select()
+        .from(guardrailCounters)
+        .where(
+          and(eq(guardrailCounters.workspaceId, workspace), eq(guardrailCounters.subject, subject)),
+        );
+      expect(counter!.window).toBe(afterMidnight.toISOString().slice(0, 10));
+      expect(counter!.valueNum).toBeGreaterThan(0);
+      expect(response.json().guardrail_subject_window_state).toEqual({
+        daily_cost_usd: counter!.valueNum,
+      });
+    } finally {
+      transactionSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('reads only activation markers for legacy reports and loads rules only for converted models', async () => {
+    const { pool } = await getTestDb();
+    const queries: string[] = [];
+    const traced = drizzle(pool, { schema, logger: { logQuery: (query) => queries.push(query) } });
+    const usage = {
+      inputTokens: 1,
+      outputTokens: 0,
+      cacheReadInputTokens: 0,
+      cacheCreationEphemeral5mInputTokens: 0,
+      cacheCreationEphemeral1hInputTokens: 0,
+    };
+    const context = { provider: 'anthropic', modelId: 'legacy-only-model', facts: null };
+    const legacy = await traced.transaction((tx) =>
+      priceUsageReceipt(tx, workspace, context, usage, () => new Date()),
+    );
+    expect(legacy.receipt.reason).toBe('legacy_unpriced');
+    const headReads = queries.filter((query) => query.includes('"pricing_catalog_heads"'));
+    expect(headReads).toHaveLength(1);
+    expect(headReads[0]).toMatch(/->\s*'conditional_models'/);
+    expect(headReads[0]).not.toMatch(
+      /"(?:global_pricing|operator_pricing)"\."document"(?:,|\s+from)/,
+    );
+
+    queries.length = 0;
+    const converted = await traced.transaction((tx) =>
+      priceUsageReceipt(tx, workspace, { ...context, modelId }, usage, () => new Date()),
+    );
+    expect(converted.receipt.reason).toBe('unknown_service_tier');
+    expect(converted.receipt.org_catalog_id).toBeTruthy();
+    expect(queries.filter((query) => query.includes('"pricing_catalog_heads"'))).toHaveLength(2);
   });
 });

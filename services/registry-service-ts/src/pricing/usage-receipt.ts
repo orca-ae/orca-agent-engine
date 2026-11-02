@@ -5,11 +5,14 @@ import { eq, sql } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import { Counter } from 'prom-client';
 import { registry } from '../metrics.js';
-import { resolveConditionalPrice, type RequestPriceFacts } from '@orca/harness-catalog';
+import {
+  resolveConditionalPrice,
+  type PricingCatalog,
+  type RequestPriceFacts,
+} from '@orca/harness-catalog';
 import type { DbClient, DbTransaction } from '../persistence/postgres/client.js';
 import { pricingCatalogHeads, workspaces } from '../persistence/postgres/schema.js';
-import { combinePriceCatalogs, emptyPriceCatalog, type CatalogDocument } from './catalog-store.js';
-import { modelUsesConditionalPrices } from './rule-sets.js';
+import { emptyPriceCatalog, type CatalogDocument } from './catalog-store.js';
 import { priceUsageDelta, type UsageDelta } from '../domain/usage-accounting.js';
 
 const failures = new Counter({
@@ -79,7 +82,32 @@ export async function priceUsageReceipt(
   await db.execute(sql`select pg_advisory_xact_lock_shared(hashtextextended('pricing:', 0))`);
   await db.execute(sql`select pg_advisory_xact_lock_shared(hashtextextended('pricing:' || organization_id, 0))
     from workspaces where id = ${workspaceId}`);
-  const { organizationId, globalDoc, orgDoc } = await loadWorkspacePricingCatalog(db, workspaceId);
+  // Legacy reports need the activation markers, not the potentially large
+  // rule documents. Both reads share the publication locks above.
+  const global = alias(pricingCatalogHeads, 'global_pricing');
+  const operator = alias(pricingCatalogHeads, 'operator_pricing');
+  const [head] = await db
+    .select({
+      organizationId: workspaces.organizationId,
+      globalCatalogId: global.catalogId,
+      orgCatalogId: operator.catalogId,
+      globalModels: sql<
+        CatalogDocument['conditional_models']
+      >`coalesce(${global.document}->'conditional_models', '[]'::jsonb)`,
+      orgModels: sql<
+        CatalogDocument['conditional_models']
+      >`coalesce(${operator.document}->'conditional_models', '[]'::jsonb)`,
+    })
+    .from(workspaces)
+    .leftJoin(global, eq(global.organizationId, ''))
+    .leftJoin(operator, eq(operator.organizationId, workspaces.organizationId))
+    .where(eq(workspaces.id, workspaceId))
+    .limit(1);
+  const models = [...(head?.globalModels ?? []), ...(head?.orgModels ?? [])];
+  const conditional = models.some(
+    (model) => model.provider === context.provider && model.model_id === context.modelId,
+  );
+  const catalogs = conditional ? await loadWorkspacePricingCatalog(db, workspaceId) : null;
   const now = clock();
   const receipt: UsagePriceReceipt = {
     version: 1,
@@ -98,30 +126,39 @@ export async function priceUsageReceipt(
     reason: null,
     price_basis: 'api_equivalent_estimate',
   };
-  const conditional =
-    modelUsesConditionalPrices(globalDoc, context.provider, context.modelId) ||
-    modelUsesConditionalPrices(orgDoc, context.provider, context.modelId);
-  if (!conditional) {
+  if (catalogs === null) {
     const costNanoUsd = await priceUsageDelta(
       db as unknown as DbClient,
       workspaceId,
       context.provider,
       context.modelId,
       usage,
-      [...globalDoc.conditional_models, ...orgDoc.conditional_models],
+      models,
     );
     receipt.cost_nano_usd = costNanoUsd?.toString() ?? null;
     receipt.reason = costNanoUsd === null ? 'legacy_unpriced' : null;
     return { costNanoUsd, receipt };
   }
-  const catalog = combinePriceCatalogs(globalDoc, orgDoc, now);
+  const { globalDoc, orgDoc } = catalogs;
   // The receipt names the immutable scope catalogs, not a disposable fetch snapshot.
-  receipt.global_catalog_id = globalDoc.catalog_id || null;
-  receipt.org_catalog_id = orgDoc.catalog_id || null;
-  receipt.catalog_id = JSON.stringify([globalDoc.catalog_id, orgDoc.catalog_id]);
+  receipt.global_catalog_id = head?.globalCatalogId || null;
+  receipt.org_catalog_id = head?.orgCatalogId || null;
+  const catalogId = JSON.stringify([head?.globalCatalogId ?? '', head?.orgCatalogId ?? '']);
+  receipt.catalog_id = catalogId;
+  // Resolution does not consume fetch digests, expiry or rule order. Avoid
+  // sorting and hashing every rule while the accounting locks are held.
+  const catalog: PricingCatalog = {
+    catalog_id: catalogId,
+    generation: globalDoc.generation + orgDoc.generation,
+    published_at: new Date(
+      Math.max(Date.parse(globalDoc.published_at), Date.parse(orgDoc.published_at)),
+    ).toISOString(),
+    required_features: [...new Set([...globalDoc.required_features, ...orgDoc.required_features])],
+    rules: [...globalDoc.rules, ...orgDoc.rules],
+  };
   const result = resolveConditionalPrice({
     catalog,
-    ...(organizationId ? { organization_id: organizationId } : {}),
+    ...(head?.organizationId ? { organization_id: head.organizationId } : {}),
     provider: context.provider,
     model_id: context.modelId,
     facts: context.facts,

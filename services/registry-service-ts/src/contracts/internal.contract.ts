@@ -779,46 +779,51 @@ export const internalContract = c.router({
     path: '/internal/v1/workspaces/:workspaceId/sessions/:id/usage',
     pathParams: z.object({ workspaceId: z.string().min(1), id: idString('ses') }),
     headers: z.object({ 'x-orca-pricing-capability': z.literal('request-facts-v1').optional() }),
-    body: z.object({
-      usage: z.object({
-        cache_creation: z
-          .object({
-            ephemeral_1h_input_tokens: z.number().int().nonnegative().optional(),
-            ephemeral_5m_input_tokens: z.number().int().nonnegative().optional(),
-          })
-          .optional(),
-        cache_read_input_tokens: z.number().int().nonnegative().optional(),
-        input_tokens: z.number().int().nonnegative().optional(),
-        output_tokens: z.number().int().nonnegative().optional(),
+    body: z
+      .object({
+        usage: z.object({
+          cache_creation: z
+            .object({
+              ephemeral_1h_input_tokens: z.number().int().nonnegative().optional(),
+              ephemeral_5m_input_tokens: z.number().int().nonnegative().optional(),
+            })
+            .optional(),
+          cache_read_input_tokens: z.number().int().nonnegative().optional(),
+          input_tokens: z.number().int().nonnegative().optional(),
+          output_tokens: z.number().int().nonnegative().optional(),
+        }),
+        /**
+         * The model that produced this delta. Registry prices the delta as it
+         * arrives, so a session that changes model mid-run is priced at the rate
+         * that applied when each portion was incurred. Omitting it records the
+         * tokens and no cost — unpriced, never $0.00.
+         */
+        model: z.string().min(1).optional(),
+        /**
+         * Which vendor served that model. Model identity is the
+         * `{ provider, id }` pair, because the same id served through two
+         * providers can carry different rates. Optional: a harness that names
+         * only the id is priced against the deployment's default provider, which
+         * is what every report before this field existed meant.
+         */
+        provider: z.string().min(1).optional(),
+        /**
+         * The thread the delta belongs to. A dispatched subagent runs on its own
+         * thread; naming it is what makes per-subagent spend attributable.
+         */
+        thread_id: idString('sth').optional(),
+        /** Managed subagent whose model call produced the delta. */
+        subagent_id: idString('agt').optional(),
+        /** Turn whose Registry-authenticated principal owns cross-session spend. */
+        turn_event_id: idString('evt').optional(),
+        /** Stable sandbox event id; duplicate delivery returns the original totals without charging twice. */
+        usage_event_id: idString('evt').optional(),
+        pricing_facts: RequestPriceFactsSchema.optional(),
+      })
+      .refine((body) => body.pricing_facts === undefined || body.model !== undefined, {
+        path: ['model'],
+        message: 'pricing facts require a model',
       }),
-      /**
-       * The model that produced this delta. Registry prices the delta as it
-       * arrives, so a session that changes model mid-run is priced at the rate
-       * that applied when each portion was incurred. Omitting it records the
-       * tokens and no cost — unpriced, never $0.00.
-       */
-      model: z.string().min(1).optional(),
-      /**
-       * Which vendor served that model. Model identity is the
-       * `{ provider, id }` pair, because the same id served through two
-       * providers can carry different rates. Optional: a harness that names
-       * only the id is priced against the deployment's default provider, which
-       * is what every report before this field existed meant.
-       */
-      provider: z.string().min(1).optional(),
-      /**
-       * The thread the delta belongs to. A dispatched subagent runs on its own
-       * thread; naming it is what makes per-subagent spend attributable.
-       */
-      thread_id: idString('sth').optional(),
-      /** Managed subagent whose model call produced the delta. */
-      subagent_id: idString('agt').optional(),
-      /** Turn whose Registry-authenticated principal owns cross-session spend. */
-      turn_event_id: idString('evt').optional(),
-      /** Stable sandbox event id; duplicate delivery returns the original totals without charging twice. */
-      usage_event_id: idString('evt').optional(),
-      pricing_facts: RequestPriceFactsSchema.optional(),
-    }),
     responses: {
       200: InternalSession,
       400: z.object({ error: z.string() }),

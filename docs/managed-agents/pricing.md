@@ -38,8 +38,8 @@ convert rows automatically. A nonzero unsupported bucket makes the request unpri
 Workspace discovery advertises `pricing.runorca.ai/v2` beside v1. Authenticated
 `GET /apis/pricing.runorca.ai/v2/modelpricerules` returns at most 100 candidates per page,
 `catalog_id`, generation, digest, publication/expiry times, required features and activated model
-identities. Cursors bind an immutable snapshot to the authenticated workspace and organization;
-`conditional_models` is the conversion authority; other published rules are shadow candidates.
+identities. `conditional_models` is the conversion authority; other published rules are shadow
+candidates. Cursors bind an immutable snapshot to the authenticated workspace and organization, so
 publication between pages cannot mix generations. Unknown/expired snapshots return 410. Clients
 validate every page and required feature before replacing a cache, and enforce each rule's own
 activation/retirement/freshness bounds. Fetch snapshots last one hour; accounting catalog versions
@@ -71,8 +71,8 @@ arithmetic agrees; otherwise list omits it and item GET returns the existing unp
 legacy family matches cannot reuse a converted model's old flat row.
 
 The internal usage endpoint accepts optional `pricing_facts` version 1 only with
-`x-orca-pricing-capability: request-facts-v1` and a stable `usage_event_id`; it returns the capability
-header on accepted reports. Facts carry request identity, actual tier, full request input,
+`model`, `x-orca-pricing-capability: request-facts-v1` and a stable `usage_event_id`; it returns the
+capability header on accepted reports. Facts carry request identity, actual tier, full request input,
 usage-profile/evidence source and optional observed time/unsupported-dimension marker. The input
 count must equal all exclusive input/cache buckets exactly once; complete safe-integer buckets
 are required. Requested tier and client timestamps do not choose tariffs. Existing workload/session
@@ -80,10 +80,10 @@ authority still selects the writer. Public usage and SSE shapes remain unchanged
 
 Accounting resolves after durable report deduplication in the same transaction as session, thread
 and budget counters. Its server clock runs after reading the selected catalog and is shared with
-SDK request admission and UTC daily budget windows. Each first-accepted
-report stores facts, rule/revision, immutable scope catalog IDs, time, rates, integer nano-USD cost
-and API-equivalent estimate basis, or an unpriced reason. Replays reuse the existing receipt and
-move no counters, even after publication or retirement. Historical costs remain unchanged.
+SDK request admission, UTC daily budget windows and the HTTP response's daily budget state. Each
+first-accepted report stores facts, rule/revision, immutable scope catalog IDs, time, rates, integer
+nano-USD cost and API-equivalent estimate basis, or an unpriced reason. Replays reuse the existing
+receipt and move no counters, even after publication or retirement. Historical costs remain unchanged.
 New receipts expose nullable `global_catalog_id` and `org_catalog_id` fields for direct queries;
 the opaque `catalog_id` remains available for existing receipt readers. Legacy-price receipts
 leave both scope IDs null.
