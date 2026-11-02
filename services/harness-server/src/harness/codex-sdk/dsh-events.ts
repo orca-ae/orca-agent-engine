@@ -40,8 +40,12 @@ export class DshEventProjection {
   constructor(
     private readonly workspaceId: string,
     private readonly sessionId: string,
-    private readonly orchestrationTools: readonly string[],
+    private orchestrationTools: readonly string[],
   ) {}
+
+  registerPluginTools(names: readonly string[]): void {
+    this.orchestrationTools = [...new Set([...this.orchestrationTools, ...names])];
+  }
 
   beginTurn(): void {
     this.emitted.clear();

@@ -20,6 +20,7 @@ import {
   ENVIRONMENT_PACKAGES_ENV,
   ENVIRONMENT_PACKAGES_EXTENSION,
 } from '@orca/sandbox-runtime';
+import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   OpenSandboxRuntime,
@@ -32,6 +33,22 @@ const BASE_OPTS = {
   execdAccessToken: 'a'.repeat(64),
   image: 'ghcr.io/orca-ae/sandbox-harness-claude-code:latest',
   timeoutSeconds: 60,
+};
+
+const dshFiles = {
+  'cordis.patch.yml': '[]',
+  'package.json': '{}',
+  'pnpm-lock.yaml': '',
+  'pnpm-workspace.yaml': '',
+};
+const dshProfile = {
+  version: 1 as const,
+  source_file_id: 'file_test',
+  source_sha256: 'a'.repeat(64),
+  config_sha256: createHash('sha256')
+    .update(JSON.stringify([1, Object.entries(dshFiles)]))
+    .digest('hex'),
+  files: dshFiles,
 };
 
 afterEach(() => {
@@ -51,6 +68,7 @@ describe('OpenSandboxRuntime', () => {
     expect(rt.capabilities.supportsFuse).toBe(true);
     expect(rt.capabilities.supportsLocalMemory).toBeUndefined();
     expect(rt.capabilities.supportsWritePolicy).toBe(true);
+    expect(rt.capabilities.supportsDshProfiles).toBe(true);
   });
 
   it('disables FUSE when configured', () => {
@@ -216,6 +234,46 @@ describe('buildOpenSandboxEndpointUrl', () => {
 });
 
 describe('OpenSandboxRuntime.acquire hardening', () => {
+  it('prepares a DSH-only write policy without a package rootfs', async () => {
+    const calls = mockOpenSandboxFetch([
+      commandStream({ exitCode: 0 }),
+      commandStream({ exitCode: 0 }),
+    ]);
+    const handle = await newTestRuntime().acquire({ dshProfile });
+    await expect(handle.prepareWritePolicy!(buildSandboxWritePolicy([]))).resolves.toBeUndefined();
+    expect(calls.some((call) => call.body?.includes('.orca-profile-revision'))).toBe(true);
+    expect(calls.some((call) => call.body?.includes('orca_package_boundary_ok'))).toBe(false);
+  });
+
+  it.each([0, 1])(
+    'probes native DSH mount evidence and cleans up on failure (exit=%i)',
+    async (exitCode) => {
+      const calls = mockOpenSandboxFetch([commandStream({ exitCode })]);
+      const outcome = await newTestRuntime()
+        .acquire({ dshProfile })
+        .catch((error: unknown) => error);
+      const command = calls.find((call) => call.url.endsWith('/command'));
+      expect(command?.body).toContain('/proc/self/mountinfo');
+      expect(command?.body).toContain('.orca-profile-revision');
+      expect(
+        calls.some((call) => call.url.endsWith('/sandboxes/sb_test') && call.method === 'GET'),
+      ).toBe(true);
+      if (exitCode === 0) expect(outcome).toHaveProperty('id', 'sb_test');
+      else {
+        expect(outcome).toBeInstanceOf(Error);
+        expect(calls.filter((call) => call.method === 'DELETE')).toHaveLength(1);
+      }
+    },
+  );
+
+  it('rejects limited networking before contacting the provider', async () => {
+    const fetch = vi.spyOn(globalThis, 'fetch');
+    await expect(
+      newTestRuntime().acquire({ dshProfile, networking: { type: 'limited' } }),
+    ).rejects.toThrow('unrestricted');
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it.each([
     ['Failed', 'ENVIRONMENT_PACKAGES_INSTALL_FAILED'],
     ['Failed', 'ENVIRONMENT_PACKAGES_START_FAILED'],
@@ -296,11 +354,11 @@ describe('OpenSandboxRuntime.acquire hardening', () => {
       packages: { apt: ['jq'] },
     });
     await expect(
-      handle.prepareWritePolicy!({
-        environmentPackages: true,
-        writablePaths: [{ path: '/mnt/session/outputs', kind: 'session_output' }],
-        readonlyPaths: [],
-      }),
+      handle.prepareWritePolicy!(
+        buildSandboxWritePolicy([], {
+          environmentPackages: true,
+        }),
+      ),
     ).rejects.toThrow(/filesystem boundary probe failed \(exit=76\).*output write denied/);
   });
 

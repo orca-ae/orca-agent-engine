@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import type { DshApprovedProfiles } from '../domain/dsh-profile.js';
 import { posix as posixPath } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import {
@@ -821,6 +822,7 @@ export function registerSessionsRoutes(
   environmentLaunchLifecycle?: EnvironmentLaunchTrigger,
   secretStore?: SecretStore,
   batchReadsEnabled = true,
+  dshApprovedProfiles: DshApprovedProfiles = {},
 ): void {
   async function handleSessionStream(req: FastifyRequest, reply: FastifyReply) {
     const auth = req.auth!;
@@ -1051,6 +1053,7 @@ export function registerSessionsRoutes(
       const configurationError = validateAgentConfiguration(
         overrideTools ?? baseConfiguration.tools,
         overrideMcpServers ?? baseConfiguration.mcpServers,
+        baseConfiguration.metadata.dsh_profile !== undefined,
       );
       if (configurationError) return invalidRequest(configurationError);
       persistedToolsOverride = overrideTools ?? null;
@@ -1228,6 +1231,7 @@ export function registerSessionsRoutes(
     try {
       creation = await db.transaction(async (tx) =>
         createSessionInTransaction(tx, {
+          dshApprovedProfiles,
           id,
           workspaceId: auth.workspaceId,
           agentId,
@@ -1624,7 +1628,11 @@ export function registerSessionsRoutes(
       const effectiveMcpServers = Array.isArray(nextMcpServersOverride)
         ? nextMcpServersOverride
         : baseConfiguration.mcpServers;
-      const configurationError = validateAgentConfiguration(effectiveTools, effectiveMcpServers);
+      const configurationError = validateAgentConfiguration(
+        effectiveTools,
+        effectiveMcpServers,
+        baseConfiguration.metadata.dsh_profile !== undefined,
+      );
       if (configurationError) return reply.code(400).send({ error: configurationError });
     }
     const titleChanged = nextTitle !== existing.title;

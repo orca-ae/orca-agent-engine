@@ -12,6 +12,7 @@
  */
 
 import type { SandboxCallOptions } from '@orca/sandbox-runtime';
+import type { DshProfileDescriptor } from '@orca/harness-catalog';
 import type { ReadPage, ReadPageInput } from './read-page.js';
 
 export interface ToolCall {
@@ -146,6 +147,7 @@ export interface SandboxCapabilities {
   supportsPerCallCancellation?: boolean;
   /** Provider prepares package rootfs in a credential-free, completed init container. */
   supportsEnvironmentPackages?: boolean;
+  supportsDshProfiles?: boolean;
   /**
    * Whether the runtime can mount FUSE filesystems inside the sandbox.
    * E2B with `orca-default` advertises true. OpenSandbox advertises true only
@@ -170,6 +172,7 @@ export type PackageManager = (typeof packageManagers)[number];
 export type Packages = Partial<Record<PackageManager, string[]>>;
 
 export interface EnvironmentSpec {
+  dshProfile?: DshProfileDescriptor;
   packages?: Packages;
   networking?: Record<string, unknown>;
   /** Container image to boot (colocated: the harness image). */

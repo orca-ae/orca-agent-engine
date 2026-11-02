@@ -2,9 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { DshSdkWorker } from '@orca/dsh-harness';
-import { validateSdkCheckpoint, validateHarnessModel } from '@orca/harness-catalog';
+import {
+  validateSdkCheckpoint,
+  validateHarnessModel,
+  parseDshProfileDescriptor,
+} from '@orca/harness-catalog';
 import { PiSdkWorker } from '@orca/pi-harness';
-import type { SdkWorker } from '@orca/sdk-harness';
+import { parseDshToolManifest, type SdkWorker } from '@orca/sdk-harness';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -28,6 +32,14 @@ const commandSchema = z.discriminatedUnion('type', [
     modelProvider: z.string().optional(),
     system: z.string(),
     effort: z.string().optional(),
+    dshProfile: z
+      .unknown()
+      .optional()
+      .transform((value) => (value === undefined ? undefined : parseDshProfileDescriptor(value))),
+    dshManagedTools: z
+      .unknown()
+      .optional()
+      .transform((value) => (value === undefined ? undefined : parseDshToolManifest(value))),
     tools: z.array(
       z
         .object({
@@ -108,6 +120,8 @@ export class CodexSdkRuntime implements Runtime {
       }
     }
     if (command.type === 'start') {
+      if (this.model !== 'dsh-sdk' && (command.dshProfile || command.dshManagedTools))
+        throw new Error('Native profiles are DSH-only');
       if (this.worker) throw new Error('SDK already started');
       if (this.model === 'pi-sdk' && !command.piGatewayUrl)
         throw new Error('colocated Pi requires an explicit native Gateway URL');

@@ -13,16 +13,30 @@ import { apply as control } from '@deepseek-ai/dsh-tool-subagent-control';
 import { SessionId, type Session } from '@deepseek-ai/dsh-session';
 import { createUserMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm';
 import { registerDeepSeekProvider, resolveAdapterOptions } from '@deepseek-ai/dsh-llm-deepseek';
-import { DSH_MODEL } from '@orca/harness-catalog';
+import { DSH_MODEL, parseDshProfileDescriptor } from '@orca/harness-catalog';
 import { registerManagedPi } from './pi-adapter.js';
 import { JsonRpcLineTransport } from '@deepseek-ai/dsh-sdk-protocol';
 import { createHash, randomUUID } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { readFile, readdir, lstat } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { SdkTerminalUsage } from '@orca/sdk-harness';
-import { sdkExecutionBudgetMs, sdkTimeoutSignal, assertSdkTerminalUsage } from '@orca/sdk-harness';
-import { captureCheckpoint, MAX_STATE_BYTES, MAX_STATE_FILES, NATIVE_ID } from './checkpoint.js';
+import type { SdkTerminalUsage, DshHarnessProfile } from '@orca/sdk-harness';
+import {
+  sdkExecutionBudgetMs,
+  sdkTimeoutSignal,
+  assertSdkTerminalUsage,
+  parseDshToolManifest,
+  dshToolManifestSha256,
+} from '@orca/sdk-harness';
+import {
+  captureCheckpoint,
+  assertDshCheckpointProfile,
+  MAX_STATE_BYTES,
+  MAX_STATE_FILES,
+  NATIVE_ID,
+} from './checkpoint.js';
+import { FrozenToolManifest } from './tool-manifest.js';
+import { profileIdentity, validateEffectiveProfile } from './profile.js';
 import { boundedLines } from './bounds.js';
 import { gatewayBase, installManagedFetch } from './transport.js';
 import {
@@ -67,6 +81,12 @@ export function apply(ctx: Context): void {
   const inputStream = process.stdin.pipe(boundedLines());
   const rpc = new JsonRpcLineTransport(inputStream, process.stdout);
   let input: DshStartCommand | undefined;
+  let frozenTools: FrozenToolManifest | undefined;
+  let harnessProfile: DshHarnessProfile | undefined;
+  let manifestTools: DshStartCommand['tools'] = [];
+  const sandboxExecuted = (name: string): boolean =>
+    nativeTools.has(name) ||
+    (!!input?.dshProfile && !input.tools.some((tool) => tool.name === name));
   let nativeProvider = 'orca-deepseek';
   let managedPi: { api: string; baseUrl: string } | undefined;
   let archived = new Set<string>();
@@ -208,7 +228,10 @@ export function apply(ctx: Context): void {
       assertSdkTerminalUsage(value.counts);
     },
     (id) => {
+      if (input?.dshProfile && (!active || !harnessProfile || retired || !sourceEventId))
+        throw new Error('DSH custom runtime has no authorized model turn');
       assertAvailable(id);
+      frozenTools?.assertCurrent();
       record(id).started++;
     },
   );
@@ -245,6 +268,8 @@ export function apply(ctx: Context): void {
     for (const tool of input.tools) {
       if (nativeTools.has(tool.name) || tool.name === 'web_fetch')
         throw new Error('Reserved DSH tool name');
+      if (input.dshProfile && agentCtx.tools.get(tool.name, agent))
+        throw new Error('DSH plugin and managed/client tool names collide');
       agentCtx.tools.register({
         name: tool.name,
         description: tool.description ?? tool.name,
@@ -339,17 +364,36 @@ export function apply(ctx: Context): void {
       },
     });
     agentCtx.on('tools/pre-execute', async (exec, next) => {
+      const plugin =
+        !!input!.dshProfile &&
+        !nativeTools.has(exec.name) &&
+        !input!.tools.some((tool) => tool.name === exec.name);
       const args = nativeTools.has(exec.name)
         ? nativeArguments(exec.name, exec.arguments)
-        : undefined;
+        : plugin
+          ? (structuredClone(exec.arguments) as Record<string, string>)
+          : undefined;
       assertAvailable(String(agent.id));
-      if (!nativeTools.has(exec.name) && !input!.tools.some((tool) => tool.name === exec.name))
+      frozenTools?.assertCurrent(agent);
+      if (
+        !nativeTools.has(exec.name) &&
+        !plugin &&
+        !input!.tools.some((tool) => tool.name === exec.name)
+      )
         throw new Error('DSH tool outside fixed grant');
       if (args) {
         const call = calls.get(agent.id + ':' + exec.callId);
         const source = sourceEventId;
         const checkInspection = inspectionCaller(exec);
         const validate = async () => {
+          if (plugin) {
+            checkInspection();
+            frozenTools!.assertCurrent(agent);
+            if (JSON.stringify(exec.arguments) !== JSON.stringify(args))
+              throw new Error('DSH plugin arguments changed during authorization');
+            exec.signal.throwIfAborted();
+            return;
+          }
           if (inspection.has(exec.name)) {
             checkInspection();
             if (
@@ -424,6 +468,8 @@ export function apply(ctx: Context): void {
       }
       return next();
     });
+    // Root setup occurs after real credential-bearing initialize; children inherit a subset.
+    if (frozenTools && handle) frozenTools.freeze(agent);
   };
   // Native child scopes are fresh. The loop holds its inbox until this awaited listener finishes.
   const releaseCreated = ctx.on('agent/created', async ({ agent }) => {
@@ -435,6 +481,9 @@ export function apply(ctx: Context): void {
     )
       await setup(agent.ctx, agent);
     return undefined;
+  });
+  const releaseDisposed = ctx.on('agent/disposed', ({ agent }) => {
+    frozenTools?.forget(agent);
   });
   const releaseToolOrigin = ctx.on('tools/execute', async (exec, next) => {
     if (
@@ -448,7 +497,7 @@ export function apply(ctx: Context): void {
       }
     }
     const call = calls.get(exec.agent?.id + ':' + exec.callId);
-    return call && nativeTools.has(exec.name)
+    return call && sandboxExecuted(exec.name)
       ? toolOrigin.run(identity(String(exec.agent!.id), 'tool:' + call.seq), next)
       : next();
   });
@@ -515,7 +564,7 @@ export function apply(ctx: Context): void {
       }
     if (event.type === 'tool/call') {
       calls.set(id + ':' + event.data.callId, { seq: event.seq, name: event.data.name });
-      if (nativeTools.has(event.data.name))
+      if (sandboxExecuted(event.data.name))
         canonical(
           id,
           'tool:' + event.seq,
@@ -526,7 +575,7 @@ export function apply(ctx: Context): void {
     }
     if (event.type === 'tool/result') {
       const call = calls.get(id + ':' + event.data.message.toolCallId);
-      if (call && nativeTools.has(call.name))
+      if (call && sandboxExecuted(call.name))
         canonical(
           id,
           'result:' + event.seq,
@@ -635,6 +684,7 @@ export function apply(ctx: Context): void {
       files,
       input!.model,
       input!.modelProvider ?? 'deepseek',
+      harnessProfile,
     );
   };
   inputStream.on('error', () => {
@@ -645,6 +695,14 @@ export function apply(ctx: Context): void {
       await ctx.get('loader')?.await();
       if (input) throw new Error('DSH already initialized');
       input = params as unknown as DshStartCommand;
+      if (input.dshProfile) {
+        input.dshProfile = parseDshProfileDescriptor(input.dshProfile);
+        input.dshManagedTools = parseDshToolManifest(input.dshManagedTools ?? []);
+        frozenTools = new FrozenToolManifest(
+          ctx,
+          new Set([...nativeTools, ...input.tools.map((tool) => tool.name)]),
+        );
+      }
       archived = archivedSubpaths(input.archivedThreadSubpaths);
       gatewayBase(input.dshGatewayUrl);
       const provider = input.modelProvider ?? 'deepseek';
@@ -678,6 +736,43 @@ export function apply(ctx: Context): void {
       handle = input.checkpoint
         ? await ctx.agents.resume({ resumeSessionId: id, agentOptions: options, setup })
         : await ctx.agents.create({ sessionId: id, agentOptions: options, setup });
+      if (input.dshProfile) {
+        await validateEffectiveProfile(
+          ctx,
+          join(process.env.DSH_HOME!, 'trusted.patch.yml'),
+          input.dshProfile,
+        );
+        const reservedNames = new Set([
+          ...nativeTools,
+          ...input.tools.map((tool) => tool.name),
+          ...(input.dshManagedTools ?? []).map((tool) => tool.name),
+        ]);
+        if (ctx.tools.schemas().some((tool) => reservedNames.has(tool.name)))
+          throw new Error('DSH plugin tool collides with a native, managed or Session tool');
+        frozenTools!.freeze(handle.agent);
+        const external = new Set(input.tools.map((tool) => tool.name));
+        const schemas = JSON.parse(frozenTools!.manifest(handle.agent, external)) as Array<{
+          name: string;
+          description?: string;
+          parameters: object;
+          deferLoading?: boolean;
+        }>;
+        manifestTools = parseDshToolManifest([
+          ...schemas.map((schema) => ({
+            name: schema.name,
+            description: schema.description,
+            inputSchema: schema.parameters,
+            ...(schema.deferLoading === true ? { deferLoading: true } : {}),
+          })),
+          ...(input.dshManagedTools ?? []),
+        ]);
+        harnessProfile = await profileIdentity(
+          input.dshProfile,
+          dshToolManifestSha256(manifestTools),
+          join(process.env.DSH_HOME!, 'trusted.patch.yml'),
+        );
+      }
+      if (input.checkpoint) assertDshCheckpointProfile(input.checkpoint, harnessProfile);
       const restoredChildren = await tree();
       declaredChildren.clear();
       nextChildKey = 0;
@@ -695,7 +790,16 @@ export function apply(ctx: Context): void {
           ...(label === undefined ? {} : { label }),
         });
       }
-      return { threadId: String(id), threads };
+      return {
+        threadId: String(id),
+        threads,
+        ...(harnessProfile
+          ? {
+              harness_profile: harnessProfile,
+              tools: manifestTools,
+            }
+          : {}),
+      };
     }
     if (!input || !handle) throw new Error('DSH not initialized');
     if (method === 'archive_fence') {
@@ -704,6 +808,12 @@ export function apply(ctx: Context): void {
     }
     if (method === 'refresh') {
       if (active) throw new Error('DSH refresh requires idle');
+      if (
+        Object.keys(params).some(
+          (key) => !['apiKey', 'baseUrl', 'piGatewayUrl', 'dshGatewayUrl', 'system'].includes(key),
+        )
+      )
+        throw new Error('DSH profile, schemas and grants are immutable for this runtime');
       input = { ...input, ...params };
       gatewayBase(input.dshGatewayUrl);
       return {};
@@ -733,6 +843,7 @@ export function apply(ctx: Context): void {
       return {};
     }
     if (method !== 'submit') throw new Error('Unsupported DSH bridge method');
+    frozenTools?.assertCurrent();
     if (
       active ||
       retired ||
@@ -852,10 +963,12 @@ export function apply(ctx: Context): void {
       rpc.close();
       inputStream.destroy();
       releaseCreated();
+      releaseDisposed();
       releaseToolOrigin();
       releaseEvents();
       releaseErrors();
       releaseFetch();
+      frozenTools?.close();
     };
   }, 'orca-managed.serve');
 }

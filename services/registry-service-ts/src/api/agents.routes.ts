@@ -2,6 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { FastifyInstance } from 'fastify';
+import type { FileStore } from '@orca/file-store';
+import { parseDshProfileDescriptor, type DshProfileDescriptor } from '@orca/harness-catalog';
+import {
+  DshProfileValidationError,
+  resolveDshProfileForWrite,
+  type DshApprovedProfiles,
+} from '../domain/dsh-profile.js';
 import { isDeepStrictEqual } from 'node:util';
 import { eq, and, or, isNull, inArray, desc, lt, gte, lte, sql, type SQL } from 'drizzle-orm';
 import type { z } from 'zod';
@@ -86,6 +93,7 @@ export function registerAgentsRoutes(
   app: FastifyInstance,
   db: DbClient,
   batchReadsEnabled = true,
+  dshProfiles: { fileStore?: FileStore; approved?: DshApprovedProfiles } = {},
 ): void {
   app.post('/v1/agents', async (req, reply) => {
     const auth = req.auth!;
@@ -115,7 +123,11 @@ export function registerAgentsRoutes(
       type: toCanonicalToolName(t.type),
     }));
     const normalizedMcpServers = stripMcpServerPermissionPolicyFields(body.mcp_servers);
-    const configurationError = validateAgentConfiguration(normalizedTools, normalizedMcpServers);
+    const configurationError = validateAgentConfiguration(
+      normalizedTools,
+      normalizedMcpServers,
+      body.metadata?.dsh_profile !== undefined,
+    );
     if (configurationError) return reply.code(400).send({ error: configurationError });
     const validatedSkills = await validateSkillRefs(db, auth.workspaceId, body.skills ?? []);
     if ('error' in validatedSkills) return reply.code(400).send({ error: validatedSkills.error });
@@ -147,6 +159,22 @@ export function registerAgentsRoutes(
     if (modelRosterError) return reply.code(400).send({ error: modelRosterError });
 
     const metadata = body.metadata ?? {};
+    const profileStartedAt = performance.now();
+    let dshProfile: DshProfileDescriptor | undefined;
+    try {
+      dshProfile = await resolveDshProfileForWrite({
+        metadata,
+        workspaceId: auth.workspaceId,
+        ...dshProfiles,
+      });
+    } catch (error) {
+      return reply.code(400).send({
+        error:
+          error instanceof DshProfileValidationError
+            ? error.message
+            : 'Invalid DSH profile configuration',
+      });
+    }
 
     const snapshot = {
       harness_type: harnessCheck.harness,
@@ -161,6 +189,7 @@ export function registerAgentsRoutes(
       skills: validatedSkills,
       guardrail_ids: validatedGuardrails,
       metadata,
+      ...(dshProfile ? { dsh_profile: dshProfile } : {}),
       multiagent: resolvedMultiagent,
     };
 
@@ -208,6 +237,17 @@ export function registerAgentsRoutes(
         );
     });
 
+    if (dshProfile)
+      req.log.info(
+        {
+          agentId,
+          agentVersion: 1,
+          phase: 'dsh_profile_ingestion',
+          profileDigest: dshProfile.config_sha256,
+          durationMs: performance.now() - profileStartedAt,
+        },
+        'Retained DSH profile',
+      );
     const out = await loadAgent(db, auth.workspaceId, agentId, orcaBeta);
     // 200, not 201: Anthropic answers 200 from every create on this surface, and
     // the status of a successful call is something a client can observe.
@@ -390,8 +430,6 @@ export function registerAgentsRoutes(
         body.mcp_servers !== undefined
           ? stripMcpServerPermissionPolicyFields(body.mcp_servers ?? [])
           : (existing.mcpServers as unknown[]);
-      const configurationError = validateAgentConfiguration(normalizedTools, updatedMcpServers);
-      if (configurationError) return reply.code(400).send({ error: configurationError });
       const skillsProvided = body.skills !== undefined;
       const skillInput = skillsProvided ? (body.skills ?? []) : existing.skills;
       const validatedSkills = await validateSkillRefs(db, auth.workspaceId, skillInput, {
@@ -419,6 +457,12 @@ export function registerAgentsRoutes(
             : applyMetadataPatch(existingMetadata, body.metadata as MetadataPatch);
       const metadataError = validateMetadataLimits(updatedMetadata);
       if (metadataError) return reply.code(400).send({ error: metadataError });
+      const configurationError = validateAgentConfiguration(
+        normalizedTools,
+        updatedMcpServers,
+        updatedMetadata.dsh_profile !== undefined,
+      );
+      if (configurationError) return reply.code(400).send({ error: configurationError });
       const harnessCheck = resolveHarnessAnnotation(updatedMetadata);
       if ('error' in harnessCheck) return reply.code(400).send({ error: harnessCheck.error });
       const harnessUpdateError =
@@ -451,7 +495,40 @@ export function registerAgentsRoutes(
       if (modelRosterError) return reply.code(400).send({ error: modelRosterError });
 
       const existingData = agentDataFromRow(existing);
+      const profileStartedAt = performance.now();
+      let dshProfile: DshProfileDescriptor | undefined;
+      if (existingMetadata.dsh_profile !== undefined || updatedMetadata.dsh_profile !== undefined) {
+        const previousSnapshot = await loadAgentVersionSnapshot(
+          db,
+          auth.workspaceId,
+          id,
+          existing.version,
+        );
+        try {
+          if (
+            updatedMetadata.dsh_profile !== undefined &&
+            previousSnapshot?.dsh_profile !== undefined
+          )
+            existingData.dsh_profile = parseDshProfileDescriptor(previousSnapshot.dsh_profile);
+          dshProfile = await resolveDshProfileForWrite({
+            metadata: updatedMetadata,
+            previousSnapshot: previousSnapshot ?? { metadata: existingMetadata },
+            workspaceId: auth.workspaceId,
+            explicitlyAssigned:
+              body.metadata != null && Object.hasOwn(body.metadata, 'dsh_profile'),
+            ...dshProfiles,
+          });
+        } catch (error) {
+          return reply.code(400).send({
+            error:
+              error instanceof DshProfileValidationError
+                ? error.message
+                : 'Invalid DSH profile configuration',
+          });
+        }
+      }
       const updatedData: AgentData = {
+        ...(dshProfile ? { dsh_profile: dshProfile } : {}),
         name: updatedName,
         description: updatedDescription,
         version: newVersion,
@@ -543,6 +620,17 @@ export function registerAgentsRoutes(
         return reply.code(409).send({ error: 'version mismatch' });
       }
 
+      if (dshProfile)
+        req.log.info(
+          {
+            agentId: id,
+            agentVersion: newVersion,
+            phase: 'dsh_profile_retention',
+            profileDigest: dshProfile.config_sha256,
+            durationMs: performance.now() - profileStartedAt,
+          },
+          'Retained DSH profile',
+        );
       const out = await loadAgent(db, auth.workspaceId, id, orcaBeta);
       if (!out) return reply.code(404).send({ error: 'not found' });
       return reply.send(out);
@@ -646,6 +734,7 @@ async function loadAgent(
 }
 
 interface AgentData {
+  dsh_profile?: DshProfileDescriptor;
   name: string;
   description: string | null;
   version: number;
@@ -688,6 +777,7 @@ function agentDataFromRow(agentRow: typeof agents.$inferSelect): AgentData {
 
 function agentConfigFromData(data: AgentData, orcaBeta: boolean): AgentConfigData {
   return {
+    ...(data.dsh_profile ? { dsh_profile: data.dsh_profile } : {}),
     name: data.name,
     description: data.description,
     model: {
@@ -716,6 +806,9 @@ function agentDataFromSnapshot(snap: Record<string, unknown>): AgentData {
     delete metadata.description;
   }
   return {
+    ...(snap.dsh_profile !== undefined
+      ? { dsh_profile: parseDshProfileDescriptor(snap.dsh_profile) }
+      : {}),
     name: snap.name as string,
     description:
       typeof snap.description === 'string'

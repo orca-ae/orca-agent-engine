@@ -14,3 +14,4 @@ export * from './capabilities.js';
 export * from './harness-turn.js';
 export * from './pi-checkpoint.js';
 export * from './dsh-checkpoint.js';
+export * from './dsh-profile.js';

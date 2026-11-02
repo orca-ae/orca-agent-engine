@@ -11,6 +11,56 @@ import yaml from 'js-yaml';
 
 const chartDir = 'charts/orca-managed-agents';
 
+test('native DSH approvals are omitted by default', () => {
+  assert.doesNotMatch(helmTemplate(), /DSH_APPROVED_PROFILES/);
+});
+
+test('documented DSH approvals reach only Registry and changes roll its Pod template', () => {
+  const readme = readFileSync(join(chartDir, 'README.md'), 'utf8');
+  const example = readme.match(/## Native DSH profiles[\s\S]*?```yaml\n([\s\S]*?)```/);
+  assert.ok(example, 'native profile configuration example is missing');
+  const values = yaml.load(example[1]);
+  const approval = values.registry.extraEnv[0];
+  assert.equal(approval.name, 'DSH_APPROVED_PROFILES');
+  assert.deepEqual(JSON.parse(approval.value), {
+    ws_example: ['0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'],
+  });
+  values.observabilityExporter = { enabled: true };
+  const docs = yaml.loadAll(helmTemplate(yaml.dump(values)));
+  const registry = docs.find(
+    (doc) =>
+      doc?.kind === 'Deployment' &&
+      doc.metadata.labels['app.kubernetes.io/component'] === 'registry',
+  );
+  assert.ok(registry);
+  assert.equal(registry.spec.template.spec.initContainers[0].name, 'migrate');
+  let matches = 0;
+  for (const doc of docs) {
+    const pod = doc?.spec?.template?.spec;
+    if (!pod) continue;
+    for (const container of [...(pod.initContainers ?? []), ...(pod.containers ?? [])]) {
+      const entries = (container.env ?? []).filter((entry) => entry.name === approval.name);
+      if (doc === registry && container === pod.containers[0]) {
+        assert.deepEqual(entries, [approval]);
+        matches++;
+      } else assert.deepEqual(entries, [], doc.metadata.name + '/' + container.name);
+    }
+  }
+  assert.equal(matches, 1);
+  for (const doc of docs.filter((doc) => doc?.kind === 'ConfigMap' || doc?.kind === 'Secret'))
+    assert.equal(Object.hasOwn(doc.data ?? {}, approval.name), false);
+  const changed = structuredClone(values);
+  changed.registry.extraEnv[0].value = '{}';
+  const updated = yaml.load(
+    document(helmTemplate(yaml.dump(changed)), 'Deployment', registry.metadata.name),
+  );
+  assert.notDeepEqual(updated.spec.template, registry.spec.template);
+  assert.deepEqual(
+    updated.spec.template.spec.containers[0].env.find((entry) => entry.name === approval.name),
+    { name: approval.name, value: '{}' },
+  );
+});
+
 test('Registry MCP snapshots use the external Gateway with an optional override', () => {
   for (const gatewayUrl of [
     'https://external-gateway.example',

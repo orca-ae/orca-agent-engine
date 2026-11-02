@@ -4,8 +4,48 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { RegistryClient, RegistryInvalidRuntimeBindingError } from '../../src/clients/registry.js';
 import { SessionJwtProvider } from '../../src/mcp/session-jwt-provider.js';
+import { dshProfileConfigSha256, type DshProfileFiles } from '@orca/harness-catalog';
 
 const TEST_TOKEN_PROVIDER = async () => 'test-internal-service-token';
+
+it('advertises native preparation capability and validates retained descriptors without dropping them', async () => {
+  const files: DshProfileFiles = {
+    'package.json': '{}',
+    'pnpm-lock.yaml': '',
+    'pnpm-workspace.yaml': '',
+    'cordis.patch.yml': '[]',
+  };
+  const profile = {
+    version: 1,
+    source_file_id: 'file_profile',
+    source_sha256: 'a'.repeat(64),
+    config_sha256: dshProfileConfigSha256(files),
+    files,
+  };
+  const prepared = preparedExecution();
+  (prepared.primary_agent as Record<string, unknown>).dsh_profile = profile;
+  const fetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+    Response.json(prepared),
+  );
+  vi.stubGlobal('fetch', fetch);
+  const client = new RegistryClient('https://registry.internal', TEST_TOKEN_PROVIDER);
+  expect(
+    (
+      await client.prepareExecution({
+        workspaceId: 'ws_one',
+        sessionId: 'ses_one',
+        capabilities: ['dsh_profile_v1'],
+      })
+    )?.primary_agent.dsh_profile,
+  ).toEqual(profile);
+  expect(JSON.parse(fetch.mock.calls[0]![1]?.body as string)).toEqual({
+    capabilities: ['dsh_profile_v1'],
+  });
+  profile.config_sha256 = '0'.repeat(64);
+  await expect(
+    client.prepareExecution({ workspaceId: 'ws_one', sessionId: 'ses_one' }),
+  ).rejects.toThrow('digest mismatch');
+});
 
 interface FetchCall {
   input: RequestInfo | URL;

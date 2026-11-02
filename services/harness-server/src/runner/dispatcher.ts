@@ -43,6 +43,11 @@ import {
 } from '../harness/codex-sdk/turn-receipt.js';
 import { publicEntryToEvent } from '../harness/claude/event-mapper.js';
 import type { HarnessTurnReceipt, HarnessTurnSnapshot } from '@orca/harness-catalog';
+import {
+  parseDshProfileDescriptor,
+  validateDshProfileAnnotation,
+  type DshProfileDescriptor,
+} from '@orca/harness-catalog';
 import type { CodexCheckpoint } from '@orca/codex-harness';
 import { ORCA_MCP_SERVER_NAME, ORCA_MCP_TOOL_LOGICAL_NAMES } from '../harness/claude/mcp-tools.js';
 import {
@@ -74,6 +79,7 @@ import {
   toolsetPermissionPolicies,
   toolsetConfigEntries,
   toolsetConfigValue,
+  DSH_PROFILE_HOME,
   type HarnessType,
 } from '@orca/harness-catalog';
 import {
@@ -161,8 +167,8 @@ import {
   SANDBOX_WRITE_POLICY_ENV,
 } from '../sandbox/write-policy.js';
 import {
-  assertCanonicalPathOutsideSkillsRoot,
-  assertMountPathOutsideSkillsRoot,
+  assertCanonicalPathOutsideReservedRoot,
+  assertMountPathOutsideReservedRoot,
   materializeSkills,
   SKILLS_ROOT,
   validateSkillDescriptor,
@@ -178,6 +184,7 @@ import { assertSandboxEnvironmentTrust } from '../sandbox/environment-trust.js';
 export { enabledMcpToolsetServerNames };
 
 interface RuntimeAgentSnapshot {
+  dsh_profile?: DshProfileDescriptor;
   id?: string;
   name?: string;
   version?: number;
@@ -2986,7 +2993,13 @@ export class Dispatcher {
     try {
       await runner.waitForFailedTurnSettlement();
       this.assertLifecycleCurrent(lifecycleGeneration);
-      prepared = await this.opts.registry.prepareExecution({ workspaceId, sessionId });
+      prepared = await this.opts.registry.prepareExecution({
+        workspaceId,
+        sessionId,
+        ...(this.opts.sandboxRuntime?.capabilities.supportsDshProfiles
+          ? { capabilities: ['dsh_profile_v1'] }
+          : {}),
+      });
       this.assertLifecycleCurrent(lifecycleGeneration);
       if (prepared) {
         prepared = validatePreparedExecution(workspaceId, sessionId, prepared);
@@ -3355,7 +3368,13 @@ export class Dispatcher {
   ): Promise<boolean> {
     if (!this.opts.registry) return true;
     try {
-      const prepared = await this.opts.registry.prepareExecution({ workspaceId, sessionId });
+      const prepared = await this.opts.registry.prepareExecution({
+        workspaceId,
+        sessionId,
+        ...(this.opts.sandboxRuntime?.capabilities.supportsDshProfiles
+          ? { capabilities: ['dsh_profile_v1'] }
+          : {}),
+      });
       this.assertLifecycleCurrent(lifecycleGeneration);
       if (!prepared) {
         console.warn(
@@ -4496,7 +4515,13 @@ export class Dispatcher {
     if (this.opts.registry) {
       if (!prepared) {
         try {
-          prepared = await this.opts.registry.prepareExecution({ workspaceId, sessionId });
+          prepared = await this.opts.registry.prepareExecution({
+            workspaceId,
+            sessionId,
+            ...(this.opts.sandboxRuntime?.capabilities.supportsDshProfiles
+              ? { capabilities: ['dsh_profile_v1'] }
+              : {}),
+          });
         } catch (e) {
           console.error(`prepareExecution ${workspaceId}/${sessionId} failed`, e);
           if (e instanceof RegistryInvalidRuntimeBindingError) throw e;
@@ -4727,6 +4752,11 @@ export class Dispatcher {
           selection,
           this.opts.defaultImageOverrides,
         );
+        if (agentSnapshot.dsh_profile) {
+          if (!runtime.capabilities.supportsDshProfiles)
+            throw new Error('Sandbox runtime does not support native DSH profile preparation');
+          environmentSpec.dshProfile = agentSnapshot.dsh_profile;
+        }
       } catch (e) {
         // A colocated harness that resolves to no image cannot boot a sandbox.
         // Surface it to the client rather than letting it escape the spawn.
@@ -4930,6 +4960,7 @@ export class Dispatcher {
               sessionId,
               sandbox,
               resources: fileResources,
+              ...(agentSnapshot.dsh_profile ? { reservedRoot: DSH_PROFILE_HOME } : {}),
               chooseStrategy,
             });
             mounts = materialized.mounts;
@@ -4997,7 +5028,13 @@ export class Dispatcher {
                 factoryInput.forcePathStyle = this.opts.s3ForcePathStyle;
               }
               const strategy = pickStrategy(factoryInput);
-              await assertCanonicalPathOutsideSkillsRoot(sandbox, resource.mountPath);
+              await assertCanonicalPathOutsideReservedRoot(sandbox, resource.mountPath);
+              if (agentSnapshot.dsh_profile)
+                await assertCanonicalPathOutsideReservedRoot(
+                  sandbox,
+                  resource.mountPath,
+                  DSH_PROFILE_HOME,
+                );
               const handle = await strategy.activate(sandbox, resource);
               memoryMountHandles.push({ strategy, handle });
               watchedStores.push({
@@ -5207,7 +5244,13 @@ export class Dispatcher {
                   }),
               };
               const strategy = pickStrategy(factoryInput);
-              await assertCanonicalPathOutsideSkillsRoot(sandbox, resource.mountPath);
+              await assertCanonicalPathOutsideReservedRoot(sandbox, resource.mountPath);
+              if (agentSnapshot.dsh_profile)
+                await assertCanonicalPathOutsideReservedRoot(
+                  sandbox,
+                  resource.mountPath,
+                  DSH_PROFILE_HOME,
+                );
               const handle = await strategy.activate(sandbox, resource);
               repoMountHandles.push({ strategy, handle });
             }
@@ -5314,7 +5357,7 @@ export class Dispatcher {
             // outer read-only mount namespace. Releasing it only after all
             // resource/FUSE mounts are live makes those mounts visible inside
             // the long-running harness process.
-            await assertCanonicalPathOutsideSkillsRoot(sandbox, IN_SANDBOX_HARNESS_READY_PATH);
+            await assertCanonicalPathOutsideReservedRoot(sandbox, IN_SANDBOX_HARNESS_READY_PATH);
             await sandbox.files.write(IN_SANDBOX_HARNESS_READY_PATH, Buffer.alloc(0));
             harnessSandboxWritePolicySetupTotal.inc({ runtime: runtimeLabel, result: 'ok' });
           } catch (e) {
@@ -5644,7 +5687,13 @@ export class Dispatcher {
     this.runners.set(key, runner);
     try {
       if (!this.opts.registry) throw new Error('DSH archive refresh requires Registry');
-      const prepared = await this.opts.registry.prepareExecution({ workspaceId, sessionId });
+      const prepared = await this.opts.registry.prepareExecution({
+        workspaceId,
+        sessionId,
+        ...(this.opts.sandboxRuntime?.capabilities.supportsDshProfiles
+          ? { capabilities: ['dsh_profile_v1'] }
+          : {}),
+      });
       this.assertLifecycleCurrent(generation);
       if (!prepared || this.runners.get(key) !== runner)
         throw new Error('DSH startup generation or Session is no longer current');
@@ -6031,7 +6080,35 @@ function validatePreparedExecution(
       `prepared primary agent mismatch for ${expectedWorkspaceId}/${expectedSessionId}`,
     );
   }
+  const primary = prepared.primary_agent;
+  if (prepared.session.metadata?.dsh_profile !== undefined)
+    throw new DroppedSessionEvent('Session metadata cannot override the Agent DSH profile');
+  if (primary.dsh_profile !== undefined) {
+    if (
+      typeof primary.id !== 'string' ||
+      !primary.id ||
+      !Number.isSafeInteger(primary.version) ||
+      primary.version < 1
+    )
+      throw new DroppedSessionEvent('prepared DSH Agent-version identity is invalid');
+    primary.dsh_profile = parseDshProfileDescriptor(primary.dsh_profile);
+    try {
+      validateDshProfileAnnotation(primary.metadata ?? {});
+    } catch {
+      throw new DroppedSessionEvent('prepared DSH profile binding is invalid');
+    }
+    if (primary.metadata?.dsh_profile !== primary.dsh_profile.source_file_id)
+      throw new DroppedSessionEvent('prepared DSH profile binding is invalid');
+  } else if (primary.metadata?.dsh_profile !== undefined) {
+    throw new DroppedSessionEvent('prepared DSH profile descriptor is missing');
+  }
   for (const subagent of prepared.subagents) {
+    if (
+      subagent.metadata?.harness === 'dsh_sdk' ||
+      subagent.metadata?.dsh_profile !== undefined ||
+      subagent.dsh_profile !== undefined
+    )
+      throw new DroppedSessionEvent('DSH Agents cannot be managed roster members');
     if (subagent.multiagent !== null) {
       throw new DroppedSessionEvent(
         `prepared nested coordinator ${subagent.id}@${subagent.version} is unsupported`,
@@ -6055,10 +6132,12 @@ function validatePreparedExecution(
   }
   for (const resource of prepared.resources) {
     try {
-      assertMountPathOutsideSkillsRoot(resource.mount_path);
+      assertMountPathOutsideReservedRoot(resource.mount_path);
+      if (prepared.primary_agent.dsh_profile)
+        assertMountPathOutsideReservedRoot(resource.mount_path, DSH_PROFILE_HOME);
     } catch {
       throw new DroppedSessionEvent(
-        `prepared resource mount path overlaps the reserved Skill root for ${expectedWorkspaceId}/${expectedSessionId}`,
+        `prepared resource mount path overlaps a reserved root for ${expectedWorkspaceId}/${expectedSessionId}`,
       );
     }
     if (resource.access !== 'read_only' && resource.access !== 'read_write') {
@@ -6128,6 +6207,7 @@ function buildBaseAgentSnapshot(agent: AgentRecord): RuntimeAgentSnapshot {
   const agentToolNames = extractAgentToolNames(agent.tools ?? []);
   const allowedMcpServerNames = enabledMcpToolsetServerNames(agent.tools ?? []);
   const snapshot: RuntimeAgentSnapshot = {
+    ...(agent.dsh_profile ? { dsh_profile: agent.dsh_profile } : {}),
     id: agent.id,
     name: agent.name,
     version: agent.version,
@@ -6149,11 +6229,18 @@ function buildBaseAgentSnapshot(agent: AgentRecord): RuntimeAgentSnapshot {
 }
 
 export function buildToolPermissionPolicies(
-  agent: Pick<AgentRecord, 'tools' | 'mcp_servers'>,
+  agent: Pick<AgentRecord, 'tools' | 'mcp_servers' | 'dsh_profile'>,
   enabledMcpServerNames: Iterable<string> = enabledMcpToolsetServerNames(agent.tools ?? []),
 ): Record<string, 'always_allow' | 'always_ask' | 'always_deny'> {
   const policies: Record<string, 'always_allow' | 'always_ask' | 'always_deny'> = {};
   Object.assign(policies, orcaAgentToolsetPermissionPolicies(agent.tools ?? []));
+  if (
+    agent.dsh_profile &&
+    !(agent.tools ?? []).some(
+      (tool) => tool.type === 'agent_toolset' || tool.type === 'agent_toolset_20260401',
+    )
+  )
+    policies['mcp__orca__*'] = 'always_deny';
   const serverByName = new Map((agent.mcp_servers ?? []).map((server) => [server.name, server]));
   for (const serverName of enabledMcpServerNames) {
     if (!serverName || !MCP_SERVER_NAME_ALLOWLIST_PATTERN.test(serverName)) continue;

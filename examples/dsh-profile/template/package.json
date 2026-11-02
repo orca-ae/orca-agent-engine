@@ -1,0 +1,10 @@
+{
+  "name": "orca-managed-business-profile",
+  "private": true,
+  "dependencies": {},
+  "dsh": {
+    "profile": {
+      "bundles": []
+    }
+  }
+}

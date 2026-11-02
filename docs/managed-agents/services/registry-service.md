@@ -1508,6 +1508,12 @@ Registry mints the scoped `ai-gateway` JWT on the internal harness path.
 | `ORCA_ENVIRONMENT_LAUNCHER_BACKEND` | Selects the environment-provisioning backend the registry launches `colocated` workers with (`local`, `e2b`, `opensandbox`), passed to the launcher factory. Unset ⇒ no environment-launch lifecycle is wired.                                                                                                                                                                                                                                                                                                                                                                          | unset                         |
 | `ORCA_REGISTRY_TUNNEL_URL`          | Registry origin used by launched workers for the WS tunnel and by managed Git tools for the read-only Git proxy. Defaults to this process's loopback origin for local workers; cloud and remote self-hosted runners set an origin reachable from their sandbox. `ws`/`wss` is converted to `http`/`https` for Git.                                                                                                                                                                                                                                                                      | `http://localhost:<httpPort>` |
 
+Registry reads `DSH_APPROVED_PROFILES` from process-start configuration, default `{}`. It maps
+exact workspace IDs to approved native DSH configuration digests and gates Agent admission and
+fresh execution preparation. Configure it through `registry.extraEnv` and roll Registry out to
+apply changes; see [Agent-bound native profiles](../harness-modes.md#agent-bound-native-profiles)
+for input, retention, revocation and capability behavior.
+
 Cloud SDK turns use harness-server `HARNESS_TURN_TIMEOUT_MS` and optional
 `HARNESS_TURN_TIMEOUT_OVERRIDES_MS`. The host requires more than the effective
 turn timeout plus 30 seconds of JWT validity before submitting work. Raising

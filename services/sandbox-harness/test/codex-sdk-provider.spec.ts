@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { stat } from 'node:fs/promises';
 import { CodexSdkRuntime } from '../src/providers/codex-sdk.js';
 import { resolveProvider } from '../src/providers/registry.js';
+import { dshProfileConfigSha256, type DshProfileFiles } from '@orca/harness-catalog';
 
 const worker = vi.hoisted(() => ({ handle: vi.fn(), refreshOptions: vi.fn() }));
 vi.mock('@orca/codex-harness', () => ({ CodexSdkWorker: vi.fn(() => worker) }));
@@ -28,6 +29,45 @@ const start = {
   baseUrl: 'http://gateway/v1',
   tools: [],
 };
+
+it('retains the bounded native profile descriptor across the private command', async () => {
+  const files: DshProfileFiles = {
+    'package.json': '{}',
+    'pnpm-lock.yaml': '',
+    'pnpm-workspace.yaml': '',
+    'cordis.patch.yml': '[]',
+  };
+  const profile = {
+    version: 1,
+    source_file_id: 'file_profile',
+    source_sha256: 'a'.repeat(64),
+    config_sha256: dshProfileConfigSha256(files),
+    files,
+  };
+  const runtime = new CodexSdkRuntime('dsh-sdk');
+  runtimes.push(runtime);
+  const { baseUrl: _, ...command } = start;
+  const input = {
+    ...command,
+    modelProvider: 'deepseek',
+    model: 'deepseek-v4-flash',
+    dshGatewayUrl: 'http://gateway',
+    archivedThreadSubpaths: [],
+    dshProfile: profile,
+  };
+  await runtime.handleSdkCommand(input, () => {});
+  expect(worker.handle).toHaveBeenCalledWith(expect.objectContaining({ dshProfile: profile }));
+  const invalid = new CodexSdkRuntime('dsh-sdk');
+  await expect(
+    invalid.handleSdkCommand(
+      { ...input, dshProfile: { ...profile, config_sha256: '0'.repeat(64) } },
+      () => {},
+    ),
+  ).rejects.toThrow('digest mismatch');
+  await expect(
+    new CodexSdkRuntime().handleSdkCommand({ ...start, dshProfile: profile }, () => {}),
+  ).rejects.toThrow('DSH-only');
+});
 describe.each(['codex-sdk', 'pi-sdk'] as const)('sandbox %s provider', (provider) => {
   const commandStart =
     provider === 'pi-sdk' ? { ...start, piGatewayUrl: 'http://gateway/v1' } : start;

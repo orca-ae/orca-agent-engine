@@ -149,7 +149,7 @@ describe('mountSessionOutputs', () => {
           generationId: 'run_test',
           supportsFuse: false,
         }),
-      ).rejects.toThrow(/resolves across reserved Skill root/);
+      ).rejects.toThrow(/resolves across reserved root/);
 
       expect(sb.fileWrites).toEqual([]);
       expect(sb.fileDeletes).toEqual([]);

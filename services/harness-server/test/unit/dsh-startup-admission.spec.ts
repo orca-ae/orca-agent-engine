@@ -7,6 +7,7 @@ import type { AgentHarness, UserEvent } from '../../src/harness/agent-harness.js
 import type { PreparedExecutionV2, RegistryClient } from '../../src/clients/registry.js';
 import { Dispatcher } from '../../src/runner/dispatcher.js';
 import { SessionRunner } from '../../src/runner/session-runner.js';
+import { dshProfileConfigSha256 } from '@orca/harness-catalog';
 
 const child = 'subagents/11111111-1111-4111-8111-111111111111';
 const key = 'ws_test/ses_test';
@@ -93,6 +94,65 @@ function dispatcher(prepareExecution: RegistryClient['prepareExecution']) {
     ): Promise<boolean>;
   };
 }
+
+it.each([
+  'missing',
+  'digest',
+  'source',
+  'version',
+  'session_override',
+  'resource_home',
+  'resource_parent',
+] as const)(
+  'rejects unusable custom execution snapshots before accepting input: %s',
+  async (failure) => {
+    const value = prepared();
+    const files = {
+      'cordis.patch.yml': '[]',
+      'package.json': '{}',
+      'pnpm-lock.yaml': '',
+      'pnpm-workspace.yaml': '',
+    };
+    value.primary_agent.metadata = {
+      harness: 'dsh_sdk',
+      mode: 'colocated',
+      dsh_profile: 'file_profile',
+    };
+    if (failure !== 'missing')
+      value.primary_agent.dsh_profile = {
+        version: 1,
+        source_file_id: failure === 'source' ? 'file_other' : 'file_profile',
+        source_sha256: 'a'.repeat(64),
+        config_sha256: failure === 'digest' ? '0'.repeat(64) : dshProfileConfigSha256(files),
+        files,
+      };
+    if (failure === 'version') value.primary_agent.version++;
+    if (failure === 'session_override') value.session.metadata = { dsh_profile: 'file_override' };
+    if (failure === 'resource_home' || failure === 'resource_parent')
+      value.resources = [
+        {
+          id: 'sesrsc_private',
+          type: 'file',
+          file_id: 'file_data',
+          memory_store_id: null,
+          repo_ref: null,
+          mount_path:
+            failure === 'resource_home' ? '/app/packages/dsh-harness/.orca-dsh/sessions' : '/app',
+          access: 'read_write',
+          instructions: null,
+          mount_strategy: null,
+          attached_at: new Date().toISOString(),
+          detached_at: null,
+        },
+      ];
+    const f = await runner();
+    const d = dispatcher(async () => value);
+    await expect(d.admitDshRunner('ws_test', 'ses_test', f.runner, 0)).rejects.toThrow(
+      'archive admission failed',
+    );
+    expect(f.harness.submit).not.toHaveBeenCalled();
+  },
+);
 
 it('registers before the authoritative read, holds follow-up, and lets live archive bypass admission', async () => {
   let resolve!: (value: PreparedExecutionV2) => void;

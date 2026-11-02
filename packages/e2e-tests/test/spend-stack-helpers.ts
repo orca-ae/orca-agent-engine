@@ -297,6 +297,8 @@ export class SpendStack {
         ANTHROPIC_BASE_URL: `http://127.0.0.1:${fixturePort}`,
         HARNESS_WORK_DIR: join(this.workDirectory, 'harness'),
         SESSION_IDLE_TIMEOUT_MS: '600000',
+        // Leave time for restart takeover and a failed delivery to expire within the 45s assertions.
+        POSTGRES_EVENT_LEASE_MS: '5000',
       };
       if (options.harness !== false) await this.restartHarness();
       await this.manifest(false);

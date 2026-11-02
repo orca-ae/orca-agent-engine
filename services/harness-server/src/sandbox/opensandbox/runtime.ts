@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { runCancellableOpenSandboxCommand, type SandboxCallOptions } from '@orca/sandbox-runtime';
+import { DSH_PROFILE_TIMEOUT_MS } from '@orca/harness-catalog';
 
 import { randomBytes, randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
@@ -16,6 +17,7 @@ import {
   assertEnvironmentPackageMountPaths,
   buildEnvironmentPackageBoundaryProbe,
   buildOpenSandboxExecdAuthenticationProbeCommand,
+  buildDshProfileProbeCommand,
 } from '@orca/sandbox-runtime';
 import type {
   EnvironmentSpec,
@@ -108,12 +110,13 @@ export class OpenSandboxRuntime implements SandboxRuntime {
       supportsWritePolicy: true,
       supportsPerCallCancellation: true,
       supportsEnvironmentPackages: true,
+      supportsDshProfiles: true,
     };
   }
 
   async acquire(env: EnvironmentSpec): Promise<SandboxHandle> {
     const execdAccessToken = randomBytes(32).toString('hex');
-    const { body, packagePlan } = buildOpenSandboxAcquireRequest(env, {
+    const { body, packagePlan, dshProfilePlan } = buildOpenSandboxAcquireRequest(env, {
       execdAccessToken,
       image: this.opts.image,
       ...(this.opts.entrypoint !== undefined ? { entrypoint: this.opts.entrypoint } : {}),
@@ -136,14 +139,28 @@ export class OpenSandboxRuntime implements SandboxRuntime {
       id: created.id,
       runtime: this,
       environmentPackages: packagePlan !== undefined,
+      hasInitPreparation: packagePlan !== undefined || dshProfilePlan !== undefined,
       execdAccessToken,
       ...(env.fileUploadOwnership ? { fileUploadOwnership: env.fileUploadOwnership } : {}),
     });
     try {
-      await handle.waitUntilReady(packagePlan ? ENVIRONMENT_PACKAGE_TIMEOUT_MS : READY_TIMEOUT_MS);
+      await handle.waitUntilReady(
+        packagePlan || dshProfilePlan
+          ? (packagePlan ? ENVIRONMENT_PACKAGE_TIMEOUT_MS : 0) +
+              (dshProfilePlan ? DSH_PROFILE_TIMEOUT_MS : 0) +
+              READY_TIMEOUT_MS
+          : READY_TIMEOUT_MS,
+      );
       await handle.verifyExecdAuthentication();
       await handle.verifyFusePrerequisites();
       if (packagePlan) await handle.prepareEnvironmentPackages(packagePlan.packages);
+      if (dshProfilePlan) {
+        const probe = await handle.runCommand(buildDshProfileProbeCommand(dshProfilePlan), {
+          timeoutMs: 10_000,
+        });
+        if (probe.exitCode !== 0)
+          throw new Error('OpenSandbox DSH profile preparation probe failed');
+      }
       return handle;
     } catch (e) {
       await handle.destroy().catch(() => undefined);
@@ -247,6 +264,7 @@ class OpenSandboxHandle implements SandboxHandle {
       id: string;
       runtime: OpenSandboxRuntime;
       environmentPackages: boolean;
+      hasInitPreparation: boolean;
       execdAccessToken: string;
       fileUploadOwnership?: { owner: string; group: string };
     },
@@ -262,7 +280,7 @@ class OpenSandboxHandle implements SandboxHandle {
     await waitUntilOpenSandboxReady({
       id: this.id,
       timeoutMs,
-      ...(this.opts.environmentPackages
+      ...(this.opts.hasInitPreparation
         ? {
             getLifecycle: () =>
               this.opts.runtime.requestJson(`/sandboxes/${encodeURIComponent(this.id)}`),

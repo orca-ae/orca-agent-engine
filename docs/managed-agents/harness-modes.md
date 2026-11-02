@@ -179,7 +179,7 @@ conversation control state, not physical process-exit confirmation.
 
 The sandbox worker launches a private `orca-managed` named profile. Its fixed plugin uses
 the DSH loop and native persistence, while file/shell calls return through Orca's existing
-tool request/reply path. There is no DSH UI or runtime package installation. The image
+tool request/reply path. There is no DSH UI or in-turn package installation. The image
 contains the pinned production dependencies and profile assets.
 
 Model traffic uses `/v1/proxy/deepseek/v1/messages`, with scoped Bearer authentication
@@ -205,6 +205,72 @@ ORCA_E2E_SANDBOX_HARNESS_MODEL. For a preconfigured remote Claude stack, select
 ORCA_E2E_AGENT_HARNESS=dsh_sdk, ORCA_E2E_SANDBOX_HARNESS_PROVIDER=anthropic,
 ORCA_E2E_SANDBOX_HARNESS_MODEL=claude-sonnet-4-6, ORCA_BASE_URL and ORCA_API_KEY,
 then run pnpm e2e:agent:sandbox. The remote client needs no provider key.
+
+### Agent-bound native profiles
+
+A cloud colocated DSH Agent selects a native business profile with the Orca extension
+`metadata.dsh_profile=<File ID>`. Without the annotation, the image-owned default profile
+is unchanged. Other harnesses/modes, self-hosted execution, managed rosters and Session/Trigger
+profile overrides are rejected. Environment still supplies sandbox packages and networking.
+
+The File contains a UTF-8 JSON envelope with `version: 1` and exactly four text entries in
+`files`: `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml` and `cordis.patch.yml`. Both
+the input and the combined native texts are bounded at 1 MiB. The
+[packaging example](../../examples/dsh-profile/README.md) supplies a template and a helper
+that preserves the texts and reports their effective approval digest. No plugin code or
+`node_modules` is uploaded. Dependencies are exact, integrity-locked public npm packages
+with install scripts disabled; shared Cordis/tools are peers supplied by the image.
+
+Registry validates workspace ownership, the native files and operator approval, then retains
+a private descriptor in the immutable Agent version. Public Agent/version responses expose
+the metadata reference, not the retained texts. Source File deletion does not break that
+version or an unrelated update reusing its unchanged reference. Sessions, Trigger launches
+and replacement use the selected Agent version without rereading the source File. A legacy
+annotation lacking retained content cannot silently select the default; explicitly reassign
+the File to ingest it or remove the annotation.
+
+Registry-only `DSH_APPROVED_PROFILES` maps exact workspace IDs to arrays of effective
+configuration SHA-256 digests; its default `{}` admits no custom profile. The setting is
+bounded at 64 KiB, 128 workspaces, 512 total entries and 32 entries per workspace. Supply it
+with `registry.extraEnv` in the Helm chart and roll Registry out to apply changes. Approval
+is checked again for Agent updates and every fresh preparation. Revocation denies
+replacement/cold restore and old-version Trigger launch without changing an already running
+turn. Clearing the annotation together with other valid edits remains possible.
+
+Profile preparation requires OpenSandbox support and unrestricted Environment networking.
+Registry checks the current Environment at Session creation, Trigger launch and preparation;
+the harness advertises `dsh_profile_v1` only for a supporting provider. A missing capability
+returns no executable custom-profile plan. A Session can therefore be created successfully
+and then fail setup when its runtime reports no capability; no model turn starts.
+The provider extends the existing package init
+path with a fresh per-Pod profile volume, without runtime credentials. Its pinned native
+installer runs before the main container. Each init attempt clears this dedicated volume
+and installs from the retained descriptor again, including after a partial failure.
+The configuration and installed modules are then
+mounted read-only at the actual profile path. Revision and actual mount probes reject
+missing or writable modules. Package-source URL restrictions do not provide a Pod FQDN policy.
+
+The image-owned trusted patch remains the last layer. Business YAML cannot supply expressions,
+replace managed entries or bypass policy hooks through configuration. Pre-import layer checks
+and a post-import effective-configuration check enforce that composition before the first
+model turn. Approved plugin code runs with sandbox-process authority; these configuration
+checks do not isolate Node plugins from the managed services in that process.
+
+After real initialization, DSH freezes native/managed/plugin tool names and schemas before
+the first model turn. Plugin tools use the existing Agent agent_toolset defaults and per-tool
+overrides: enabled=true and always_allow unless default_config or a tool override changes them.
+An absent agent_toolset grants no plugin tools. Argument validation and dispatch use the frozen
+schemas, and registry changes fail before another turn. New tools registered during a turn
+cannot expand the authorized set. The schema digest excludes Agent enablement/policy and
+Session/MCP tools. Cold restore checks that identity separately from the effective policy.
+
+Custom-profile resource paths cannot overlap the private DSH home
+/app/packages/dsh-harness/.orca-dsh, including canonical aliases.
+Checks run before resource activation; the worker retains write access to its own boot/history.
+
+Custom checkpoints use `orca-managed-custom-v1` and bind configuration, lockfile, tool schemas
+and runtime compatibility in `orca.json.harness_profile`. Default/old checkpoints cannot
+restore a custom Session. Plugin-private databases remain outside native context recovery.
 
 Native state is committed through the existing harness-turn API after response persistence.
 The codec checks the DSH version, profile, provider/model, instructions and a 16 MiB aggregate decoded

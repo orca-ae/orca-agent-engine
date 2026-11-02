@@ -27,7 +27,11 @@ import {
   type AgentEventId,
   type AgentEventSubpath,
 } from '@orca/agent-event-contract';
-import { CLAUDE_MODEL_EFFORT_LEVELS, type ClaudeModelEffort } from '@orca/harness-catalog';
+import {
+  CLAUDE_MODEL_EFFORT_LEVELS,
+  type ClaudeModelEffort,
+  type DshProfileDescriptor,
+} from '@orca/harness-catalog';
 
 export const MODEL_SPEEDS = ['standard', 'fast'] as const;
 export type ModelSpeed = (typeof MODEL_SPEEDS)[number];
@@ -104,6 +108,7 @@ export interface SessionStartInput {
   /** Restored guardrail counters, so a respawn cannot reset a cap. */
   guardrailState?: Record<string, unknown>;
   agentSnapshot: {
+    dsh_profile?: DshProfileDescriptor;
     name?: string;
     model_provider?: string;
     model_id?: string;

@@ -115,6 +115,8 @@ export function environmentPackageFailureMessage(value: unknown): string | undef
   if (typeof status !== 'object' || status === null || !('state' in status)) return undefined;
   if (!['Failed', 'Terminated', 'Stopping'].includes(String(status.state))) return undefined;
   const reasons: Record<string, string> = {
+    DSH_PROFILE_INSTALL_FAILED: 'DSH profile installer exited unsuccessfully',
+    DSH_PROFILE_START_FAILED: 'DSH profile installer could not start',
     ENVIRONMENT_PACKAGES_INSTALL_FAILED: 'package installer exited unsuccessfully',
     ENVIRONMENT_PACKAGES_START_FAILED: 'package installer could not start',
     ENVIRONMENT_PACKAGES_STORAGE_LIMIT: 'package filesystem exceeds available ephemeral storage',

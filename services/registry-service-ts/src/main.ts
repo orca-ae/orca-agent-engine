@@ -363,6 +363,7 @@ const appOptions: BuildAppOptions = {
   secretStore,
   environmentClaimTtlMs: config.environmentClaimTtlMs,
   gatewayRegistryUsageEnabled: config.gatewayRegistryUsageEnabled,
+  dshApprovedProfiles: config.dshApprovedProfiles,
   tunnelAuthProvider: runnerTunnelAuth.authProvider,
   ...(runnerTunnelAuth.allowedTunnelTokens !== undefined
     ? { allowedTunnelTokens: runnerTunnelAuth.allowedTunnelTokens }
@@ -527,6 +528,7 @@ const reconcileTriggerDispatcher = async (): Promise<void> => {
   triggerDispatcherRunning = true;
   try {
     const result = await dispatchPendingAgentTriggerFires(db, {
+      dshApprovedProfiles: config.dshApprovedProfiles,
       batchSize: config.triggerReconcileBatchSize,
     });
     if (result.enqueued > 0) {

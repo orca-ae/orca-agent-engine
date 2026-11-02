@@ -62,6 +62,22 @@ set -- bwrap \
   --dev /dev \
   --proc /proc
 
+# Native DSH owns writable boot metadata/history below its fixed private home.
+# Keep each provider-prepared artifact sealed after reopening that parent.
+dsh_home=/app/packages/dsh-harness/.orca-dsh
+if [ -e "$dsh_home/profiles/orca-managed/.orca-profile-revision" ]; then
+  chown 1000:1000 "$dsh_home" "$dsh_home/profiles" "$dsh_home/profiles/orca-managed"
+  set -- "$@" --bind "$dsh_home" "$dsh_home"
+  for name in package.json pnpm-lock.yaml pnpm-workspace.yaml cordis.patch.yml node_modules .orca-profile-revision; do
+    artifact="$dsh_home/profiles/orca-managed/$name"
+    if [ ! -e "$artifact" ]; then
+      echo "prepared DSH profile artifact is missing: $name" >&2
+      exit 1
+    fi
+    set -- "$@" --ro-bind "$artifact" "$artifact"
+  done
+fi
+
 tab="$(printf '\t')"
 while IFS="$tab" read -r mode path; do
   if [ "$mode" = "bind" ]; then

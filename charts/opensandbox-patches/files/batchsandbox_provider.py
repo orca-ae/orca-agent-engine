@@ -17,6 +17,7 @@ BatchSandbox-based workload provider implementation.
 """
 
 import logging
+import base64
 import json
 import os
 import re
@@ -55,6 +56,11 @@ logger = logging.getLogger(__name__)
 _FUSE_DEVICE_EXTENSION = "orca.fuse.device"
 _PACKAGES_EXTENSION = "orca.environment.packages.v1"
 _PACKAGES_ROOT = "/opt/orca-environment-packages"
+_DSH_EXTENSION = "orca.dsh.profile.v1"
+_DSH_VOLUME = "orca-dsh-profile"
+_DSH_HOME = "/app/packages/dsh-harness/.orca-dsh"
+_DSH_DIRECTORY = _DSH_HOME + "/profiles/orca-managed"
+_DSH_FILES = ("cordis.patch.yml", "package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml")
 _PACKAGE_MANAGERS = ("apt", "cargo", "gem", "go", "npm", "pip")
 _TRUSTED_WORKLOADS_ENV = "ORCA_TRUSTED_SANDBOX_WORKLOADS"
 _TRUSTED_NON_FUSE_WORKLOADS_ENV = "ORCA_TRUSTED_NON_FUSE_WORKLOADS"
@@ -127,6 +133,93 @@ def _package_plan(raw: Optional[str]) -> Optional[dict]:
     if len(json.dumps(normalized, separators=(",", ":"), ensure_ascii=False).encode()) > 128000:
         raise ValueError("environment package plan exceeds size limit")
     return normalized
+
+
+def _dsh_profile_plan(raw: Optional[str]) -> Optional[dict]:
+    if raw is None:
+        return None
+    if not isinstance(raw, str) or len(raw.encode("utf-8")) > 7 * 1024 * 1024:
+        raise ValueError("DSH profile descriptor exceeds limit")
+    plan = json.loads(raw)
+    if (not isinstance(plan, dict) or set(plan) != {
+            "version", "source_file_id", "source_sha256", "config_sha256", "files"}
+            or type(plan["version"]) is not int or plan["version"] != 1):
+        raise ValueError("unsupported DSH profile descriptor")
+    if not isinstance(plan["source_file_id"], str) or not re.fullmatch(r"file_[A-Za-z0-9_-]{1,200}", plan["source_file_id"]):
+        raise ValueError("invalid DSH profile File ID")
+    for key in ("source_sha256", "config_sha256"):
+        if not isinstance(plan[key], str) or not re.fullmatch(r"[0-9a-f]{64}", plan[key]):
+            raise ValueError("invalid DSH profile digest")
+    files = plan["files"]
+    if not isinstance(files, dict) or set(files) != set(_DSH_FILES) or any(not isinstance(value, str) for value in files.values()):
+        raise ValueError("invalid DSH profile files")
+    if sum(len(value.encode("utf-8")) for value in files.values()) > 1024 * 1024:
+        raise ValueError("DSH profile configuration exceeds limit")
+    canonical = json.dumps([1, [[name, files[name]] for name in _DSH_FILES]], separators=(",", ":"), ensure_ascii=False)
+    if hashlib.sha256(canonical.encode("utf-8")).hexdigest() != plan["config_sha256"]:
+        raise ValueError("DSH profile configuration digest mismatch")
+    return plan
+
+
+def _dsh_profile_mounts() -> list:
+    return [{"name": _DSH_VOLUME, "mountPath": _DSH_DIRECTORY + "/" + name,
+             "subPath": "profiles/orca-managed/" + name, "readOnly": True}
+            for name in (*_DSH_FILES, "node_modules", ".orca-profile-revision")]
+
+
+def _dsh_init_container(image: str, plan: dict, image_pull_policy: str) -> dict:
+    payload = json.dumps(plan, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    # The source envelope is at most 1 MiB; allow its added private identity fields.
+    if len(payload) > 1024 * 1024 + 1024:
+        raise ValueError("DSH profile descriptor exceeds transport size limit")
+    encoded = base64.b64encode(payload).decode("ascii")
+    # Linux also limits each argv string (128 KiB on 4 KiB pages), independently
+    # of ARG_MAX. Bounded ASCII chunks preserve Unicode without shell evaluation.
+    chunks = [encoded[index:index + 32768] for index in range(0, len(encoded), 32768)]
+    script = 'printf "%s" "$@" | base64 -d | env -i PATH=/usr/local/bin:/usr/bin:/bin node /app/packages/dsh-harness/profile/prepare.mjs'
+    return {
+        "name": _DSH_VOLUME, "image": image, "imagePullPolicy": image_pull_policy,
+        "command": ["/usr/bin/timeout", "--signal=KILL", "900", "/bin/sh", "-c", script, "orca-dsh-profile"],
+        "args": chunks,
+        "resources": {"requests": {"cpu": "100m", "memory": "512Mi", "ephemeral-storage": "2Gi"},
+                      "limits": {"cpu": "1", "memory": "512Mi", "ephemeral-storage": "2Gi"}},
+        "securityContext": {"runAsUser": 0, "allowPrivilegeEscalation": False,
+                            "capabilities": {"drop": ["ALL"]}},
+        "volumeMounts": [{"name": _DSH_VOLUME, "mountPath": _DSH_HOME}],
+    }
+
+
+def _validate_dsh_preparation(pod: dict, image: str, plan: dict, policy: str, token: str) -> None:
+    if pod.get("automountServiceAccountToken") is not False or pod.get("shareProcessNamespace") is not False:
+        raise ValueError("DSH profile init requires credential and process isolation")
+    expected = _dsh_init_container(image, plan, policy)
+    installers = [item for item in pod.get("initContainers", []) if item.get("name") == _DSH_VOLUME]
+    if installers != [expected]:
+        raise ValueError("template changes the credential-free DSH profile installer")
+    if [item for item in pod.get("volumes", []) if item.get("name") == _DSH_VOLUME] != [
+            {"name": _DSH_VOLUME, "emptyDir": {"sizeLimit": "2Gi"}}]:
+        raise ValueError("DSH profile requires a fresh bounded emptyDir")
+    runtimes = [item for item in pod.get("containers", []) if item.get("name") == "sandbox"]
+    if len(runtimes) != 1 or runtimes[0].get("image") != image or runtimes[0].get("imagePullPolicy") != policy:
+        raise ValueError("template changes DSH profile runtime image")
+    tokens = [item.get("value") for item in runtimes[0].get("env", []) if item.get("name") == "EXECD_ACCESS_TOKEN"]
+    if tokens != [token]:
+        raise ValueError("template changes DSH profile execd authentication")
+    mounts = [item for item in runtimes[0].get("volumeMounts", []) if item.get("name") == _DSH_VOLUME]
+    if mounts != _dsh_profile_mounts():
+        raise ValueError("DSH profile requires exact read-only subPath mounts")
+    for field in ("initContainers", "containers", "ephemeralContainers"):
+        for container in pod.get(field, []):
+            if field == "initContainers" and container.get("restartPolicy") == "Always":
+                raise ValueError("DSH preparation cannot share a Pod with sidecar init containers")
+            for mount in container.get("volumeMounts", []):
+                path = mount.get("mountPath", "").rstrip("/")
+                overlaps = path == _DSH_HOME or path.startswith(_DSH_HOME + "/") or _DSH_HOME.startswith(path + "/")
+                if mount.get("name") == _DSH_VOLUME or overlaps:
+                    if field == "initContainers" and container is installers[0]:
+                        continue
+                    if field != "containers" or container is not runtimes[0] or mount not in _dsh_profile_mounts():
+                        raise ValueError("DSH profile artifacts cannot have additional writers or aliases")
 
 
 def _package_init_container(
@@ -467,7 +560,8 @@ class BatchSandboxProvider(WorkloadProvider):
         """Create a gVisor BatchSandbox workload."""
         extensions = extensions or {}
         packages = _package_plan(extensions.get(_PACKAGES_EXTENSION))
-        if packages and not re.fullmatch(r"[0-9a-f]{64}", env.get("EXECD_ACCESS_TOKEN", "")):
+        dsh_profile = _dsh_profile_plan(extensions.get(_DSH_EXTENSION))
+        if (packages or dsh_profile) and not re.fullmatch(r"[0-9a-f]{64}", env.get("EXECD_ACCESS_TOKEN", "")):
             raise ValueError("package preparation requires authenticated execd access")
         isolation_enabled = (
             extensions.get(BOOTSTRAP_EXECD_ISOLATION_KEY) == "enable"
@@ -568,6 +662,13 @@ class BatchSandboxProvider(WorkloadProvider):
             main_container_dict.setdefault("volumeMounts", []).append({
                 "name": "orca-environment-packages", "mountPath": _PACKAGES_ROOT, "readOnly": True})
 
+        if dsh_profile:
+            pod_spec["shareProcessNamespace"] = False
+            main_container_dict.setdefault("resources", {}).setdefault("limits", {}).setdefault("ephemeral-storage", "2Gi")
+            pod_spec["initContainers"].append(_dsh_init_container(image_spec.uri, dsh_profile, self.image_pull_policy))
+            pod_spec["volumes"].append({"name": _DSH_VOLUME, "emptyDir": {"sizeLimit": "2Gi"}})
+            main_container_dict.setdefault("volumeMounts", []).extend(_dsh_profile_mounts())
+
         self._apply_platform_node_selector(pod_spec, platform)
 
         if image_spec.auth:
@@ -647,8 +748,16 @@ class BatchSandboxProvider(WorkloadProvider):
                         if mount.get("name") == "orca-environment-packages" and not (field == "initContainers" and container is installers[0]):
                             if field != "containers" or container.get("name") != "sandbox" or mount.get("mountPath") != _PACKAGES_ROOT or mount.get("readOnly") is not True:
                                 raise ValueError("environment package artifacts must be read-only in the runtime")
+        if dsh_profile:
+            _validate_dsh_preparation(merged_pod_spec, image_spec.uri, dsh_profile,
+                                      self.image_pull_policy, env["EXECD_ACCESS_TOKEN"])
         if platform is not None:
             WorkloadProvider.ensure_platform_compatible_with_affinity(merged_pod_spec, platform)
+
+        # Include template/env overhead and leave headroom below etcd's default
+        # 1.5 MiB request limit. Base64 keeps serialized Unicode expansion bounded.
+        if dsh_profile and len(json.dumps(batchsandbox).encode("utf-8")) > 1_500_000:
+            raise ValueError("DSH profile workload exceeds Kubernetes object size limit")
 
         created = self.k8s_client.create_custom_object(
             group=self.group,
@@ -1035,20 +1144,20 @@ class BatchSandboxProvider(WorkloadProvider):
                     return "ENVIRONMENT_PACKAGES_STORAGE_LIMIT"
                 return "ENVIRONMENT_PACKAGES_POD_EVICTED"
             for container in status.init_container_statuses or []:
-                if container.name != "orca-environment-packages":
+                if container.name not in ("orca-environment-packages", _DSH_VOLUME):
                     continue
                 state = container.state
                 if state is None:
                     continue
                 if state.terminated is not None and state.terminated.exit_code != 0:
-                    return "ENVIRONMENT_PACKAGES_INSTALL_FAILED"
+                    return "DSH_PROFILE_INSTALL_FAILED" if container.name == _DSH_VOLUME else "ENVIRONMENT_PACKAGES_INSTALL_FAILED"
                 # ErrImagePull may recover on the next pull; persistent backoff
                 # and configuration failures still fail acquisition promptly.
                 if state.waiting is not None and state.waiting.reason in (
                     "CrashLoopBackOff", "ImagePullBackOff",
                     "CreateContainerConfigError", "CreateContainerError", "RunContainerError",
                 ):
-                    return "ENVIRONMENT_PACKAGES_START_FAILED"
+                    return "DSH_PROFILE_START_FAILED" if container.name == _DSH_VOLUME else "ENVIRONMENT_PACKAGES_START_FAILED"
         return None
 
     def get_status(self, workload: Dict[str, Any]) -> Dict[str, Any]:
@@ -1059,7 +1168,7 @@ class BatchSandboxProvider(WorkloadProvider):
         # Phase is authoritative when set (Pausing/Paused/Resuming/Failed)
         phase = status.get("phase", "")
         init_containers = workload.get("spec", {}).get("template", {}).get("spec", {}).get("initContainers", [])
-        has_packages = any(item.get("name") == "orca-environment-packages" for item in init_containers)
+        has_packages = any(item.get("name") in ("orca-environment-packages", _DSH_VOLUME) for item in init_containers)
         if has_packages and phase in ("", "Pending", "Failed"):
             failure = self._package_preparation_failure(workload)
             if failure:

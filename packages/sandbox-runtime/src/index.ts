@@ -184,3 +184,5 @@ export {
 } from './opensandbox-cancellation.js';
 export type { SandboxCallOptions } from './opensandbox-cancellation.js';
 export * from './native-completion.js';
+export { prepareDshProfilePlan, buildDshProfileProbeCommand } from './dsh-profile.js';
+export { DSH_PROFILE_TIMEOUT_MS, DSH_PROFILE_EXTENSION } from '@orca/harness-catalog';

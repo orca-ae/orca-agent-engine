@@ -3,6 +3,8 @@
 
 import { initContract } from '@ts-rest/core';
 import { z } from 'zod';
+import { parseDshProfileDescriptor, type DshProfileDescriptor } from '@orca/harness-catalog';
+import { retainedDshProfile } from '../domain/dsh-profile.js';
 import { RequestPriceFactsSchema } from './model-price-rules.contract.js';
 import {
   LOGICAL_CREDENTIAL_ID_PATTERN,
@@ -344,8 +346,20 @@ const InternalEnvironmentClaim = z.object({
   last_ping: isoTimestamp,
 });
 
-export const PreparedAgentSnapshotSchema = z
+const PreparedAgentSnapshotBase = z
   .object({
+    dsh_profile: z
+      .unknown()
+      .optional()
+      .transform((value, ctx): DshProfileDescriptor | undefined => {
+        if (value === undefined) return undefined;
+        try {
+          return parseDshProfileDescriptor(value);
+        } catch {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Invalid retained DSH profile' });
+          return z.NEVER;
+        }
+      }),
     id: idString('agt'),
     name: z.string(),
     version: z.number().int().positive(),
@@ -375,6 +389,18 @@ export const PreparedAgentSnapshotSchema = z
   })
   .passthrough();
 
+function validateRetainedProfile(value: Record<string, unknown>, ctx: z.RefinementCtx): void {
+  try {
+    retainedDshProfile(value);
+  } catch {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Invalid retained DSH profile binding' });
+  }
+}
+
+export const PreparedAgentSnapshotSchema =
+  PreparedAgentSnapshotBase.superRefine(validateRetainedProfile);
+export const PreparedAgentModelSchema = PreparedAgentSnapshotBase.shape.model;
+
 export const PreparedSkillDescriptorSchema = z
   .object({
     id: z.string().min(1),
@@ -397,10 +423,12 @@ export const PreparedSkillDescriptorSchema = z
  */
 export type PreparedSkillDescriptor = z.infer<typeof PreparedSkillDescriptorSchema>;
 
-const PreparedAgent = PreparedAgentSnapshotSchema.omit({ skills: true }).extend({
-  workspace_id: z.string().min(1),
-  skills: z.array(PreparedSkillDescriptorSchema),
-});
+const PreparedAgent = PreparedAgentSnapshotBase.omit({ skills: true })
+  .extend({
+    workspace_id: z.string().min(1),
+    skills: z.array(PreparedSkillDescriptorSchema),
+  })
+  .superRefine(validateRetainedProfile);
 
 const PreparedGuardrail = z
   .object({
@@ -699,7 +727,9 @@ export const internalContract = c.router({
       workspaceId: z.string().min(1),
       sessionId: idString('ses'),
     }),
-    body: z.object({}).strict(),
+    body: z
+      .object({ capabilities: z.array(z.string().min(1).max(128)).max(32).optional() })
+      .strict(),
     responses: {
       200: PreparedExecutionV2Schema,
       400: z.object({ error: z.string() }),

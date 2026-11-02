@@ -26,6 +26,7 @@ def _normalize_create_status(status_info: Dict[str, Any]) -> Dict[str, Any]:
     if status_info.get("state") == "Failed" and reason in (
         "ENVIRONMENT_PACKAGES_INSTALL_FAILED", "ENVIRONMENT_PACKAGES_START_FAILED",
         "ENVIRONMENT_PACKAGES_STORAGE_LIMIT", "ENVIRONMENT_PACKAGES_POD_EVICTED",
+        "DSH_PROFILE_INSTALL_FAILED", "DSH_PROFILE_START_FAILED",
     ):
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

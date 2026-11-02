@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { EnvironmentSpec } from './sandbox-runtime.js';
+import { DSH_PROFILE_EXTENSION, DSH_PROFILE_TIMEOUT_MS } from '@orca/harness-catalog';
+import { prepareDshProfilePlan } from './dsh-profile.js';
 import {
   ENVIRONMENT_PACKAGES_EXTENSION,
   ENVIRONMENT_PACKAGES_ENV,
@@ -44,15 +46,17 @@ export function buildOpenSandboxAcquireRequest(
 ): {
   body: Record<string, unknown>;
   packagePlan: ReturnType<typeof prepareEnvironmentPackagePlan>;
+  dshProfilePlan: ReturnType<typeof prepareDshProfilePlan>;
 } {
   // Merge harnessEnv (gateway LLM vars, etc.) into the container env map.
   // Treat undefined as {} per the backward-compat contract.
   const containerEnv: Record<string, string> = { ...(env.harnessEnv ?? {}) };
   const packagePlan = prepareEnvironmentPackagePlan(env.packages, env.networking);
+  const dshProfilePlan = prepareDshProfilePlan(env.dshProfile, env.networking);
   delete containerEnv['EXECD_ACCESS_TOKEN'];
   if (opts.execdAccessToken) containerEnv['EXECD_ACCESS_TOKEN'] = opts.execdAccessToken;
-  if (packagePlan && !opts.execdAccessToken)
-    throw new Error('environment packages require authenticated execd access');
+  if ((packagePlan || dshProfilePlan) && !opts.execdAccessToken)
+    throw new Error('sandbox preparation requires authenticated execd access');
   delete containerEnv[ENVIRONMENT_PACKAGES_ENV];
   if (packagePlan) containerEnv[ENVIRONMENT_PACKAGES_ENV] = JSON.stringify(packagePlan.packages);
   // Per-acquire image override takes precedence over the constructor image.
@@ -62,7 +66,10 @@ export function buildOpenSandboxAcquireRequest(
     entrypoint: env.entrypoint ?? opts.entrypoint ?? DEFAULT_ENTRYPOINT,
     resourceLimits: opts.resourceLimits ?? DEFAULT_RESOURCE_LIMITS,
     secureAccess: false,
-    timeout: opts.timeoutSeconds + (packagePlan ? ENVIRONMENT_PACKAGE_TIMEOUT_MS / 1000 : 0),
+    timeout:
+      opts.timeoutSeconds +
+      (packagePlan ? ENVIRONMENT_PACKAGE_TIMEOUT_MS / 1000 : 0) +
+      (dshProfilePlan ? DSH_PROFILE_TIMEOUT_MS / 1000 : 0),
     metadata: { owner: 'orca-managed-agents' },
     env: containerEnv,
     // OpenSandbox grants only this acquired workload the namespace/security
@@ -72,13 +79,14 @@ export function buildOpenSandboxAcquireRequest(
     extensions: {
       [EXECD_ISOLATION_EXTENSION]: 'enable',
       ...(packagePlan ? { [ENVIRONMENT_PACKAGES_EXTENSION]: packagePlan.extension } : {}),
+      ...(dshProfilePlan ? { [DSH_PROFILE_EXTENSION]: JSON.stringify(dshProfilePlan) } : {}),
       ...(opts.enableFuse ? { [FUSE_DEVICE_EXTENSION]: 'enable' } : {}),
     },
   };
   if (env.exposePorts?.length) {
     body['exposePorts'] = env.exposePorts;
   }
-  return { body, packagePlan };
+  return { body, packagePlan, dshProfilePlan };
 }
 
 /** Shared by both adapters; callbacks retain their endpoint and HTTP ownership. */

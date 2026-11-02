@@ -60,6 +60,8 @@ export class InMemorySandboxRuntime implements SandboxRuntime {
   };
 
   async acquire(_env: EnvironmentSpec): Promise<SandboxHandle> {
+    if (_env.dshProfile)
+      throw new Error('DSH profiles require OpenSandbox native-profile preparation');
     const root = mkdtempSync(join(tmpdir(), 'orca-sandbox-'));
     const id = `sbx_inmem_${++nextId}_${Date.now().toString(36)}`;
     return new InMemorySandboxHandle(id, root);

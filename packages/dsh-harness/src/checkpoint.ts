@@ -2,12 +2,42 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { createHash } from 'node:crypto';
-import type { SdkCheckpoint } from '@orca/sdk-harness';
+import type { SdkCheckpoint, DshHarnessProfile } from '@orca/sdk-harness';
+import { isDeepStrictEqual } from 'node:util';
 import { sessionFormatCatalog } from '@deepseek-ai/dsh-session-format-catalog';
 import { DSH_MODEL, DSH_CATALOG_VERSION } from '@orca/harness-catalog';
 
 export const DSH_SDK_VERSION = '0.2.1-alpha.2';
 export const PROFILE = 'orca-managed-tree-v2';
+export const CUSTOM_PROFILE = 'orca-managed-custom-v1';
+
+export function validateHarnessProfile(value: unknown): asserts value is DshHarnessProfile {
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    throw new Error('Invalid DSH harness profile');
+  const raw = value as Record<string, unknown>;
+  if (
+    raw.version !== 1 ||
+    Object.keys(raw).sort().join(',') !==
+      'config_sha256,lock_sha256,runtime_compatibility,tool_manifest_sha256,version' ||
+    ['config_sha256', 'lock_sha256', 'tool_manifest_sha256', 'runtime_compatibility'].some(
+      (key) => typeof raw[key] !== 'string' || !/^[0-9a-f]{64}$/.test(raw[key] as string),
+    )
+  )
+    throw new Error('Invalid DSH harness profile');
+}
+
+export function assertDshCheckpointProfile(
+  checkpoint: SdkCheckpoint,
+  expected?: DshHarnessProfile,
+): void {
+  const manifest = JSON.parse(decodeCheckpoint(checkpoint)['orca.json']!.toString());
+  if (expected) validateHarnessProfile(expected);
+  if (
+    !isDeepStrictEqual(manifest.harness_profile, expected) ||
+    (manifest.profile === CUSTOM_PROFILE) !== !!expected
+  )
+    throw new Error('DSH checkpoint harness profile differs from initialized runtime');
+}
 const PI_PROFILE = 'orca-managed-pi-ai-' + DSH_CATALOG_VERSION.pi + '-v1';
 export const MAX_STATE_BYTES = 16 * 1024 * 1024;
 export const MAX_STATE_FILES = 129;
@@ -55,13 +85,16 @@ export function decodeCheckpoint(checkpoint: SdkCheckpoint): Record<string, Buff
   }
   const manifest = JSON.parse(files['orca.json']?.toString('utf8') ?? 'null');
   if (
-    ![PROFILE, PI_PROFILE].includes(manifest?.profile) ||
+    ![PROFILE, PI_PROFILE, CUSTOM_PROFILE].includes(manifest?.profile) ||
     manifest?.sdkVersion !== DSH_SDK_VERSION ||
     manifest?.threadId !== checkpoint.threadId ||
     manifest?.instructionsSha256 !== checkpoint.instructionsSha256 ||
     Object.keys(files).length < 2
   )
     throw new Error('Incompatible DSH native profile');
+  if (manifest.profile === CUSTOM_PROFILE) validateHarnessProfile(manifest.harness_profile);
+  else if (manifest.harness_profile !== undefined)
+    throw new Error('Unexpected DSH harness profile');
   if (
     manifest.profile === PI_PROFILE &&
     (typeof manifest.provider !== 'string' || typeof manifest.model !== 'string')
@@ -137,7 +170,7 @@ export function assertDshCheckpointModel(
   if (
     pinnedProvider !== provider ||
     manifest.model !== model ||
-    manifest.profile !== expectedProfile
+    (manifest.profile !== expectedProfile && manifest.profile !== CUSTOM_PROFILE)
   )
     throw new Error('DSH checkpoint provider/model differs from pinned Agent');
 }
@@ -148,13 +181,19 @@ export function captureCheckpoint(
   nativeFiles: Record<string, Buffer>,
   model: string = DSH_MODEL,
   provider = 'deepseek',
+  harnessProfile?: DshHarnessProfile,
 ): SdkCheckpoint {
   const instructionsSha256 = digest(system);
   const files = {
     ...nativeFiles,
     'orca.json': Buffer.from(
       JSON.stringify({
-        profile: provider === 'deepseek' && model === DSH_MODEL ? PROFILE : PI_PROFILE,
+        profile: harnessProfile
+          ? CUSTOM_PROFILE
+          : provider === 'deepseek' && model === DSH_MODEL
+            ? PROFILE
+            : PI_PROFILE,
+        ...(harnessProfile ? { harness_profile: harnessProfile } : {}),
         sdkVersion: DSH_SDK_VERSION,
         threadId,
         instructionsSha256,

@@ -498,6 +498,11 @@ registry:
   nodeSelector: {}
   tolerations: []
   affinity: {}
+  # Approve native DSH profiles through the Registry process-start configuration.
+  # Omitted defaults to {}; only exact Orca workspace IDs and config digests match.
+  # extraEnv:
+  #   - name: DSH_APPROVED_PROFILES
+  #     value: '{"ws_example":["<64-character-config-sha256>"]}'
   extraEnv: []
   # Extra envFrom sources, appended last so an operator-supplied ConfigMap or
   # Secret wins over the chart's own ConfigMap for duplicate keys. Explicit

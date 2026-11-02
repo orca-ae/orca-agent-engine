@@ -33,6 +33,8 @@ import {
   buildSkillsAliasProbeCommand,
   SANDBOX_FILESYSTEM_ROOT_PREFLIGHT_TIMEOUT_MS,
   ENVIRONMENT_PACKAGE_TIMEOUT_MS,
+  DSH_PROFILE_TIMEOUT_MS,
+  buildDshProfileProbeCommand,
   buildOpenSandboxAcquireRequest,
   waitUntilOpenSandboxReady,
   OPENSANDBOX_READY_TIMEOUT_MS as READY_TIMEOUT_MS,
@@ -116,6 +118,7 @@ export class OpenSandboxRuntime implements SandboxRuntime {
       supportsWritePolicy: true,
       supportsPerCallCancellation: true,
       supportsEnvironmentPackages: true,
+      supportsDshProfiles: true,
     };
   }
 
@@ -126,7 +129,7 @@ export class OpenSandboxRuntime implements SandboxRuntime {
     // `resourceLimits: this.opts.resourceLimits` assignment): under
     // `exactOptionalPropertyTypes`, an optional field must be OMITTED when
     // its source is undefined, not present-with-value-undefined.
-    const { body, packagePlan } = buildOpenSandboxAcquireRequest(env, {
+    const { body, packagePlan, dshProfilePlan } = buildOpenSandboxAcquireRequest(env, {
       execdAccessToken,
       image: this.opts.image,
       timeoutSeconds: this.opts.timeoutSeconds,
@@ -150,16 +153,30 @@ export class OpenSandboxRuntime implements SandboxRuntime {
       runtime: this,
       enableFuse,
       environmentPackages: packagePlan !== undefined,
+      hasInitPreparation: packagePlan !== undefined || dshProfilePlan !== undefined,
       execdAccessToken,
       ...(env.fileUploadOwnership ? { fileUploadOwnership: env.fileUploadOwnership } : {}),
     });
     try {
-      await handle.waitUntilReady(packagePlan ? ENVIRONMENT_PACKAGE_TIMEOUT_MS : READY_TIMEOUT_MS);
+      await handle.waitUntilReady(
+        packagePlan || dshProfilePlan
+          ? (packagePlan ? ENVIRONMENT_PACKAGE_TIMEOUT_MS : 0) +
+              (dshProfilePlan ? DSH_PROFILE_TIMEOUT_MS : 0) +
+              READY_TIMEOUT_MS
+          : READY_TIMEOUT_MS,
+      );
       await handle.verifyExecdAuthentication();
       if (enableFuse) {
         await handle.verifyFusePrerequisites();
       }
       if (packagePlan) await handle.prepareEnvironmentPackages(packagePlan.packages);
+      if (dshProfilePlan) {
+        const probe = await handle.runCommand(buildDshProfileProbeCommand(dshProfilePlan), {
+          timeoutMs: 10_000,
+        });
+        if (probe.exitCode !== 0)
+          throw new Error('OpenSandbox DSH profile preparation probe failed');
+      }
       return handle;
     } catch (e) {
       await handle.destroy().catch(() => undefined);
@@ -270,6 +287,7 @@ class OpenSandboxHandle implements SandboxHandle {
       runtime: OpenSandboxRuntime;
       enableFuse: boolean;
       environmentPackages: boolean;
+      hasInitPreparation: boolean;
       execdAccessToken: string;
       fileUploadOwnership?: { owner: string; group: string };
     },
@@ -285,7 +303,7 @@ class OpenSandboxHandle implements SandboxHandle {
     await waitUntilOpenSandboxReady({
       id: this.id,
       timeoutMs,
-      ...(this.opts.environmentPackages
+      ...(this.opts.hasInitPreparation
         ? {
             getLifecycle: () =>
               this.opts.runtime.requestJson(`/sandboxes/${encodeURIComponent(this.id)}`),
