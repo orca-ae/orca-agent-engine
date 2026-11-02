@@ -3,7 +3,6 @@
 
 import {
   parseUsageDelta,
-  priceUsageDelta,
   persistUsage,
   loadGuardrailUsageState,
   loadGuardrailTurnSubject,
@@ -25,6 +24,7 @@ export {
 
 import { Readable } from 'node:stream';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import { RequestPriceFactsSchema } from '../contracts/model-price-rules.contract.js';
 import { eq, and, isNull, sql, inArray, ne } from 'drizzle-orm';
 import type { FileStore, FilePurpose, FileRecord } from '@orca/file-store';
 import {
@@ -1252,6 +1252,7 @@ export function registerInternalRoutes(
       subagent_id?: unknown;
       turn_event_id?: unknown;
       usage_event_id?: unknown;
+      pricing_facts?: unknown;
     };
     const usage = parseUsageDelta(body.usage);
     if (!usage) {
@@ -1296,6 +1297,50 @@ export function registerInternalRoutes(
     ) {
       return reply.code(400).send({ error: 'invalid usage event id' });
     }
+    const facts =
+      body.pricing_facts === undefined
+        ? null
+        : RequestPriceFactsSchema.safeParse(body.pricing_facts);
+    if (
+      facts &&
+      (!facts.success ||
+        req.headers['x-orca-pricing-capability'] !== 'request-facts-v1' ||
+        typeof usageEventId !== 'string')
+    ) {
+      return reply
+        .code(400)
+        .send({ error: 'pricing facts require request-facts-v1 and a stable usage event id' });
+    }
+    if (facts?.success) {
+      const raw = body.usage ?? {};
+      const cache = raw.cache_creation as Record<string, unknown> | undefined;
+      if (
+        [
+          raw.input_tokens,
+          raw.output_tokens,
+          raw.cache_read_input_tokens,
+          cache?.ephemeral_5m_input_tokens,
+          cache?.ephemeral_1h_input_tokens,
+        ].some((n) => !Number.isSafeInteger(n) || (n as number) < 0) ||
+        Object.keys(raw).some(
+          (k) =>
+            ![
+              'input_tokens',
+              'output_tokens',
+              'cache_read_input_tokens',
+              'cache_creation',
+            ].includes(k),
+        ) ||
+        Object.keys(cache ?? {}).some(
+          (k) => !['ephemeral_5m_input_tokens', 'ephemeral_1h_input_tokens'].includes(k),
+        )
+      ) {
+        return reply
+          .code(400)
+          .send({ error: 'pricing facts require complete exclusive integer token buckets' });
+      }
+    }
+    reply.header('x-orca-pricing-capability', 'request-facts-v1');
 
     const turnSubject =
       typeof turnEventId === 'string'
@@ -1310,11 +1355,6 @@ export function registerInternalRoutes(
     // and what is recorded never changes afterwards. A model with no price data
     // yields `null` — the tokens are still recorded, the cost is not, and
     // nothing anywhere substitutes zero for "unknown".
-    const costNanoUsd =
-      typeof model === 'string'
-        ? await priceUsageDelta(db, workspaceId, provider, model, usage)
-        : null;
-
     const now = new Date();
     const outcome = await db.transaction(async (tx) => {
       // Serialize with negotiated authority changes, including shared-token writers
@@ -1331,8 +1371,17 @@ export function registerInternalRoutes(
         workspaceId,
         sessionId: id,
         usage,
-        costNanoUsd,
-        now,
+        costNanoUsd: null,
+        ...(typeof model === 'string'
+          ? {
+              pricingContext: {
+                provider,
+                modelId: model,
+                facts: facts?.success ? facts.data : null,
+              },
+            }
+          : {}),
+        now: new Date(),
         turnSubject,
         ...(typeof threadId === 'string' ? { threadId } : {}),
         ...(typeof subagentId === 'string' ? { subagentId } : {}),

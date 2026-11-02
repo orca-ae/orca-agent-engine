@@ -27,6 +27,8 @@ import { registerAgentsRoutes } from './api/agents.routes.js';
 import { registerDiscoveryRoutes } from './api/discovery.routes.js';
 import { loadOrganizationId, registerGuardrailsRoutes } from './api/guardrails.routes.js';
 import { registerModelPricesRoutes } from './api/model-prices.routes.js';
+import { registerModelPriceRulesRoutes } from './api/model-price-rules.routes.js';
+import { createPostgresPricingCatalogStore } from './pricing/catalog-store.js';
 import { createPostgresModelPriceStore } from './pricing/store.js';
 import { registerEnvironmentsRoutes } from './api/environments.routes.js';
 import { registerSessionsRoutes } from './api/sessions.routes.js';
@@ -477,6 +479,7 @@ export function buildApp(
 }
 
 export interface BuildAdminAppOptions {
+  conditionalPricingEnabled?: boolean;
   db: DbClient;
   oidc: OidcConfig;
   platformOidc: OidcConfig;
@@ -575,7 +578,7 @@ export function buildAdminApp(opts: BuildAdminAppOptions): FastifyInstance {
   });
   app.get('/healthz', async () => ({ status: 'ok', service: SERVICE_NAME }));
   app.get('/readyz', async () => ({ status: 'ready', service: SERVICE_NAME }));
-  registerAdminRoutes(app, opts.db, opts.store, opts.secretStore);
+  registerAdminRoutes(app, opts.db, opts.store, opts.secretStore, opts.conditionalPricingEnabled);
   registerPlatformRoutes(app, opts.db);
   return app;
 }
@@ -887,14 +890,20 @@ function buildSurfaceApp(
     // surfaces, so no guard is needed here. It also serves the
     // `runtime.runorca.ai` group's harness catalog.
     registerDiscoveryRoutes(app);
+    registerModelPriceRulesRoutes(app, createPostgresPricingCatalogStore(opts.db), (workspaceId) =>
+      loadOrganizationId(opts.db, workspaceId),
+    );
     // The engine's policy and pricing extension groups (the third,
     // `runtime.runorca.ai`, is registered with discovery above). Served on the
     // public listener beside core, and discoverable through the same `/apis`
     // document that advertises them. Organization-tier guardrails and every price
     // write are refused here and served on the admin listener instead.
     registerGuardrailsRoutes(app, opts.db);
-    registerModelPricesRoutes(app, createPostgresModelPriceStore(opts.db), (workspaceId) =>
-      loadOrganizationId(opts.db, workspaceId),
+    registerModelPricesRoutes(
+      app,
+      createPostgresModelPriceStore(opts.db),
+      (workspaceId) => loadOrganizationId(opts.db, workspaceId),
+      createPostgresPricingCatalogStore(opts.db),
     );
     // Metrics include deployment-wide operational state and may carry tenant
     // labels. Keep them off the public listener; the internal listener is the

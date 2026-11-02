@@ -418,6 +418,27 @@ describeSdk(
       const event = await first.event('actor:daily');
       await first.accounting.prepare(event, guarded);
       await finish(first, event);
+      const receipts = await db
+        .select()
+        .from(sessionUsageEvents)
+        .where(eq(sessionUsageEvents.sessionId, first.sessionId));
+      expect(receipts[0]?.pricingReceipt).toMatchObject({
+        pricing_time: now.toISOString(),
+        global_catalog_id: null,
+        org_catalog_id: null,
+      });
+      const dailyCosts = () =>
+        db
+          .select({ window: guardrailCounters.window, cost: guardrailCounters.valueNum })
+          .from(guardrailCounters)
+          .where(
+            and(
+              eq(guardrailCounters.workspaceId, workspaceId),
+              eq(guardrailCounters.subject, 'actor:daily'),
+              eq(guardrailCounters.key, SHARED_USAGE_KEYS.dailyCostUsd),
+            ),
+          );
+      expect(await dailyCosts()).toEqual([{ window: '2026-09-20', cost: 0.000021 }]);
       await expect(
         second.accounting.prepare(await second.event('actor:daily'), guarded),
       ).rejects.toThrow(/Today's spend/);
@@ -436,7 +457,20 @@ describeSdk(
           ),
       ).toHaveLength(0);
       now = new Date('2026-09-21T00:01:00Z');
-      await second.accounting.prepare(await second.event('actor:daily'), guarded);
+      const nextDay = await second.event('actor:daily');
+      await second.accounting.prepare(nextDay, guarded);
+      await finish(second, nextDay);
+      expect(await dailyCosts()).toEqual(
+        expect.arrayContaining([
+          { window: '2026-09-20', cost: 0.000021 },
+          { window: '2026-09-21', cost: 0.000021 },
+        ]),
+      );
+      const nextDayReceipts = await db
+        .select()
+        .from(sessionUsageEvents)
+        .where(eq(sessionUsageEvents.sessionId, second.sessionId));
+      expect(nextDayReceipts[0]?.pricingReceipt).toMatchObject({ pricing_time: now.toISOString() });
     });
 
     it.each(['missing_usage', 'interrupt', 'failure'])(
