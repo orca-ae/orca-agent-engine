@@ -28,12 +28,19 @@ import { newSessionInitialEventsOutboxRow } from './session-lifecycle-outbox.js'
 import { sessionLlmEgressMetadataError } from './session-llm-egress.js';
 import { resolveSessionSkillBindings } from './session-skill-bindings.js';
 import { stableSessionThreadId } from './thread-projection.js';
+import {
+  retainedDshProfile,
+  requireDshProfileApproval,
+  requireDshProfileEnvironment,
+  type DshApprovedProfiles,
+} from './dsh-profile.js';
 
 type SessionResourceInsert = typeof sessionResources.$inferInsert;
 type GitCredentialInsert = typeof gitCredentials.$inferInsert;
 type SessionObservabilityBindingInsert = typeof sessionObservabilityBindings.$inferInsert;
 
 export interface CreateSessionInTransactionInput {
+  dshApprovedProfiles?: DshApprovedProfiles;
   id: string;
   workspaceId: string;
   agentId: string;
@@ -167,7 +174,11 @@ export async function createSessionInTransaction(
   const harness = agentConfiguration.harness;
 
   const [environment] = await tx
-    .select({ id: environments.id, target: environments.target })
+    .select({
+      id: environments.id,
+      target: environments.target,
+      networking: environments.networking,
+    })
     .from(environments)
     .where(
       and(
@@ -184,6 +195,19 @@ export async function createSessionInTransaction(
   }
   const deploymentError = validateHarnessDeployment(environment.target ?? 'cloud', harness);
   if (deploymentError) return { ok: false, reason: 'deployment', message: deploymentError };
+  try {
+    const profile = retainedDshProfile(agent.snapshot as Record<string, unknown>);
+    if (profile) {
+      requireDshProfileApproval(input.dshApprovedProfiles ?? {}, input.workspaceId, profile);
+      requireDshProfileEnvironment(environment);
+    }
+  } catch (error) {
+    return {
+      ok: false,
+      reason: 'deployment',
+      message: error instanceof Error ? error.message : 'Invalid DSH profile',
+    };
+  }
 
   const vaultError = await validateSessionVaultIds(tx, input.workspaceId, input.vaultIds, true);
   if (vaultError) return { ok: false, reason: 'vault', message: vaultError };

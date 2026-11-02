@@ -33,6 +33,12 @@ here. `harness-server` keeps its own copies of the runtimes (see
   (`validateSkillBundle`, `SKILLS_ROOT`) and the shared `composeSkillsCatalog`
   formatter from [`../skills.md`](../skills.md). Catalog entries carry the pinned
   package digest so native history fingerprints also bind the Skill version.
+- OpenSandbox runtimes advertise `capabilities.supportsDshProfiles`. The shared
+  `prepareDshProfilePlan` validates the retained descriptor and unrestricted Environment
+  networking; `buildDshProfileProbeCommand` verifies the actual configuration revision and
+  read-only configuration/module subPath mounts. A profile volume is separate from the
+  Environment package rootfs. Lifecycle polling covers either init path without enabling
+  package filesystem policy for a DSH-only sandbox.
 
 ## Implementations
 

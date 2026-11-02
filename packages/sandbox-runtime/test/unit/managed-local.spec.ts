@@ -333,7 +333,7 @@ describe('managed Local tool filesystem', () => {
     vi.mocked(fs.readdirSync).mockImplementation(((path, ...args) =>
       path === '/'
         ? ['bin', 'lib', 'lib64', 'usr', 'opt', 'home', 'tmp', 'proc', 'dev', 'sys']
-        : original.readdirSync(path, ...args)) as typeof fs.readdirSync);
+        : Reflect.apply(original.readdirSync, original, [path, ...args])) as typeof fs.readdirSync);
     vi.mocked(fs.realpathSync).mockImplementation(((path, ...args) => {
       const merged: Record<string, string> = {
         '/bin': '/usr/bin',
@@ -344,7 +344,7 @@ describe('managed Local tool filesystem', () => {
         merged[String(path)] ??
         (['/usr', '/opt', '/home', '/tmp'].includes(String(path))
           ? String(path)
-          : original.realpathSync(path, ...args))
+          : Reflect.apply(original.realpathSync, original, [path, ...args]))
       );
     }) as typeof fs.realpathSync);
     const manager = createManagedToolSandboxManager();

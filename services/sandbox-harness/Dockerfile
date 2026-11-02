@@ -38,9 +38,9 @@ COPY packages/sandbox-runtime/tsconfig.json ./packages/sandbox-runtime/
 COPY packages/sandbox-runtime/src ./packages/sandbox-runtime/src
 COPY services/sandbox-harness/tsconfig.json ./services/sandbox-harness/
 COPY services/sandbox-harness/src ./services/sandbox-harness/src
-RUN pnpm -F @orca/sdk-harness build && \
+RUN pnpm -F @orca/harness-catalog build && \
+    pnpm -F @orca/sdk-harness build && \
     pnpm -F @orca/sandbox-runtime build && \
-    pnpm -F @orca/harness-catalog build && \
     pnpm -F @orca/pi-harness build && \
     pnpm -F @orca/dsh-harness build && \
     pnpm -F @orca/codex-harness build \
@@ -113,6 +113,7 @@ FROM node:22-trixie-slim@sha256:517aa41d78545cb1b8c67b13655b4c13ede1ee9df1da8aab
 COPY --from=bubblewrap-build /tmp/orca-environment-probe /usr/local/libexec/orca-environment-probe
 ARG BUBBLEWRAP_VERSION
 WORKDIR /app/services/sandbox-harness
+RUN npm install --global --ignore-scripts pnpm@9.15.9 && test "$(pnpm --version)" = 9.15.9
 
 # Claude Agent SDK uses bubblewrap for its Linux filesystem sandbox. The write
 # policy is fail-closed, so this is a runtime dependency rather than optional
@@ -181,6 +182,7 @@ COPY --from=build /app/packages/codex-harness/dist /app/packages/codex-harness/d
 COPY --from=build /app/packages/codex-harness/node_modules /app/packages/codex-harness/node_modules
 COPY --from=build /app/packages/harness-catalog/package.json /app/packages/harness-catalog/package.json
 COPY --from=build /app/packages/harness-catalog/dist /app/packages/harness-catalog/dist
+COPY --from=build /app/packages/harness-catalog/node_modules /app/packages/harness-catalog/node_modules
 COPY --from=build /app/packages/sandbox-runtime/package.json /app/packages/sandbox-runtime/package.json
 COPY --from=build /app/packages/sandbox-runtime/dist /app/packages/sandbox-runtime/dist
 COPY --from=build /app/packages/sandbox-runtime/node_modules /app/packages/sandbox-runtime/node_modules
@@ -201,8 +203,8 @@ RUN chmod 0755 /usr/local/bin/orca-sandbox-harness /usr/local/bin/orca-gvisor-bw
     && git config --system credential.helper /usr/local/bin/orca-git-creds \
     && git config --system credential.useHttpPath true \
     && git config --system safe.directory '*' \
-    && mkdir -p /mnt/memory /mnt/session/outputs /workspace \
-    && chown -R 1000:1000 /mnt/memory /mnt/session /workspace
+    && mkdir -p /mnt/memory /mnt/session/outputs /workspace /app/packages/dsh-harness/.orca-dsh/profiles/orca-managed \
+    && chown -R 1000:1000 /mnt/memory /mnt/session /workspace /app/packages/dsh-harness/.orca-dsh
 
 EXPOSE 4096
 HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \

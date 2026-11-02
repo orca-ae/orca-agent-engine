@@ -142,6 +142,8 @@ export class E2BSandboxRuntime implements SandboxRuntime {
   constructor(private readonly opts: E2BSandboxRuntimeOptions) {}
 
   async acquire(env: EnvironmentSpec): Promise<SandboxHandle> {
+    if (env.dshProfile)
+      throw new Error('DSH profiles require OpenSandbox native-profile preparation');
     if (Object.keys(normalizeEnvironmentPackages(env.packages)).length > 0) {
       throw new Error('E2B does not support isolated Environment package preparation');
     }

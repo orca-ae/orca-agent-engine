@@ -93,6 +93,24 @@ hands the occurrence to the normal Session initial-event outbox. It introduces
 no public run resource and no separate scheduler service. See
 [`cron-triggers.md`](./cron-triggers.md).
 
+## Agent-bound DSH profiles
+
+`Agent.metadata.dsh_profile` is interpreted Orca behavior inside the existing metadata
+string map, not an Anthropic profile selector. It references a Files upload whose four
+native configuration texts Registry retains privately in the immutable Agent version.
+It is supported only for cloud colocated DSH with operator approval and a provider
+advertising native-profile preparation. Session and Trigger metadata cannot override it.
+Files upload/download/delete behavior and the public Agent/version response shapes are
+unchanged; retained configuration content is not public. See
+[Agent-bound native profiles](harness-modes.md#agent-bound-native-profiles).
+
+The existing `session.status_running` event carries optional Orca `harness_profile`
+attributes for a custom profile: `version`, `config_sha256`, `lock_sha256`,
+`tool_manifest_sha256` and `runtime_compatibility`. These record the initialized runtime
+identity before model execution without exposing configuration texts. They are Orca
+attributes, not Anthropic-standard payload fields; the schema digest excludes
+Agent enablement/policy and Session/MCP tools.
+
 ## Session metadata filtering
 
 ### LLM egress selection

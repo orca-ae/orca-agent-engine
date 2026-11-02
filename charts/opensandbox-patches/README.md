@@ -41,23 +41,24 @@ entrypoint trust, or a legacy exact image + entrypoint match.
 
 When neither `ORCA_TRUSTED_SANDBOX_REPOSITORIES` nor
 `ORCA_TRUSTED_SANDBOX_REPOSITORY_PREFIXES` is set, the server trusts exactly
-these two official repositories:
+these three official repositories:
 
 | Repository                                          | Exact entrypoint array                          |
 | --------------------------------------------------- | ----------------------------------------------- |
 | `ghcr.io/orca-ae/orca-opensandbox-code-interpreter` | `["/opt/code-interpreter/code-interpreter.sh"]` |
 | `ghcr.io/orca-ae/sandbox-harness-claude-code`       | `["/usr/local/bin/orca-sandbox-harness"]`       |
+| `ghcr.io/orca-ae/sandbox-harness-dsh`               | `["/usr/local/bin/orca-sandbox-harness"]`       |
 
-`ORCA_TRUSTED_SANDBOX_REPOSITORY_PREFIXES` trusts the same two images under
+`ORCA_TRUSTED_SANDBOX_REPOSITORY_PREFIXES` trusts the same three images under
 mirror registries. It is a JSON array of exact registry/namespace prefixes, for
 example `["ghcr.io/orca-ae","registry.example.com/mirror/orca"]`. Each prefix
-trusts `<prefix>/orca-opensandbox-code-interpreter` and
-`<prefix>/sandbox-harness-claude-code` with the entrypoints above. The array
+trusts `<prefix>/orca-opensandbox-code-interpreter`, `<prefix>/sandbox-harness-claude-code`
+and `<prefix>/sandbox-harness-dsh` with the entrypoints above. The array
 replaces the `ghcr.io/orca-ae` default, so list that prefix too to keep it;
-`[]` trusts neither official image.
+`[]` trusts none of the official images.
 
 Repository matching is exact: no aliases, inferred registry, or wildcards, and a
-prefix is expanded to those two repositories, never matched as a string prefix.
+prefix is expanded to those three repositories, never matched as a string prefix.
 Image references must contain a valid explicit tag, digest, or tag + digest;
 bare repositories are rejected. Digests must be `sha256:` followed by 64
 lowercase hexadecimal characters. The entire entrypoint array must match,
@@ -108,6 +109,35 @@ policy already enforces this contract.
 
 Chart does not install gVisor or create `RuntimeClass/gvisor`. Nodes and runtime
 handler must exist before OpenSandbox server starts.
+
+## Native DSH profile preparation
+
+The provider accepts the internal `orca.dsh.profile.v1` extension from the matching
+Orca harness release. No profile-specific values are required in this chart.
+Registry owns approval through `DSH_APPROVED_PROFILES`; see the
+[engine chart configuration](../orca-managed-agents/README.md#native-dsh-profiles).
+Deploy the matching engine and DSH sandbox image with this patch before enabling
+approvals. OpenSandbox server mounts these Python files through `subPath`; restart
+`deployment/opensandbox-server` after upgrading the patch ConfigMap. Updating the
+ConfigMap alone does not reload code into existing server Pods.
+
+Each custom-profile Pod has a credential-free init container using the same image
+as the runtime, with a 900-second preparation timeout and these fixed resources:
+
+| Resource          | Request | Limit |
+| ----------------- | ------- | ----- |
+| CPU               | 100m    | 1     |
+| Memory            | 512Mi   | 512Mi |
+| Ephemeral storage | 2Gi     | 2Gi   |
+
+The dedicated `emptyDir` has a 2Gi size limit. The runtime container also receives
+a 2Gi ephemeral-storage limit when none is supplied; Environment package preparation
+retains its existing resource settings. Ensure namespace quotas and admission rules
+permit the init container, bounded volume and fixed read-only runtime mounts.
+Preparation runs before the main container without its runtime credentials; every
+init attempt clears the dedicated volume and reinstalls from the retained descriptor.
+Configuration, installed modules and the completion marker are mounted read-only at
+the private profile path. Worker boot metadata and native history remain writable.
 
 ## Release versioning
 

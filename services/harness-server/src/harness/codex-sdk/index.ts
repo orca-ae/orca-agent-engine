@@ -1,11 +1,17 @@
 // Copyright The Orca Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { assertSdkTerminalUsage as assertCodexTerminalUsage } from '@orca/sdk-harness';
+import {
+  assertSdkTerminalUsage as assertCodexTerminalUsage,
+  parseDshToolManifest,
+  dshToolManifestSha256,
+  type DshHarnessProfile,
+} from '@orca/sdk-harness';
 import { stableSessionThreadId, AgentThreadEventKind } from '@orca/agent-event-contract';
 import { DshEventProjection, nativeThreadId } from './dsh-events.js';
 import {
   assertDshCheckpointInstructions,
+  validateHarnessProfile,
   nativeArguments,
   nativeTools,
   inspection,
@@ -14,6 +20,7 @@ import { PiSdkWorker, assertPiCheckpointInstructions } from '@orca/pi-harness';
 import type { HarnessTurnAction, HarnessTurnReceipt } from '@orca/harness-catalog';
 import { recoverCodexTurn, receiptTerminalEvents, type CodexTurnStore } from './turn-receipt.js';
 import { mkdtemp, rm } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -116,6 +123,9 @@ export class CodexSdkHarness implements AgentHarness {
   private bindings = new Map<string, Binding>();
   private pending = new Map<AgentEvent['id'], PendingAction>();
   private dshProjection: DshEventProjection | undefined;
+  private dshProfileIdentity?: DshHarnessProfile;
+  private dshPluginTools = new Map<string, Tool>();
+  private dshManagedTools: Tool[] = [];
   private cancelledToolCalls = new Set<string>();
   private cancelledSubpaths = new Set<string>();
   private toolOrigins = new Map<string, string>();
@@ -469,6 +479,14 @@ export class CodexSdkHarness implements AgentHarness {
         this.opts.harness === 'pi_sdk' ? new PiSdkWorker(emit) : new CodexSdkWorker(emit))
     )((event) => this.receive(event), input);
     const apiKey = await this.apiKey();
+    if (input.agentSnapshot.dsh_profile)
+      this.dshManagedTools = parseDshToolManifest(
+        (input.tools ?? []).map((tool) => ({
+          name: tool.name,
+          description: tool.description,
+          inputSchema: tool.input_schema,
+        })),
+      );
     if (this.stopped) throw new Error(`${this.sdkName} stopped during startup`);
     await this.worker.handle({
       type: 'start',
@@ -480,6 +498,12 @@ export class CodexSdkHarness implements AgentHarness {
       apiKey,
       ...(this.opts.baseUrl ? { baseUrl: this.opts.baseUrl } : {}),
       ...(this.opts.dshGatewayUrl ? { dshGatewayUrl: this.opts.dshGatewayUrl } : {}),
+      ...(input.agentSnapshot.dsh_profile
+        ? {
+            dshProfile: input.agentSnapshot.dsh_profile,
+            dshManagedTools: this.dshManagedTools,
+          }
+        : {}),
       ...(this.opts.harness === 'pi_sdk' && this.opts.piGatewayUrl
         ? { piGatewayUrl: this.opts.piGatewayUrl }
         : {}),
@@ -492,6 +516,8 @@ export class CodexSdkHarness implements AgentHarness {
     });
     // Restored private lineage must be admitted before targeted controls or tools.
     if (this.dshProjection) await this.eventTail;
+    if (input.agentSnapshot.dsh_profile && !this.dshProfileIdentity)
+      throw new Error('DSH custom runtime did not acknowledge its prepared profile');
   }
 
   async submit(
@@ -878,7 +904,10 @@ export class CodexSdkHarness implements AgentHarness {
       return new Promise<never>(() => {});
     });
     void controlFailure?.catch(() => {});
-    this.emit({ kind: SessionEventKind.statusRunning, payload: {} });
+    this.emit({
+      kind: SessionEventKind.statusRunning,
+      payload: this.dshProfileIdentity ? { harness_profile: this.dshProfileIdentity } : {},
+    });
     const start =
       this.opts.harness === 'dsh_sdk'
         ? undefined
@@ -1155,7 +1184,36 @@ export class CodexSdkHarness implements AgentHarness {
     } else {
       this.eventTail = this.eventTail.then(async () => {
         if (this.turnRetired) return;
-        if (event.type === 'thread_tree') {
+        if (event.type === 'ready' && this.input?.agentSnapshot.dsh_profile) {
+          validateHarnessProfile(event.harness_profile);
+          if (
+            !event.harness_profile ||
+            event.harness_profile.config_sha256 !==
+              this.input.agentSnapshot.dsh_profile.config_sha256 ||
+            event.harness_profile.lock_sha256 !==
+              createHash('sha256')
+                .update(this.input.agentSnapshot.dsh_profile.files['pnpm-lock.yaml'])
+                .digest('hex') ||
+            !Array.isArray(event.tools) ||
+            event.tools.length > 256
+          )
+            throw new Error('Missing or invalid prepared DSH tool manifest');
+          this.dshProfileIdentity = event.harness_profile;
+          const manifest = parseDshToolManifest(event.tools);
+          if (dshToolManifestSha256(manifest) !== event.harness_profile.tool_manifest_sha256)
+            throw new Error('DSH tool manifest digest mismatch');
+          for (const tool of manifest) {
+            if (this.dshManagedTools.some((managed) => managed.name === tool.name)) continue;
+            if (
+              !/^[A-Za-z0-9_-]{1,128}$/.test(tool.name) ||
+              this.dshPluginTools.has(tool.name) ||
+              this.bindings.has(tool.name)
+            )
+              throw new Error('DSH plugin tool collision');
+            if (!nativeTools.has(tool.name)) this.dshPluginTools.set(tool.name, tool);
+          }
+          this.dshProjection!.registerPluginTools([...this.dshPluginTools.keys()]);
+        } else if (event.type === 'thread_tree') {
           if (!this.dshProjection || this.turnId)
             throw new Error('DSH lineage restore requires startup');
           this.dshProjection.restoreTree(event.threads);
@@ -1418,17 +1476,22 @@ export class CodexSdkHarness implements AgentHarness {
       )
         throw new Error('Orchestration requires a unique active DSH call');
       this.orchestrationCalls.add(event.id);
-      const args = nativeArguments(event.name, event.arguments);
+      const plugin = this.dshPluginTools.get(event.name);
+      if (!nativeTools.has(event.name) && !plugin)
+        throw new Error('DSH tool is absent from the initialized manifest');
+      const args = plugin ? event.arguments : nativeArguments(event.name, event.arguments);
       this.dshProjection.authorize(event);
       const readOnly = inspection.has(event.name);
       const dispatch = event.name === 'spawn' || event.name === 'fork';
       if (
-        (!readOnly && Object.values(args).some((value) => !value.trim())) ||
+        (!plugin &&
+          !readOnly &&
+          Object.values(args).some((value) => typeof value !== 'string' || !value.trim())) ||
         Buffer.byteLength(JSON.stringify(args)) > 1024 * 1024
       )
         throw new Error('Unsupported DSH orchestration arguments');
       const target =
-        dispatch || event.name === 'list_child_sessions'
+        plugin || dispatch || event.name === 'list_child_sessions'
           ? undefined
           : args.agent_id === this.nativeRootId
             ? ''
@@ -1466,8 +1529,8 @@ export class CodexSdkHarness implements AgentHarness {
       };
       checkLive();
       const binding: Binding = {
-        tool: { name: event.name, inputSchema: { type: 'object' } },
-        policyName: event.name,
+        tool: plugin ?? { name: event.name, inputSchema: { type: 'object' } },
+        policyName: plugin ? 'mcp__orca__' + event.name : event.name,
         call: async () => {
           throw new Error('Native operation');
         },

@@ -6,6 +6,7 @@ import { PreparedAgentSnapshotSchema } from '../contracts/internal.contract.js';
 import { normalizeModelForStorage, type StoredModel } from '../contracts/model-wire.js';
 import { toCanonicalToolName } from '../contracts/toolset-aliasing.js';
 import { resolveHarnessAnnotation, type ResolvedHarness } from '@orca/harness-catalog';
+import { retainedDshProfile } from './dsh-profile.js';
 
 export interface AgentTool {
   type: string;
@@ -72,12 +73,19 @@ export function strictAgentVersionConfiguration(
       throw new SessionAgentSnapshotUnavailableError();
     }
     const model = normalizeModelForStorage(parsedSnapshot.data.model);
+    retainedDshProfile(parsedSnapshot.data);
     if ('error' in model) throw new SessionAgentSnapshotUnavailableError();
     const harness = resolveHarnessAnnotation(parsedSnapshot.data.metadata);
     if ('error' in harness) throw new SessionAgentSnapshotUnavailableError();
     const tools = canonicalizeAgentTools(parsedSnapshot.data.tools);
     const mcpServers = parsedSnapshot.data.mcp_servers;
-    if (validateAgentConfiguration(tools, mcpServers)) {
+    if (
+      validateAgentConfiguration(
+        tools,
+        mcpServers,
+        parsedSnapshot.data.metadata.dsh_profile !== undefined,
+      )
+    ) {
       throw new SessionAgentSnapshotUnavailableError();
     }
     return {
@@ -94,7 +102,11 @@ export function strictAgentVersionConfiguration(
   }
 }
 
-export function validateAgentConfiguration(tools: AgentTool[], servers: unknown[]): string | null {
+export function validateAgentConfiguration(
+  tools: AgentTool[],
+  servers: unknown[],
+  allowPluginTools = false,
+): string | null {
   const serverNames = new Set<string>();
   for (const [index, value] of servers.entries()) {
     if (!isRecord(value)) return `mcp_servers.${index} must be an object`;
@@ -122,6 +134,7 @@ export function validateAgentConfiguration(tools: AgentTool[], servers: unknown[
   const referencedServerNames = new Set<string>();
   for (const [index, tool] of tools.entries()) {
     if (tool.type === 'custom') {
+      if (allowPluginTools) return 'DSH profiles do not support client-executed custom tools';
       if (typeof tool.name !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(tool.name)) {
         return `tools.${index}.name must contain 1-128 letters, digits, underscores, or hyphens`;
       }
@@ -157,7 +170,14 @@ export function validateAgentConfiguration(tools: AgentTool[], servers: unknown[
       }
       continue;
     }
-    const configs = Array.isArray(tool.configs) ? tool.configs : [];
+    const configs = Array.isArray(tool.configs)
+      ? tool.configs
+      : allowPluginTools && isRecord(tool.configs)
+        ? Object.entries(tool.configs).map(([name, config]) => ({
+            ...(isRecord(config) ? config : {}),
+            name,
+          }))
+        : [];
     const configNames = new Set<string>();
     for (const [configIndex, configValue] of configs.entries()) {
       if (!isRecord(configValue) || typeof configValue.name !== 'string') {
@@ -165,9 +185,15 @@ export function validateAgentConfiguration(tools: AgentTool[], servers: unknown[
       }
       if (configNames.has(configValue.name)) return `tools.${index}.configs names must be unique`;
       configNames.add(configValue.name);
-      if (tool.type === 'agent_toolset' && !builtins.has(configValue.name)) {
+      if (tool.type === 'agent_toolset' && !builtins.has(configValue.name) && !allowPluginTools) {
         return `tools.${index}.configs.${configIndex}.name is not a built-in tool`;
       }
+      if (
+        tool.type === 'agent_toolset' &&
+        allowPluginTools &&
+        !/^[A-Za-z0-9_-]{1,128}$/.test(configValue.name)
+      )
+        return `tools.${index}.configs.${configIndex}.name is invalid`;
       const policyError = validatePermissionPolicy(
         configValue.permission_policy,
         `tools.${index}.configs.${configIndex}.permission_policy`,

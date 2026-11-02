@@ -49,4 +49,22 @@ export function validateDshCheckpoint(state: unknown): void {
     )
       throw new Error('invalid DSH checkpoint encoding');
   }
+  const manifest = JSON.parse(
+    Buffer.from((value.files as Record<string, string>)['orca.json']!, 'base64').toString('utf8'),
+  );
+  if (manifest?.profile === 'orca-managed-custom-v1') {
+    const profile = manifest.harness_profile;
+    if (
+      !profile ||
+      profile.version !== 1 ||
+      Object.keys(profile).sort().join(',') !==
+        'config_sha256,lock_sha256,runtime_compatibility,tool_manifest_sha256,version' ||
+      ['config_sha256', 'lock_sha256', 'runtime_compatibility', 'tool_manifest_sha256'].some(
+        (key) => typeof profile[key] !== 'string' || !/^[0-9a-f]{64}$/.test(profile[key]),
+      )
+    )
+      throw new Error('invalid DSH checkpoint harness profile');
+  } else if (manifest?.harness_profile !== undefined) {
+    throw new Error('invalid DSH checkpoint profile discriminator');
+  }
 }

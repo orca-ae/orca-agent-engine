@@ -3,6 +3,15 @@
 
 import type { Tool, CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import type { SdkTerminalUsage } from './usage.js';
+import type { DshProfileDescriptor } from '@orca/harness-catalog';
+
+export interface DshHarnessProfile {
+  version: 1;
+  config_sha256: string;
+  lock_sha256: string;
+  tool_manifest_sha256: string;
+  runtime_compatibility: string;
+}
 
 /** Private provider-tagged history. Never part of the public transcript. */
 export interface SdkCheckpoint {
@@ -49,6 +58,9 @@ export interface StartCommand {
   /** Pi-only native proxy origin; apiKey is then an Orca JWT, never an upstream key. */
   piGatewayUrl?: string;
   dshGatewayUrl?: string;
+  dshProfile?: DshProfileDescriptor;
+  /** Complete image-owned tool schemas, independent of Agent enablement and MCP discovery. */
+  dshManagedTools?: Tool[];
   tools: Tool[];
   archivedThreadSubpaths?: string[];
   checkpoint?: SdkCheckpoint;
@@ -90,11 +102,12 @@ export type WorkerEvent =
         | 'send_message'
         | 'interrupt_agent'
         | 'list_child_sessions'
-        | 'read_child_session';
+        | 'read_child_session'
+        | (string & {});
       arguments: Record<string, unknown>;
       origin: WorkerEventOrigin;
     }
-  | { type: 'ready' }
+  | { type: 'ready'; harness_profile?: DshHarnessProfile; tools?: Tool[] }
   | { type: 'thread_tree'; threads: Array<{ subpath: string; parentSubpath: string }> }
   | { type: 'event'; event: SdkEvent; origin?: WorkerEventOrigin }
   | {

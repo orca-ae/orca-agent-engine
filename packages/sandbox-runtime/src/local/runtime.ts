@@ -745,6 +745,8 @@ export class LocalSandboxRuntime implements SandboxRuntime {
   }
 
   async acquire(env: EnvironmentSpec): Promise<SandboxHandle> {
+    if (env.dshProfile)
+      throw new Error('DSH profiles require OpenSandbox native-profile preparation');
     void env;
     const id = `sbx_local_${++nextId}_${Date.now().toString(36)}`;
     const layout = await acquireSessionWorkDir({

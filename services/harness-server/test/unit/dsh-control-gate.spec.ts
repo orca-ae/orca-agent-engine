@@ -19,6 +19,31 @@ import type { RegistryClient } from '../../src/clients/registry.js';
 import type { TranscriptStore } from '@orca/transcript-store';
 import { createServer } from 'node:http';
 import { DshSdkWorker } from '@orca/dsh-harness';
+import { dshToolManifestSha256 } from '@orca/sdk-harness';
+import { dshProfileConfigSha256 } from '@orca/harness-catalog';
+import { createHash } from 'node:crypto';
+
+const profileFiles = {
+  'cordis.patch.yml': '[]',
+  'package.json': '{}',
+  'pnpm-lock.yaml': '',
+  'pnpm-workspace.yaml': '',
+};
+const customProfile = {
+  version: 1 as const,
+  source_file_id: 'file_profile',
+  source_sha256: 'a'.repeat(64),
+  config_sha256: dshProfileConfigSha256(profileFiles),
+  files: profileFiles,
+};
+const pluginTools = [{ name: 'business_probe', inputSchema: { type: 'object' as const } }];
+const customIdentity = {
+  version: 1 as const,
+  config_sha256: customProfile.config_sha256,
+  lock_sha256: createHash('sha256').update('').digest('hex'),
+  tool_manifest_sha256: dshToolManifestSha256(pluginTools),
+  runtime_compatibility: 'd'.repeat(64),
+};
 
 const child = 'subagents/11111111-1111-4111-8111-111111111111';
 const stopped: CodexSdkHarness[] = [];
@@ -60,8 +85,11 @@ function fixture(
         refreshOptions: () => {},
         handle: async (command) => {
           replies.push(command);
-          if (command.type === 'start')
+          if (command.type === 'start') {
             emit({ type: 'thread_tree', threads: [{ subpath: child, parentSubpath: '' }] });
+            if (command.dshProfile)
+              emit({ type: 'ready', harness_profile: customIdentity, tools: pluginTools });
+          }
           if (command.type === 'submit') await run();
           if (command.type === 'interrupt') await onInterrupt?.();
           if (command.type === 'tool_result') await onToolResult?.();
@@ -88,7 +116,7 @@ function fixture(
   };
   const request = (
     id: string,
-    name: 'spawn' | 'send_message' = 'spawn',
+    name: 'spawn' | 'send_message' | 'business_probe' = 'spawn',
     args = name === 'spawn'
       ? { description: 'task', prompt: 'work' }
       : { agent_id: child.slice(10), message: 'work' },
@@ -134,6 +162,66 @@ function fixture(
   };
 }
 const message = { id: 'evt_turn', kind: 'user.message', payload: { content: 'work' } };
+
+it('keeps plugin confirmation on the existing permission channel before authorizing side effects', async () => {
+  const f = fixture({
+    agentSnapshot: {
+      model_provider: 'deepseek',
+      model_id: 'deepseek-v4-flash',
+      dsh_profile: customProfile,
+      tool_permission_policies: { mcp__orca__business_probe: 'always_ask' },
+    },
+  });
+  let allowed: boolean | undefined;
+  f.setRun(async () => {
+    allowed = await f.request('plugin_confirm', 'business_probe');
+    f.complete();
+  });
+  await f.harness.start(f.input);
+  await f.harness.submit(message);
+  expect(allowed).toBeUndefined();
+  expect(f.harness.hasPendingRequiredAction()).toBe(true);
+  await f.harness.submit({
+    id: 'evt_approve_plugin',
+    kind: 'user.tool_confirmation',
+    payload: { tool_use_id: 'evt_plugin_confirm', result: 'allow' },
+  });
+  await vi.waitFor(() => expect(allowed).toBe(true));
+  expect(
+    f.events.filter((event) => ['agent.tool_use', 'agent.tool_result'].includes(event.kind)),
+  ).toHaveLength(0);
+});
+
+it.each(['allow', 'deny', 'wildcard', 'absent'] as const)(
+  'authorizes plugin tools through shared toolset defaults and policies: %s',
+  async (policy) => {
+    const f = fixture({
+      agentSnapshot: {
+        model_provider: 'deepseek',
+        model_id: 'deepseek-v4-flash',
+        dsh_profile: customProfile,
+        tool_permission_policies:
+          policy === 'wildcard'
+            ? { 'mcp__orca__*': 'always_allow' }
+            : policy === 'absent'
+              ? {}
+              : { mcp__orca__business_probe: policy === 'allow' ? 'always_allow' : 'always_deny' },
+      },
+    });
+    let allowed: boolean | undefined;
+    f.setRun(async () => {
+      allowed = await f.request('plugin', 'business_probe');
+      f.complete();
+    });
+    await f.harness.start(f.input);
+    await f.harness.submit(message);
+    await vi.waitFor(() => expect(allowed).toBe(policy !== 'deny'));
+    expect(f.events.some((event) => event.kind === 'agent.tool_use')).toBe(false);
+    expect(f.events.find((event) => event.kind === 'session.status_running')?.payload).toEqual({
+      harness_profile: customIdentity,
+    });
+  },
+);
 
 it.each([false, true])(
   'joins confirmed Bash exit when interrupted SDK submit rejects=%s',

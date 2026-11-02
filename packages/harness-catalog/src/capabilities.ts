@@ -8,6 +8,7 @@ import {
   type ResolvedHarness,
 } from './catalog.js';
 import { HARNESS_MODEL_POLICIES, type HarnessModelPolicy } from './harness-models.js';
+import { validateDshProfileAnnotation } from './dsh-profile.js';
 import {
   canonicalAgentToolNames,
   toolsetPermissionPolicies,
@@ -266,6 +267,11 @@ export function validateHarnessFeatures(
     tools?: AgentToolEntry[] | null;
   },
 ): string | null {
+  try {
+    validateDshProfileAnnotation(metadata ?? {});
+  } catch (error) {
+    return error instanceof Error ? error.message : 'Invalid DSH profile annotation';
+  }
   const selection = resolveHarnessAnnotation(metadata);
   if ('error' in selection) return selection.error;
   if (

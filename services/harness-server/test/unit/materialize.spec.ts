@@ -3,6 +3,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { isAgentEventId } from '@orca/agent-event-contract';
+import { DSH_PROFILE_HOME } from '@orca/harness-catalog';
 import { materializeResources } from '../../src/sandbox/materialize.js';
 import type {
   MountHandle,
@@ -107,7 +108,7 @@ describe('materializeResources', () => {
         ],
         chooseStrategy: () => strategy,
       }),
-    ).rejects.toThrow(/overlaps reserved Skill root/);
+    ).rejects.toThrow(/overlaps reserved root/);
     expect(strategy.activations).toBe(0);
   });
 
@@ -143,7 +144,7 @@ describe('materializeResources', () => {
         ],
         chooseStrategy: () => strategy,
       }),
-    ).rejects.toThrow(/resolves across reserved Skill root/);
+    ).rejects.toThrow(/resolves across reserved root/);
     expect(strategy.activations).toBe(0);
   });
 });
@@ -227,3 +228,93 @@ class FakeSandboxHandle implements SandboxHandle {
 
   async destroy(): Promise<void> {}
 }
+
+function profileResource(mountPath: string) {
+  return {
+    id: 'sesrsc_' + mountPath.replaceAll('/', '_'),
+    type: 'file' as const,
+    file_id: 'file_test',
+    memory_store_id: null,
+    repo_ref: null,
+    mount_path: mountPath,
+    access: 'read_only' as const,
+    instructions: null,
+    attached_at: new Date().toISOString(),
+    detached_at: null,
+    mount_strategy: null,
+  };
+}
+
+it.each([
+  DSH_PROFILE_HOME,
+  DSH_PROFILE_HOME + '/sessions',
+  '/app',
+  DSH_PROFILE_HOME + '/profiles/../sessions',
+  '/mnt/private-alias',
+])('rejects profile resource overlap before activation: %s', async (mountPath) => {
+  const strategy = new RecordingMountStrategy();
+  const sandbox = new FakeSandboxHandle(
+    new Map([['/mnt/private-alias', DSH_PROFILE_HOME + '/sessions']]),
+  );
+  await expect(
+    materializeResources({
+      workspaceId: 'ws_x',
+      sessionId: 'ses_y',
+      sandbox,
+      resources: [profileResource(mountPath)],
+      reservedRoot: DSH_PROFILE_HOME,
+      chooseStrategy: () => strategy,
+    }),
+  ).rejects.toThrow(/reserved root/);
+  expect(strategy.activations).toBe(0);
+});
+
+it('rechecks aliases introduced by earlier resource activations', async () => {
+  const paths = new Map<string, string>();
+  const sandbox = new FakeSandboxHandle(paths);
+  const strategy = new RecordingMountStrategy();
+  const originalActivate = strategy.activate.bind(strategy);
+  strategy.activate = async (handle, resource) => {
+    const result = await originalActivate(handle, resource);
+    paths.set('/mnt/later', DSH_PROFILE_HOME + '/sessions');
+    return result;
+  };
+  await expect(
+    materializeResources({
+      workspaceId: 'ws_x',
+      sessionId: 'ses_y',
+      sandbox,
+      resources: [profileResource('/mnt/first'), profileResource('/mnt/later')],
+      reservedRoot: DSH_PROFILE_HOME,
+      chooseStrategy: () => strategy,
+    }),
+  ).rejects.toThrow(/reserved root/);
+  expect(strategy.activations).toBe(1);
+});
+
+it.each([undefined, DSH_PROFILE_HOME])(
+  'keeps disjoint resource activation valid: %s',
+  async (reservedRoot) => {
+    const strategy = new RecordingMountStrategy();
+    const result = await materializeResources({
+      workspaceId: 'ws_x',
+      sessionId: 'ses_y',
+      sandbox: new FakeSandboxHandle(),
+      resources: [profileResource('/workspace/project')],
+      ...(reservedRoot ? { reservedRoot } : {}),
+      chooseStrategy: () => strategy,
+    });
+    expect(result.mounts).toHaveLength(1);
+  },
+);
+
+it('does not reserve DSH paths for other harnesses', async () => {
+  const result = await materializeResources({
+    workspaceId: 'ws_x',
+    sessionId: 'ses_y',
+    sandbox: new FakeSandboxHandle(),
+    resources: [profileResource(DSH_PROFILE_HOME + '/sessions')],
+    chooseStrategy: () => new RecordingMountStrategy(),
+  });
+  expect(result.mounts).toHaveLength(1);
+});

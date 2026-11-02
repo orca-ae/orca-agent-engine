@@ -18,6 +18,7 @@
     "format:check": "prettier --check 'src/**/*.ts' 'test/**/*.ts' '*.{json,md}'"
   },
   "dependencies": {
+    "@orca/harness-catalog": "workspace:*",
     "@anthropic-ai/sandbox-runtime": "^0.0.50"
   },
   "devDependencies": {

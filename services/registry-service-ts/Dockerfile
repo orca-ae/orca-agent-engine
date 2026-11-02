@@ -56,7 +56,8 @@ COPY packages/harness-tunnel/tsconfig.json ./packages/harness-tunnel/
 COPY packages/harness-tunnel/src ./packages/harness-tunnel/src
 COPY packages/guardrails/tsconfig.json ./packages/guardrails/
 COPY packages/guardrails/src ./packages/guardrails/src
-RUN pnpm -F @orca/agent-event-contract build && \
+RUN pnpm -F @orca/harness-catalog build && \
+    pnpm -F @orca/agent-event-contract build && \
     pnpm -F @orca/file-store build && \
     pnpm -F @orca/memory-store build && \
     pnpm -F @orca/skill-store build && \
@@ -65,8 +66,7 @@ RUN pnpm -F @orca/agent-event-contract build && \
     pnpm -F @orca/sandbox-runtime build && \
     pnpm -F @orca/cloud-sandbox build && \
     pnpm -F @orca/harness-tunnel build && \
-    pnpm -F @orca/guardrails build && \
-    pnpm -F @orca/harness-catalog build
+    pnpm -F @orca/guardrails build
 # Copy and build the service itself
 COPY services/registry-service-ts/tsconfig.json ./services/registry-service-ts/
 COPY services/registry-service-ts/buf.gen.yaml ./services/registry-service-ts/

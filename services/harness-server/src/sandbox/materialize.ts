@@ -13,8 +13,8 @@ import type {
   MountStrategyName,
 } from './mounts/mount-strategy.js';
 import {
-  assertCanonicalPathOutsideSkillsRoot,
-  assertMountPathOutsideSkillsRoot,
+  assertCanonicalPathOutsideReservedRoot,
+  assertMountPathOutsideReservedRoot,
 } from './skills/materialize.js';
 
 /**
@@ -40,6 +40,8 @@ export interface MaterializeInput {
   sessionId: string;
   sandbox: SandboxHandle;
   resources: SessionResourceEntry[];
+  /** Additional harness-private root, checked before each resource activation. */
+  reservedRoot?: string;
   /** Builds a per-resource strategy. Called once per file resource. */
   chooseStrategy: ChooseMountStrategy;
 }
@@ -75,7 +77,7 @@ export async function materializeResources(input: MaterializeInput): Promise<Mat
     if (!r.file_id) {
       throw new Error(`file resource ${r.id} is missing file_id`);
     }
-    assertMountPathOutsideSkillsRoot(r.mount_path);
+    assertMountPathOutsideReservedRoot(r.mount_path);
     const resource: MountResource = {
       id: r.id,
       type: 'file',
@@ -85,7 +87,13 @@ export async function materializeResources(input: MaterializeInput): Promise<Mat
     };
     const override = normalizeMountStrategy(r.mount_strategy);
     const strategy = input.chooseStrategy(resource, override);
-    await assertCanonicalPathOutsideSkillsRoot(input.sandbox, resource.mountPath);
+    await assertCanonicalPathOutsideReservedRoot(input.sandbox, resource.mountPath);
+    if (input.reservedRoot)
+      await assertCanonicalPathOutsideReservedRoot(
+        input.sandbox,
+        resource.mountPath,
+        input.reservedRoot,
+      );
     const handle = await strategy.activate(input.sandbox, resource);
     mounts.push({ handle, strategy });
 

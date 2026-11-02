@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import fs from 'node:fs';
+import { parseDshApprovedProfiles, type DshApprovedProfiles } from './domain/dsh-profile.js';
 import { isIP } from 'node:net';
 import type { ConnectionOptions as TlsConnectionOptions } from 'node:tls';
 import { SEED_PRICE_PROVIDER } from '@orca/harness-catalog';
@@ -32,6 +33,7 @@ export interface KafkaClientConfig {
 }
 
 export interface ServiceConfig {
+  dshApprovedProfiles: DshApprovedProfiles;
   httpPort: number;
   batchReadsEnabled: boolean;
   apiKeyProofCacheEnabled: boolean;
@@ -678,6 +680,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServiceConfig 
   const fileStorePoolMax = parsePositiveInteger(env, 'FILESTORE_POOL_MAX', 10);
   const memorystorePoolMax = parsePositiveInteger(env, 'MEMORYSTORE_POOL_MAX', 10);
   return {
+    dshApprovedProfiles: parseDshApprovedProfiles(env['DSH_APPROVED_PROFILES']),
     httpPort: Number(env['HTTP_PORT'] ?? 8080),
     batchReadsEnabled: parseBooleanEnv(env, 'REGISTRY_BATCH_READS_ENABLED', true),
     apiKeyProofCacheEnabled: parseBooleanEnv(env, 'REGISTRY_API_KEY_PROOF_CACHE_ENABLED', true),

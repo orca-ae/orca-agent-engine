@@ -15,6 +15,7 @@
  */
 
 import type { SandboxCallOptions } from './opensandbox-cancellation.js';
+import type { DshProfileDescriptor } from '@orca/harness-catalog';
 import type { ReadPage, ReadPageInput } from './read-page.js';
 
 export interface ToolCall {
@@ -324,6 +325,8 @@ export interface SandboxCapabilities {
   supportsPerCallCancellation?: boolean;
   /** Provider prepares package rootfs in a credential-free, completed init container. */
   supportsEnvironmentPackages?: boolean;
+  /** Native-profile init plus read-only mount/revision verification on acquired sandboxes. */
+  readonly supportsDshProfiles?: boolean;
   /**
    * Whether the runtime can mount FUSE filesystems inside the sandbox.
    * E2B with the `orca-default` custom template advertises true; the
@@ -348,6 +351,7 @@ export type PackageManager = (typeof packageManagers)[number];
 export type Packages = Partial<Record<PackageManager, string[]>>;
 
 export interface EnvironmentSpec {
+  dshProfile?: DshProfileDescriptor;
   packages?: Packages;
   networking?: Record<string, unknown>;
   /** Container image to boot (colocated: the harness image). */

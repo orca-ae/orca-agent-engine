@@ -15,6 +15,7 @@ import {
   TriggerSessionTemplateError,
 } from './trigger-cron.js';
 import { newId } from './versioning.js';
+import type { DshApprovedProfiles } from './dsh-profile.js';
 
 export const TRIGGER_RECONCILE_INTERVAL_MS = 5_000;
 export const TRIGGER_RECONCILE_BATCH_SIZE = 100;
@@ -186,7 +187,7 @@ export async function reconcileDueAgentTriggers(
 
 export async function dispatchPendingAgentTriggerFires(
   db: DbClient,
-  options: { now?: Date; batchSize?: number } = {},
+  options: { now?: Date; batchSize?: number; dshApprovedProfiles?: DshApprovedProfiles } = {},
 ): Promise<TriggerDispatcherResult> {
   const now = options.now ?? new Date();
   const result: TriggerDispatcherResult = {
@@ -272,6 +273,9 @@ export async function dispatchPendingAgentTriggerFires(
 
       try {
         const creation = await createSessionInTransaction(tx, {
+          ...(options.dshApprovedProfiles
+            ? { dshApprovedProfiles: options.dshApprovedProfiles }
+            : {}),
           id: fire.plannedSessionId,
           workspaceId: trigger.workspaceId,
           agentId: trigger.agentId,

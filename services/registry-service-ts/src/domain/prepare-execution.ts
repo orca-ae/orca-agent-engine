@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
+  DSH_PROFILE_CAPABILITY,
   bindStoredHarness,
   resolveHarnessAnnotation,
   validateHarnessDeployment,
@@ -10,6 +11,12 @@ import {
   validateHarnessModel,
   type AgentToolEntry,
 } from '@orca/harness-catalog';
+import {
+  retainedDshProfile,
+  requireDshProfileApproval,
+  requireDshProfileEnvironment,
+  type DshApprovedProfiles,
+} from './dsh-profile.js';
 import type { FileStore } from '@orca/file-store';
 import type { MemoryStore } from '@orca/memory-store';
 import { and, eq, inArray, isNull, isNotNull, or } from 'drizzle-orm';
@@ -158,6 +165,8 @@ export async function loadEffectiveSessionAgentModels(input: {
 }
 
 export async function prepareExecution(input: {
+  capabilities?: string[];
+  dshApprovedProfiles?: DshApprovedProfiles;
   db: DbClient;
   fileStore: FileStore;
   memoryStore?: MemoryStore;
@@ -252,6 +261,8 @@ export async function prepareGatewayGuardrails(input: {
 }
 
 async function buildPreparedExecution(input: {
+  capabilities?: string[];
+  dshApprovedProfiles?: DshApprovedProfiles;
   db: DbClient;
   fileStore: FileStore;
   memoryStore?: MemoryStore;
@@ -349,6 +360,22 @@ async function buildPreparedExecution(input: {
   const environment = session.environmentId
     ? await loadEnvironment(db, workspaceId, session.environmentId)
     : null;
+  try {
+    if (Object.hasOwn(asRecord(session.metadata), 'dsh_profile'))
+      throw new Error('Session metadata.dsh_profile is reserved for Agents');
+    const profile = retainedDshProfile(primaryLoaded.snapshot);
+    if (profile) {
+      if (!input.capabilities?.includes(DSH_PROFILE_CAPABILITY))
+        throw new Error('Harness does not advertise dsh_profile_v1');
+      requireDshProfileApproval(input.dshApprovedProfiles ?? {}, workspaceId, profile);
+      requireDshProfileEnvironment(environment);
+    }
+  } catch (error) {
+    throw new InvalidRuntimeBindingError(
+      'dsh_profile',
+      error instanceof Error ? error.message : 'Invalid DSH profile',
+    );
+  }
   const vaultCredentialMetadata = await loadVaultCredentials(db, workspaceId, session.vaultIds);
   const resources = await loadResources({
     db,
@@ -661,7 +688,7 @@ function loadedAgentFromSnapshot(
 ): LoadedAgent {
   const parsed = PreparedAgentSnapshotSchema.safeParse(rawSnapshot);
   if (!parsed.success || parsed.data.id !== agentId || parsed.data.version !== version) {
-    throw new Error(`invalid agent version snapshot ${agentId}@${version}`);
+    throw new InvalidRuntimeBindingError('agent_version', `${agentId}@${version}`);
   }
   try {
     parsed.data.metadata = bindStoredHarness(
@@ -669,6 +696,7 @@ function loadedAgentFromSnapshot(
       harnessType,
       (rawSnapshot as Record<string, unknown>).harness_type,
     );
+    retainedDshProfile(parsed.data);
   } catch {
     throw new InvalidRuntimeBindingError(
       'agent_version',

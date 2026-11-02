@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { HarnessTurnRequest, HarnessTurnSnapshot } from '@orca/harness-catalog';
+import { parseDshProfileDescriptor, type DshProfileDescriptor } from '@orca/harness-catalog';
 /**
  * Registry HTTP client used by the harness-server dispatcher.
  *
@@ -60,6 +61,7 @@ export interface SkillDescriptor {
 }
 
 export interface AgentRecord {
+  dsh_profile?: DshProfileDescriptor;
   id: string;
   name: string;
   workspace_id: string;
@@ -263,11 +265,12 @@ export class RegistryClient {
     workspaceId: string;
     sessionId: string;
     signal?: AbortSignal;
+    capabilities?: string[];
   }): Promise<PreparedExecutionV2 | null> {
     const res = await this.request(`${this.sessionBase(input)}/executions:prepare`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: '{}',
+      body: JSON.stringify(input.capabilities ? { capabilities: input.capabilities } : {}),
       ...(input.signal ? { signal: input.signal } : {}),
     });
     if (res.status === 404) return null;
@@ -288,6 +291,8 @@ export class RegistryClient {
       );
     }
     const wire = (await res.json()) as PreparedExecutionWire;
+    if (wire.primary_agent.dsh_profile !== undefined)
+      wire.primary_agent.dsh_profile = parseDshProfileDescriptor(wire.primary_agent.dsh_profile);
     if (wire.schema_version !== 2) {
       throw new Error('prepareExecution returned an unsupported schema version');
     }

@@ -10,16 +10,27 @@ import { dirname, join } from 'node:path';
 import { JsonRpcLineTransport } from '@deepseek-ai/dsh-sdk-protocol';
 import {
   assertSdkTerminalUsage,
+  parseDshToolManifest,
+  dshToolManifestSha256,
   sdkExecutionBudgetMs,
   sdkTimeoutSignal,
   type SdkWorker,
   type SdkTurnOptions,
+  type DshHarnessProfile,
 } from '@orca/sdk-harness';
-import { dshModel, validateHarnessModel } from '@orca/harness-catalog';
+import {
+  dshModel,
+  validateHarnessModel,
+  DSH_PROFILE_HOME,
+  parseDshProfileDescriptor,
+} from '@orca/harness-catalog';
+import { validateMountedProfile } from './profile.js';
 import {
   assertDshCheckpointInstructions,
   decodeCheckpoint,
   assertDshCheckpointModel,
+  assertDshCheckpointProfile,
+  validateHarnessProfile,
   DSH_SDK_VERSION,
   NATIVE_ID,
 } from './checkpoint.js';
@@ -89,6 +100,9 @@ export class DshSdkWorker implements SdkWorker {
   private childExited = false;
   private rpc: JsonRpcLineTransport | undefined;
   private home: string | undefined;
+  private customHomeOwned = false;
+  private initializedProfile?: DshHarnessProfile;
+  private initializedTools?: DshStartCommand['tools'];
   private input?: DshStartCommand;
   private archived = new Set<string>();
   private active: Promise<void> | undefined;
@@ -195,7 +209,12 @@ export class DshSdkWorker implements SdkWorker {
       this.starting = this.start(command);
       try {
         await this.starting;
-        this.emit({ type: 'ready' });
+        this.emit({
+          type: 'ready',
+          ...(this.initializedProfile
+            ? { harness_profile: this.initializedProfile, tools: this.initializedTools }
+            : {}),
+        });
       } catch (error) {
         try {
           await this.reap();
@@ -253,6 +272,8 @@ export class DshSdkWorker implements SdkWorker {
   }
 
   private async start(input: DshStartCommand): Promise<void> {
+    if (input.dshManagedTools && !input.dshProfile)
+      throw new Error('DSH plugin declarations require a custom profile');
     if (input.tools.some((tool) => nativeTools.has(tool.name)))
       throw new Error('Reserved DSH native tool name');
     this.archived = archivedSubpaths(input.archivedThreadSubpaths);
@@ -281,23 +302,34 @@ export class DshSdkWorker implements SdkWorker {
     }
     this.input = input;
     const require = createRequire(import.meta.url);
-    this.home = await mkdtemp(join(this.launchOptions?.homeRoot ?? tmpdir(), 'orca-dsh-'));
+    if (input.dshProfile) {
+      input.dshProfile = parseDshProfileDescriptor(input.dshProfile);
+      input.dshManagedTools = parseDshToolManifest(input.dshManagedTools ?? []);
+      await mkdir(DSH_PROFILE_HOME, { recursive: true });
+      await writeFile(join(DSH_PROFILE_HOME, '.worker'), '', { flag: 'wx' });
+      this.customHomeOwned = true;
+      this.home = DSH_PROFILE_HOME;
+      // Every worker gets fresh history; checkpoint restore is the sole recovery source.
+      await rm(join(this.home, 'sessions'), { recursive: true, force: true });
+    } else {
+      this.home = await mkdtemp(join(this.launchOptions?.homeRoot ?? tmpdir(), 'orca-dsh-'));
+    }
     const profile = join(this.home, 'profiles/orca-managed');
-    await cp(
-      dirname(require.resolve('@orca/dsh-harness/profile/orca-managed/package.json')),
-      profile,
-      {
-        recursive: true,
-      },
+    const imageProfile = dirname(
+      require.resolve('@orca/dsh-harness/profile/orca-managed/package.json'),
     );
-    const patch = join(profile, 'cordis.patch.yml');
+    if (!input.dshProfile) await cp(imageProfile, profile, { recursive: true });
+    const patch = input.dshProfile
+      ? join(this.home, 'trusted.patch.yml')
+      : join(profile, 'cordis.patch.yml');
     await writeFile(
       patch,
-      (await readFile(patch, 'utf8')).replace(
+      (await readFile(join(imageProfile, 'cordis.patch.yml'), 'utf8')).replace(
         'ORCA_DSH_PLUGIN',
         JSON.stringify(require.resolve('@orca/dsh-harness/plugin')),
       ),
     );
+    if (input.dshProfile) await validateMountedProfile(input.dshProfile, patch);
     if (input.checkpoint) {
       for (const [name, data] of Object.entries(decodeCheckpoint(input.checkpoint))) {
         if (name === 'orca.json') continue;
@@ -314,7 +346,7 @@ export class DshSdkWorker implements SdkWorker {
     const cli = require.resolve('@deepseek-ai/dsh/lib/bin.js');
     const child = await (this.launchOptions?.launch ?? launchLocal)({
       executable: process.execPath,
-      args: [cli, '--profile', 'orca-managed'],
+      args: [cli, '--profile', 'orca-managed', ...(input.dshProfile ? ['--patch', patch] : [])],
       cwd: input.root,
       env: {
         PATH: process.env.PATH ?? '',
@@ -393,8 +425,10 @@ export class DshSdkWorker implements SdkWorker {
           if (event.fatal) this.fatal = true;
         }
         if (event.type === 'done') this.cancelTools();
-        if (event.type === 'checkpoint')
+        if (event.type === 'checkpoint') {
           assertDshCheckpointInstructions(event.checkpoint, input.system);
+          assertDshCheckpointProfile(event.checkpoint, this.initializedProfile);
+        }
         if (event.type === 'event') {
           const normalized = event.event;
           if (normalized.type === 'turn.completed') assertSdkTerminalUsage(normalized.usage);
@@ -424,7 +458,8 @@ export class DshSdkWorker implements SdkWorker {
         this.closing ||
         this.fatal ||
         (authorization
-          ? !nativeTools.has(String(value.name))
+          ? !nativeTools.has(String(value.name)) &&
+            !this.initializedTools?.some((tool) => tool.name === value.name)
           : nativeTools.has(String(value.name)) ||
             !input.tools.some((tool) => tool.name === value.name))
       )
@@ -474,9 +509,10 @@ export class DshSdkWorker implements SdkWorker {
       )
         throw new Error('DSH call origin outside owned tree');
       assertNotArchived(origin.subpath, this.archived, (path) => this.parents.get(path));
-      const args = authorization
-        ? nativeArguments(String(value.name), value.arguments)
-        : (value.arguments as Record<string, unknown>);
+      const args =
+        authorization && nativeTools.has(String(value.name))
+          ? nativeArguments(String(value.name), value.arguments)
+          : (value.arguments as Record<string, unknown>);
       return new Promise((resolve) => {
         this.pending.set(id, { resolve, subpath: origin.subpath, authorization });
         this.emit({
@@ -492,7 +528,29 @@ export class DshSdkWorker implements SdkWorker {
     const initialized = (await rpc.request('initialize', input, AbortSignal.timeout(30000))) as {
       threadId: string;
       threads: Array<{ subpath: string; parentSubpath: string }>;
+      harness_profile?: DshHarnessProfile;
+      tools?: DshStartCommand['tools'];
     };
+    if (input.dshProfile) {
+      validateHarnessProfile(initialized.harness_profile);
+      if (
+        !Array.isArray(initialized.tools) ||
+        initialized.tools.length > 256 ||
+        Buffer.byteLength(JSON.stringify(initialized.tools)) > 1024 * 1024
+      )
+        throw new Error('Invalid DSH initialized tool manifest');
+      if (initialized.harness_profile.config_sha256 !== input.dshProfile.config_sha256)
+        throw new Error('DSH initialized profile differs from prepared execution');
+      this.initializedProfile = initialized.harness_profile;
+      this.initializedTools = parseDshToolManifest(initialized.tools);
+      if (
+        dshToolManifestSha256(this.initializedTools) !==
+        this.initializedProfile.tool_manifest_sha256
+      )
+        throw new Error('DSH initialized tool manifest digest mismatch');
+    } else if (initialized.harness_profile !== undefined)
+      throw new Error('Unexpected custom DSH identity');
+    if (input.checkpoint) assertDshCheckpointProfile(input.checkpoint, this.initializedProfile);
     const reached = new Set(['']);
     if (!Array.isArray(initialized.threads) || initialized.threads.length > 127)
       throw new Error('Invalid DSH private lineage');
@@ -569,7 +627,16 @@ export class DshSdkWorker implements SdkWorker {
       }
     }
     if (this.home) {
-      await rm(this.home, { recursive: true, force: true });
+      if (this.customHomeOwned) {
+        for (const path of [
+          'sessions',
+          'trusted.patch.yml',
+          'profiles/orca-managed/cordis.yml',
+          '.worker',
+        ])
+          await rm(join(this.home, path), { recursive: true, force: true });
+        this.customHomeOwned = false;
+      } else await rm(this.home, { recursive: true, force: true });
       this.home = undefined;
     }
   }

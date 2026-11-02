@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { CodexRunnerAccounting } from './domain/codex-runner-accounting.js';
+import type { DshApprovedProfiles } from './domain/dsh-profile.js';
 import { saveRunnerHarnessState } from './domain/harness-state.js';
 import { buildRunnerResourcesFactory } from './domain/runner-resources-factory.js';
 import { loadSessionExecutionOwner } from './domain/session-harness-binding.js';
@@ -162,6 +163,7 @@ export interface SseConfig {
 }
 
 export interface BuildAppOptions {
+  dshApprovedProfiles?: DshApprovedProfiles;
   db: DbClient;
   /** Disable to restore the per-item Session/Thread/Trigger and Agent list readers. */
   batchReadsEnabled?: boolean;
@@ -918,7 +920,10 @@ function buildSurfaceApp(
     }
 
     registerSkillsRoutes(app, opts.db, opts.skillStore);
-    registerAgentsRoutes(app, opts.db, opts.batchReadsEnabled);
+    registerAgentsRoutes(app, opts.db, opts.batchReadsEnabled, {
+      fileStore: opts.fileStore,
+      ...(opts.dshApprovedProfiles ? { approved: opts.dshApprovedProfiles } : {}),
+    });
     registerTriggerRoutes(app, opts.db, opts.batchReadsEnabled);
     // The environment-claim TTL is threaded through so the public `work_stats`
     // route's "worker connected" liveness uses the same staleness boundary the
@@ -951,6 +956,7 @@ function buildSurfaceApp(
       opts.environmentLaunchLifecycle,
       opts.secretStore,
       opts.batchReadsEnabled,
+      opts.dshApprovedProfiles,
     );
     registerVaultsRoutes(app, opts.db, opts.secretStore);
     registerVaultCredentialRoutes(app, opts.db, {
@@ -1187,6 +1193,7 @@ function buildSurfaceApp(
       opts.sessionJwtLlmPolicy,
       opts.fetchImpl,
       {
+        ...(opts.dshApprovedProfiles ? { dshApprovedProfiles: opts.dshApprovedProfiles } : {}),
         ...(opts.llmJwtTtlSecs !== undefined ? { llmJwtTtlSecs: opts.llmJwtTtlSecs } : {}),
         ...(opts.environmentClaimTtlMs !== undefined
           ? { environmentClaimTtlMs: opts.environmentClaimTtlMs }

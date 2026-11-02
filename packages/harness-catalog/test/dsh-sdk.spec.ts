@@ -62,6 +62,38 @@ const checkpoint = {
   },
 };
 
+it('rejects malformed custom checkpoint identity and discriminator confusion', () => {
+  const identity = {
+    version: 1,
+    config_sha256: 'a'.repeat(64),
+    lock_sha256: 'b'.repeat(64),
+    tool_manifest_sha256: 'c'.repeat(64),
+    runtime_compatibility: 'd'.repeat(64),
+  };
+  const withManifest = (manifest: unknown) => ({
+    ...checkpoint,
+    files: {
+      ...checkpoint.files,
+      'orca.json': Buffer.from(JSON.stringify(manifest)).toString('base64'),
+    },
+  });
+  expect(() =>
+    validateSdkCheckpoint(
+      withManifest({ profile: 'orca-managed-custom-v1', harness_profile: identity }),
+      'dsh_sdk',
+    ),
+  ).not.toThrow();
+  expect(() =>
+    validateSdkCheckpoint(withManifest({ profile: 'orca-managed-custom-v1' }), 'dsh_sdk'),
+  ).toThrow('harness profile');
+  expect(() =>
+    validateSdkCheckpoint(
+      withManifest({ profile: 'orca-managed-tree-v2', harness_profile: identity }),
+      'dsh_sdk',
+    ),
+  ).toThrow('discriminator');
+});
+
 it('admits cloud/colocated DSH with legacy DeepSeek and the official model catalog', () => {
   expect(resolveHarnessAnnotation({ harness: 'dsh_sdk' })).toEqual(selection);
   expect(resolveHarnessAnnotation({ harness: 'dsh_sdk', mode: 'separate' })).toHaveProperty(

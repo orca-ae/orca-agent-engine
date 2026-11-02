@@ -191,7 +191,10 @@ export function validateSkillDescriptor(descriptor: SkillDescriptor): void {
   }
 }
 
-export function assertMountPathOutsideSkillsRoot(mountPath: string): void {
+export function assertMountPathOutsideReservedRoot(
+  mountPath: string,
+  reservedRoot = SKILLS_ROOT,
+): void {
   if (!path.isAbsolute(mountPath)) {
     throw new Error(`resource mount path must be absolute: ${mountPath}`);
   }
@@ -204,10 +207,8 @@ export function assertMountPathOutsideSkillsRoot(mountPath: string): void {
     throw new Error('resource mount path contains control characters');
   }
   const normalized = normalizeAbsolutePath(mountPath);
-  if (pathsOverlap(normalized, SKILLS_ROOT)) {
-    throw new Error(
-      `resource mount path overlaps reserved Skill root ${SKILLS_ROOT}: ${mountPath}`,
-    );
+  if (pathsOverlap(normalized, reservedRoot)) {
+    throw new Error(`resource mount path overlaps reserved root ${reservedRoot}: ${mountPath}`);
   }
 }
 
@@ -216,11 +217,12 @@ export function assertMountPathOutsideSkillsRoot(mountPath: string): void {
  * write or mount. Syntactic validation alone cannot detect an image-provided
  * alias such as `/mnt/input -> /workspace/skills`.
  */
-export async function assertCanonicalPathOutsideSkillsRoot(
+export async function assertCanonicalPathOutsideReservedRoot(
   sandbox: SandboxHandle,
   targetPath: string,
+  reservedRoot = SKILLS_ROOT,
 ): Promise<void> {
-  assertMountPathOutsideSkillsRoot(targetPath);
+  assertMountPathOutsideReservedRoot(targetPath, reservedRoot);
   if (!sandbox.canonicalizePathForPolicy) {
     throw new Error('sandbox handle cannot canonicalize filesystem paths');
   }
@@ -230,16 +232,16 @@ export async function assertCanonicalPathOutsideSkillsRoot(
     await sandbox.canonicalizePathForPolicy(lexicalTarget),
     targetPath,
   );
-  const canonicalSkillsRoot = normalizeCanonicalPath(
-    await sandbox.canonicalizePathForPolicy(SKILLS_ROOT),
-    SKILLS_ROOT,
+  const canonicalReservedRoot = normalizeCanonicalPath(
+    await sandbox.canonicalizePathForPolicy(reservedRoot),
+    reservedRoot,
   );
 
   for (const candidate of new Set([lexicalTarget, canonicalTarget])) {
-    for (const reservedRoot of new Set([SKILLS_ROOT, canonicalSkillsRoot])) {
-      if (pathsOverlap(candidate, reservedRoot)) {
+    for (const boundary of new Set([reservedRoot, canonicalReservedRoot])) {
+      if (pathsOverlap(candidate, boundary)) {
         throw new Error(
-          `filesystem path resolves across reserved Skill root ${SKILLS_ROOT}: ${targetPath} -> ${canonicalTarget}`,
+          `filesystem path resolves across reserved root ${reservedRoot}: ${targetPath} -> ${canonicalTarget}`,
         );
       }
     }

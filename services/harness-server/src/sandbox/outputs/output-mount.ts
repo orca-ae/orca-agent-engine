@@ -26,7 +26,7 @@
 import { buildExecutionOutputPrefix, type SessionS3Creds } from '../../auth/sts-creds.js';
 import type { SandboxHandle, ToolResult } from '../sandbox-runtime.js';
 import { buildS3fsCredentialEnvironment, buildS3fsMountCommand } from '../s3fs-mount.js';
-import { assertCanonicalPathOutsideSkillsRoot } from '../skills/materialize.js';
+import { assertCanonicalPathOutsideReservedRoot } from '../skills/materialize.js';
 import { OUTPUT_CAPTURE_DIRECTORY } from './output-instructions.js';
 
 /**
@@ -117,7 +117,7 @@ export async function mountSessionOutputs(
  * harness host in the InMemory runtime.
  */
 export async function ensureSessionOutputRoot(sandbox: SandboxHandle): Promise<void> {
-  await assertCanonicalPathOutsideSkillsRoot(sandbox, OUTPUTS_SANDBOX_PATH);
+  await assertCanonicalPathOutsideReservedRoot(sandbox, OUTPUTS_SANDBOX_PATH);
   // `SandboxFiles.write` is the one portable way to create a directory for
   // every runtime. A temporary marker avoids relying on `bash mkdir -p`,
   // which targets the harness host rather than the sandbox in the InMemory
@@ -152,7 +152,7 @@ async function mountFuse(input: MountSessionOutputsInput): Promise<OutputMountHa
       'mountSessionOutputs: supportsFuse=true requires bucket, endpoint, outputsRoot, creds',
     );
   }
-  await assertCanonicalPathOutsideSkillsRoot(input.sandbox, OUTPUTS_SANDBOX_PATH);
+  await assertCanonicalPathOutsideReservedRoot(input.sandbox, OUTPUTS_SANDBOX_PATH);
 
   // Per-runner-generation prefix — the trailing slash is REQUIRED. File ids,
   // not filenames, define output identity: a later runner gets a fresh

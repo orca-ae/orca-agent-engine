@@ -91,6 +91,7 @@ import {
   InternalAgentObservabilityContextPathParamsSchema,
   InternalAgentObservabilitySecretPathParamsSchema,
   PreparedAgentSnapshotSchema,
+  PreparedAgentModelSchema,
   type PreparedAgentSnapshot,
   internalContract,
 } from '../contracts/internal.contract.js';
@@ -343,6 +344,7 @@ function versionToApi(r: MemoryVersionRecord): {
 }
 
 export interface InternalRoutesOptions {
+  dshApprovedProfiles?: import('../domain/dsh-profile.js').DshApprovedProfiles;
   /**
    * Heartbeat-staleness TTL (ms) for the durable environment-claim reaper
    * (`POST /internal/environments/claims/reap`). Defaults to
@@ -647,6 +649,8 @@ export function registerInternalRoutes(
   app.post(
     '/internal/v1/workspaces/:workspaceId/sessions/:sessionId/executions:prepare',
     async (req, reply) => {
+      const body = internalContract.prepareExecution.body.safeParse(req.body ?? {});
+      if (!body.success) return reply.code(400).send({ error: 'invalid prepare execution body' });
       const { workspaceId, sessionId } = req.params as {
         workspaceId: string;
         sessionId: string;
@@ -654,17 +658,34 @@ export function registerInternalRoutes(
       if (!isWorkspaceId(workspaceId) || !SESSION_ID_RE.test(sessionId)) {
         return reply.code(400).send({ error: 'invalid workspace or session id' });
       }
+      const profileStartedAt = performance.now();
       try {
-        return reply.send(
-          await prepareExecution({
-            db,
-            fileStore,
-            ...(memoryStore ? { memoryStore } : {}),
-            workspaceId,
-            sessionId,
-            gatewayRegistryUsageEnabled,
-          }),
-        );
+        const prepared = await prepareExecution({
+          ...(body.data.capabilities ? { capabilities: body.data.capabilities } : {}),
+          ...(options.dshApprovedProfiles
+            ? { dshApprovedProfiles: options.dshApprovedProfiles }
+            : {}),
+          db,
+          fileStore,
+          ...(memoryStore ? { memoryStore } : {}),
+          workspaceId,
+          sessionId,
+          gatewayRegistryUsageEnabled,
+        });
+        if (prepared.primary_agent.dsh_profile)
+          req.log.info(
+            {
+              workspaceId,
+              sessionId,
+              agentId: prepared.primary_agent.id,
+              agentVersion: prepared.primary_agent.version,
+              phase: 'dsh_profile_preparation_approval',
+              profileDigest: prepared.primary_agent.dsh_profile.config_sha256,
+              durationMs: performance.now() - profileStartedAt,
+            },
+            'Approved retained DSH profile',
+          );
+        return reply.send(prepared);
       } catch (error) {
         if (error instanceof PreparedExecutionNotFoundError) {
           return reply.code(404).send({ error: 'session not found' });
@@ -1595,9 +1616,7 @@ export function registerInternalRoutes(
       if (sdkTtlSecs !== undefined) mintOpts.ttlSecs = sdkTtlSecs;
       if (selection.harness === 'pi_sdk' || selection.harness === 'dsh_sdk') {
         const override = (session.agentOverrides as { model?: unknown } | null)?.model;
-        const model = PreparedAgentSnapshotSchema.shape.model.safeParse(
-          override ?? mcpBinding.snapshot.model,
-        );
+        const model = PreparedAgentModelSchema.safeParse(override ?? mcpBinding.snapshot.model);
         if (!model.success) return reply.code(409).send({ error: 'invalid_runtime_binding' });
         if (
           selection.harness === 'dsh_sdk' &&

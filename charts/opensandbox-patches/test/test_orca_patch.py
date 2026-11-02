@@ -2,8 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import copy
+import base64
 import json
 import hashlib
+import errno
+import shlex
+import subprocess
+import sys
 from pathlib import Path
 
 from kubernetes import client as k8s
@@ -20,6 +25,7 @@ from opensandbox_server.config import (
 )
 from opensandbox_server.services.k8s.batchsandbox_provider import BatchSandboxProvider
 from opensandbox_server.services.k8s.batchsandbox_provider import _package_plan, _package_init_container
+from opensandbox_server.services.k8s.batchsandbox_provider import _dsh_profile_plan, _dsh_profile_mounts, _dsh_init_container
 from opensandbox_server.services.k8s.security_context import (
     build_security_context_from_dict,
     serialize_security_context_to_dict,
@@ -27,6 +33,114 @@ from opensandbox_server.services.k8s.security_context import (
 
 
 PACKAGE_FIXTURES = json.loads(Path(__file__).with_name("environment-packages.json").read_text())
+
+
+def _dsh_descriptor():
+    files = {"cordis.patch.yml": "[]", "package.json": "{}", "pnpm-lock.yaml": "", "pnpm-workspace.yaml": ""}
+    canonical = json.dumps([1, sorted(files.items())], separators=(",", ":"))
+    return {"version": 1, "source_file_id": "file_test", "source_sha256": "a" * 64,
+            "config_sha256": hashlib.sha256(canonical.encode()).hexdigest(), "files": files}
+
+
+def test_dsh_descriptor_checks_digest_and_file_bounds():
+    descriptor = _dsh_descriptor()
+    assert _dsh_profile_plan(json.dumps(descriptor)) == descriptor
+    descriptor["files"]["package.json"] = "changed"
+    with pytest.raises(ValueError, match="digest"):
+        _dsh_profile_plan(json.dumps(descriptor))
+    descriptor["files"]["package.json"] = "x" * (1024 * 1024 + 1)
+    with pytest.raises(ValueError, match="limit"):
+        _dsh_profile_plan(json.dumps(descriptor))
+
+
+def test_large_dsh_descriptor_uses_bounded_arguments():
+    descriptor = _dsh_descriptor()
+    descriptor["files"]["pnpm-lock.yaml"] = "# 参数😀\n" * 65_000
+    descriptor["config_sha256"] = hashlib.sha256(json.dumps(
+        [1, sorted(descriptor["files"].items())], separators=(",", ":"), ensure_ascii=False
+    ).encode()).hexdigest()
+    original = json.dumps({"version": 1, "files": descriptor["files"]}, ensure_ascii=False).encode()
+    assert 131072 < len(original) < 1024 * 1024
+    installer = _dsh_init_container("image", _dsh_profile_plan(json.dumps(descriptor)), "Always")
+    assert max(len(arg.encode()) for arg in installer["command"] + installer["args"]) < 131072
+    assert sum(len(arg.encode()) + 1 for arg in installer["command"] + installer["args"]) < 2 * 1024 * 1024
+    assert json.loads(base64.b64decode("".join(installer["args"]))) == descriptor
+    if sys.platform == "linux":
+        payload = json.dumps(descriptor, separators=(",", ":"), ensure_ascii=False)
+        with pytest.raises(OSError) as failure:
+            subprocess.run(["/bin/sh", "-c", "printf %s " + shlex.quote(payload)],
+                           capture_output=True, timeout=5, check=False)
+        assert failure.value.errno == errno.E2BIG
+        command = list(installer["command"])
+        # Substitute only the stdin consumer; preserve the production argv/pipeline.
+        reader = "import sys,hashlib; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())"
+        command[-2] = command[-2].rsplit(" | ", 1)[0] + " | " + shlex.quote(sys.executable) + " -c " + shlex.quote(reader)
+        completed = subprocess.run(command + installer["args"], capture_output=True, timeout=5, check=False)
+        assert completed.returncode == 0, completed.stderr
+        assert completed.stdout.strip().decode() == hashlib.sha256(payload.encode()).hexdigest()
+
+
+@pytest.mark.parametrize("change", [None, "env", "envFrom", "service-account", "shared-processes",
+    "writable-modules", "missing-modules", "additional-writer", "alias", "resources", "shared-volume",
+    "args", "oversized-template"])
+def test_dsh_preparation_handoff_and_template_hardening(mock_k8s_client, monkeypatch, change):
+    provider = BatchSandboxProvider(mock_k8s_client, _app_config())
+    merge = provider.template_manager.merge_with_runtime_values
+
+    def mutate(manifest):
+        result = merge(manifest)
+        pod = result["spec"]["template"]["spec"]
+        installer = next(item for item in pod["initContainers"] if item["name"] == "orca-dsh-profile")
+        runtime = next(item for item in pod["containers"] if item["name"] == "sandbox")
+        if change in ("env", "envFrom"):
+            installer[change] = [{"name": "TOKEN", "value": "injected"}]
+        elif change == "service-account":
+            pod["automountServiceAccountToken"] = True
+        elif change == "shared-processes":
+            pod["shareProcessNamespace"] = True
+        elif change == "writable-modules":
+            next(item for item in runtime["volumeMounts"] if item.get("subPath", "").endswith("/node_modules"))["readOnly"] = False
+        elif change == "missing-modules":
+            runtime["volumeMounts"] = [item for item in runtime["volumeMounts"] if not item.get("subPath", "").endswith("/node_modules")]
+        elif change == "additional-writer":
+            pod["ephemeralContainers"] = [{"name": "debug", "volumeMounts": copy.deepcopy(installer["volumeMounts"])}]
+        elif change == "alias":
+            runtime["volumeMounts"].append({"name": "unrelated", "mountPath": "/app/packages/dsh-harness"})
+        elif change == "resources":
+            installer["resources"] = {}
+        elif change == "shared-volume":
+            next(item for item in pod["volumes"] if item["name"] == "orca-dsh-profile").update({"persistentVolumeClaim": {"claimName": "shared"}})
+        elif change == "args":
+            installer["args"] = ["changed"]
+        elif change == "oversized-template":
+            result["metadata"]["annotations"] = {"padding": "x" * 1_500_000}
+        return result
+
+    monkeypatch.setattr(provider.template_manager, "merge_with_runtime_values", mutate)
+
+    def create():
+        return provider.create_workload(
+            sandbox_id="dsh-id", namespace="test-ns",
+            image_spec=ImageSpec(uri="ghcr.io/orca-ae/sandbox-harness-dsh:v1"),
+            entrypoint=["/usr/local/bin/orca-sandbox-harness"],
+            env={"LITELLM_API_KEY": "runtime-only-sentinel", "EXECD_ACCESS_TOKEN": "a" * 64},
+            resource_limits={"cpu": "1", "memory": "2Gi"}, labels={}, expires_at=None,
+            execd_image="execd:test", extensions={**ISOLATION_EXTENSIONS,
+                "orca.dsh.profile.v1": json.dumps(_dsh_descriptor()),
+                "orca.environment.packages.v1": json.dumps({"version": 1, "packages": {"npm": ["is-number@7.0.0"]}})})
+    if change:
+        with pytest.raises(ValueError, match="DSH|package|sandbox Pod"):
+            create()
+        mock_k8s_client.create_custom_object.assert_not_called()
+    else:
+        create()
+        pod = mock_k8s_client.create_custom_object.call_args.kwargs["body"]["spec"]["template"]["spec"]
+        installer = next(item for item in pod["initContainers"] if item["name"] == "orca-dsh-profile")
+        assert "runtime-only-sentinel" not in json.dumps(installer)
+        assert installer["resources"]["limits"] == {"cpu": "1", "memory": "512Mi", "ephemeral-storage": "2Gi"}
+        runtime = next(item for item in pod["containers"] if item["name"] == "sandbox")
+        assert all(mount in runtime["volumeMounts"] for mount in _dsh_profile_mounts())
+        assert any(item["name"] == "orca-environment-packages" for item in pod["initContainers"])
 
 
 @pytest.mark.parametrize("case", PACKAGE_FIXTURES["valid"], ids=lambda case: case["name"])
@@ -54,6 +168,7 @@ def test_package_spec_length_uses_utf16_units():
 @pytest.mark.parametrize("reason", [
     "ENVIRONMENT_PACKAGES_INSTALL_FAILED", "ENVIRONMENT_PACKAGES_START_FAILED",
     "ENVIRONMENT_PACKAGES_STORAGE_LIMIT", "ENVIRONMENT_PACKAGES_POD_EVICTED",
+    "DSH_PROFILE_INSTALL_FAILED", "DSH_PROFILE_START_FAILED",
 ])
 async def test_package_failure_during_creation_rolls_back_without_logs(
     k8s_service, mock_workload, create_sandbox_request, reason

@@ -8,6 +8,7 @@ import {
   assertDshCheckpointInstructions,
   assertDshCheckpointModel,
   MAX_STATE_BYTES,
+  assertDshCheckpointProfile,
 } from '../../src/checkpoint.js';
 import { MessagesUsage, gatewayBase } from '../../src/transport.js';
 
@@ -24,6 +25,41 @@ const native = Buffer.from(
   }) + '\n',
 );
 describe('DSH native boundary', () => {
+  it('separates custom and default history and binds every prepared identity field', () => {
+    const identity = {
+      version: 1 as const,
+      config_sha256: 'a'.repeat(64),
+      lock_sha256: 'b'.repeat(64),
+      tool_manifest_sha256: 'c'.repeat(64),
+      runtime_compatibility: 'd'.repeat(64),
+    };
+    const checkpoint = captureCheckpoint(
+      id,
+      'system',
+      { [file]: native },
+      'deepseek-v4-flash',
+      'deepseek',
+      identity,
+    );
+    expect(() => assertDshCheckpointProfile(checkpoint, identity)).not.toThrow();
+    expect(() => assertDshCheckpointProfile(checkpoint)).toThrow('harness profile');
+    for (const key of [
+      'config_sha256',
+      'lock_sha256',
+      'tool_manifest_sha256',
+      'runtime_compatibility',
+    ] as const)
+      expect(() =>
+        assertDshCheckpointProfile(checkpoint, { ...identity, [key]: 'e'.repeat(64) }),
+      ).toThrow('harness profile');
+    const old = captureCheckpoint(id, 'system', { [file]: native });
+    expect(() => assertDshCheckpointProfile(old, identity)).toThrow('harness profile');
+    expect(() => assertDshCheckpointProfile(old)).not.toThrow();
+    const manifest = JSON.parse(Buffer.from(checkpoint.files['orca.json']!, 'base64').toString());
+    delete manifest.harness_profile;
+    checkpoint.files['orca.json'] = Buffer.from(JSON.stringify(manifest)).toString('base64');
+    expect(() => decodeCheckpoint(checkpoint)).toThrow('harness profile');
+  });
   it('binds provider/model, accepts only compatible legacy DeepSeek, and separates adapter profiles', () => {
     const checkpoint = captureCheckpoint(
       id,

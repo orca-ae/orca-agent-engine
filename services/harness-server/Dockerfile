@@ -66,8 +66,8 @@ COPY packages/sandbox-runtime/src ./packages/sandbox-runtime/src
 COPY services/harness-server/tsconfig.json ./services/harness-server/
 COPY services/harness-server/src ./services/harness-server/src
 # Build workspace dependencies first, then the service
-RUN pnpm -F @orca/sdk-harness build && \
-    pnpm -F @orca/harness-catalog build && \
+RUN pnpm -F @orca/harness-catalog build && \
+    pnpm -F @orca/sdk-harness build && \
     pnpm -F @orca/pi-harness build && \
     pnpm -F @orca/dsh-harness build && \
     pnpm -F @orca/codex-harness build && \

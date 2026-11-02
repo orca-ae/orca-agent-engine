@@ -4,6 +4,46 @@ The chart deploys the registry, harness, gateway and optional observability expo
 against external infrastructure. See [deployment](../../docs/managed-agents/kubernetes.md)
 and [values.yaml](./values.yaml) for the complete configuration.
 
+## Native DSH profiles
+
+Approve Agent-bound native profiles through the existing Registry environment:
+
+```yaml
+registry:
+  extraEnv:
+    - name: DSH_APPROVED_PROFILES
+      value: '{"ws_example":["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"]}'
+```
+
+Use the exact Orca workspace ID authenticated by the API key and the configuration
+digest from the [profile packaging helper](../../examples/dsh-profile/README.md).
+The default is `{}`: no custom profiles are approved. Registry validates the JSON
+at process startup; approval belongs only on Registry, not harness or Gateway.
+An explicit `registry.extraEnv` value overrides the same key supplied through
+`registry.extraEnvFrom`. Retain existing environment entries when editing the list;
+Helm replaces lists instead of appending them.
+
+Changing this inline value changes the Registry Pod template and triggers rollout.
+External ConfigMap or Secret contents are not checksummed by Helm; restart Registry
+after updating approval through an external reference. Removing an approval blocks
+fresh preparation, including replacement and Trigger launch, after Registry reloads
+the configuration; it does not terminate an already running turn.
+
+Deploy matching release versions of Registry, harness-server, the DSH sandbox
+image and the companion `opensandbox-patches` chart before adding profile approvals.
+The published release chart pins `images.sandboxHarness.dsh.digest`; an explicit
+image override can retain an older runtime even after chart upgrade. The patch
+ConfigMap uses `subPath` mounts, so restart OpenSandbox server after its upgrade.
+Custom profiles use cloud OpenSandbox Environments with unrestricted networking;
+they reuse existing Gateway routes, credentials and toolset permissions. No new
+networking platform or Kubernetes workload is deployed by the engine chart.
+
+The companion provider creates a credential-free init container and Pod-local
+volume for each custom-profile sandbox; its resource requirements and read-only
+handoff are described in the [companion chart](../opensandbox-patches/README.md#native-dsh-profile-preparation).
+See [profile lifecycle and permissions](../../docs/managed-agents/harness-modes.md#agent-bound-native-profiles)
+for retention, admission and checkpoint behavior.
+
 ## Kafka transcript encoding
 
 `transcriptStore.kafka.encoding` defaults to `raw`. The optional `schemaRegistry`

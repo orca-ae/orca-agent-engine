@@ -66,8 +66,8 @@ COPY packages/sandbox-runtime/tsconfig.json ./packages/sandbox-runtime/
 COPY packages/sandbox-runtime/src ./packages/sandbox-runtime/src
 COPY packages/transcript-store-types/tsconfig.json ./packages/transcript-store-types/
 COPY packages/transcript-store-types/src ./packages/transcript-store-types/src
-RUN pnpm -F @orca/sdk-harness build && \
-    pnpm -F @orca/harness-catalog build && \
+RUN pnpm -F @orca/harness-catalog build && \
+    pnpm -F @orca/sdk-harness build && \
     pnpm -F @orca/dsh-harness build && \
     pnpm -F @orca/pi-harness build && \
     pnpm -F @orca/codex-harness build && \

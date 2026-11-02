@@ -104,6 +104,15 @@ Each item is proposed as an OIP pull request; the design is reviewed there befor
   path. Local process-group and receipt fixtures do not establish deployed behavior. Native
   child settlement diagnostics distinguish missing terminal facts while preserving fail-closed
   accounting; historical failures still require evidence from the affected execution.
+- **Native DSH profile deployment qualification.** Trigger: the first reviewed application
+  plugin deployment on OpenSandbox. Agent versions retain approved native configuration,
+  preparation uses credential-free init and read-only mounts, and schemas freeze after real
+  initialization. Qualification requires custom-profile deployment, physical replacement,
+  production Gateway/model delivery, resource-exhaustion/cancellation and application plugin-set
+  acceptance with cleanup evidence. Local installation/tool/restore fixtures do not satisfy
+  these deployed gates. Custom profiles require unrestricted Environment networking; qualify
+  other providers or limited networking when a concrete deployment needs them. Shared install
+  caches wait for measured preparation latency or registry availability requirements.
 - **DSH model catalog and provider acceptance.** The static catalog uses the pinned official
   plugin's chat models; managed transport/raw usage covers Messages, Chat Completions,
   Responses and Google Generative AI with local published-runtime fixtures. Remaining catalog
