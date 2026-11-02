@@ -156,7 +156,8 @@ export class CodexSdkRuntime implements Runtime {
     }
     if (!this.worker) throw new Error('SDK not started');
     if (command.type === 'refresh') {
-      await this.worker.refreshOptions(command);
+      const { type: _, ...options } = command;
+      await this.worker.refreshOptions(options);
     } else {
       await this.worker.handle(command as WorkerCommand);
       if (command.type === 'stop' && this.root)

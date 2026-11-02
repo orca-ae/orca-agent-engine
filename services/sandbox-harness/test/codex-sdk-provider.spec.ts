@@ -57,6 +57,14 @@ it('retains the bounded native profile descriptor across the private command', a
   };
   await runtime.handleSdkCommand(input, () => {});
   expect(worker.handle).toHaveBeenCalledWith(expect.objectContaining({ dshProfile: profile }));
+  await runtime.handleSdkCommand(
+    { type: 'refresh', apiKey: 'next-jwt', dshGatewayUrl: 'http://gateway' },
+    () => {},
+  );
+  expect(worker.refreshOptions).toHaveBeenCalledWith({
+    apiKey: 'next-jwt',
+    dshGatewayUrl: 'http://gateway',
+  });
   const invalid = new CodexSdkRuntime('dsh-sdk');
   await expect(
     invalid.handleSdkCommand(
@@ -96,9 +104,10 @@ describe.each(['codex-sdk', 'pi-sdk'] as const)('sandbox %s provider', (provider
       { type: 'refresh', apiKey: 'next-jwt', baseUrl: 'http://gateway/v1' },
       () => {},
     );
-    expect(worker.refreshOptions).toHaveBeenCalledWith(
-      expect.objectContaining({ apiKey: 'next-jwt' }),
-    );
+    expect(worker.refreshOptions).toHaveBeenCalledWith({
+      apiKey: 'next-jwt',
+      baseUrl: 'http://gateway/v1',
+    });
     await r.handleSdkCommand({ type: 'stop' }, () => {});
     await expect(stat(command.root)).rejects.toMatchObject({ code: 'ENOENT' });
   });
@@ -154,6 +163,20 @@ it('DSH transports authorization replies and monotonic archive fence before targ
     },
     () => {},
   );
+  await runtime.handleSdkCommand(
+    {
+      type: 'refresh',
+      apiKey: 'next-jwt',
+      dshGatewayUrl: 'http://gateway',
+      system: start.system,
+    },
+    () => {},
+  );
+  expect(worker.refreshOptions).toHaveBeenCalledWith({
+    apiKey: 'next-jwt',
+    dshGatewayUrl: 'http://gateway',
+    system: start.system,
+  });
   const threadId = '11111111-1111-4111-8111-111111111111';
   const controls = [
     { type: 'submit', text: 'long', sourceEventId: 'evt_long', executionBudgetMs: 1_200_000 },
