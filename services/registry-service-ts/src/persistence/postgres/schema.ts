@@ -1661,6 +1661,8 @@ export const sessionUsageEvents = pgTable(
     workspaceId: text('workspace_id').notNull(),
     sessionId: text('session_id').notNull(),
     eventId: text('event_id').notNull(),
+    /** Immutable first-acceptance price evidence; legacy rows remain null. */
+    pricingReceipt: jsonb('pricing_receipt'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
@@ -1670,6 +1672,78 @@ export const sessionUsageEvents = pgTable(
       columns: [t.workspaceId, t.sessionId],
       foreignColumns: [sessions.workspaceId, sessions.id],
     }).onDelete('cascade'),
+  ],
+);
+
+// Conditional pricing uses append-only versions. Heads only select a version;
+// accepted usage and fetch pages keep their original document and rule revisions.
+export const pricingCatalogHeads = pgTable('pricing_catalog_heads', {
+  organizationId: text('organization_id').primaryKey(),
+  generation: integer('generation').notNull(),
+  catalogId: text('catalog_id').notNull(),
+  document: jsonb('document').notNull(),
+});
+
+export const pricingCatalogVersions = pgTable(
+  'pricing_catalog_versions',
+  {
+    organizationId: text('organization_id').notNull(),
+    catalogId: text('catalog_id').notNull(),
+    generation: integer('generation').notNull(),
+    digest: text('digest').notNull(),
+    document: jsonb('document').notNull(),
+    publishedAt: timestamp('published_at', { withTimezone: true }).notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.organizationId, t.catalogId] }),
+    uniqueIndex('pricing_catalog_versions_generation_idx').on(t.organizationId, t.generation),
+  ],
+);
+
+export const pricingFetchSnapshots = pgTable(
+  'pricing_fetch_snapshots',
+  {
+    workspaceId: text('workspace_id').notNull(),
+    organizationId: text('organization_id').notNull(),
+    catalogId: text('catalog_id').notNull(),
+    document: jsonb('document').notNull(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.organizationId, t.catalogId] }),
+    index('pricing_fetch_snapshots_expiry_idx').on(t.expiresAt),
+  ],
+);
+
+export const pricingSourceLeases = pgTable(
+  'pricing_source_leases',
+  {
+    organizationId: text('organization_id').notNull().default(''),
+    provider: text('provider').notNull(),
+    sourceId: text('source_id').notNull(),
+    fence: integer('fence').notNull(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.organizationId, t.provider, t.sourceId] }),
+    check('pricing_source_leases_global_check', sql`${t.organizationId} = ''`),
+  ],
+);
+
+export const pricingAdminIdempotency = pgTable(
+  'pricing_admin_idempotency',
+  {
+    organizationId: text('organization_id').notNull(),
+    principal: text('principal').notNull(),
+    operation: text('operation').notNull(),
+    key: text('key').notNull(),
+    bodyHash: text('body_hash').notNull(),
+    response: jsonb('response').notNull(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.organizationId, t.principal, t.operation, t.key] }),
+    index('pricing_admin_idempotency_expiry_idx').on(t.expiresAt),
   ],
 );
 

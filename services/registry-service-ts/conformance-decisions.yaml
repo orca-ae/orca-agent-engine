@@ -179,6 +179,15 @@ decisions:
       an operator running against several providers has no other source of
       truth. Reads are public; every write is on the admin listener.
 
+  - id: extension-conditional-pricing-group
+    match: { class: extension, path: '/apis/pricing.runorca.ai/v2*' }
+    covers: 2
+    decision: keep
+    reference: docs/managed-agents/pricing.md#conditional-pricing-v2
+    rationale: >-
+      The pricing v2 extension exposes explicit tier/input-band rules and immutable catalog pages.
+      Workspace reads retain organization authority; rule writes use the admin listener.
+
   # The two probes are named individually for a second reason: the only patterns
   # that cover both also cover half of `/v1`, and a rule that broad would absorb
   # a future extension nobody decided about.

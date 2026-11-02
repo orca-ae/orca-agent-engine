@@ -103,11 +103,11 @@ evolution.
 
 Reserved groups:
 
-| Group | Ships in | Resources |
-| ----- | -------- | --------- |
-| `runtime.runorca.ai` | this repository | `harnesses` |
-| `policy.runorca.ai` | this repository | `guardrails`, `guardrailtypes` |
-| `pricing.runorca.ai` | this repository | `modelprices` |
+| Group                | Ships in        | Resources                              |
+| -------------------- | --------------- | -------------------------------------- |
+| `runtime.runorca.ai` | this repository | `harnesses`                            |
+| `policy.runorca.ai`  | this repository | `guardrails`, `guardrailtypes`         |
+| `pricing.runorca.ai` | this repository | v1 `modelprices`; v2 `modelpricerules` |
 
 A distribution's or third party's extensions use a domain it controls — for
 example `/apis/cloud.example.com/v1/...` or `/apis/connectors.example.com/v1/...`.
@@ -191,7 +191,10 @@ deployment answers:
     },
     {
       "name": "pricing.runorca.ai",
-      "versions": [{ "group_version": "pricing.runorca.ai/v1", "version": "v1" }],
+      "versions": [
+        { "group_version": "pricing.runorca.ai/v1", "version": "v1" },
+        { "group_version": "pricing.runorca.ai/v2", "version": "v2" }
+      ],
       "preferred_version": { "group_version": "pricing.runorca.ai/v1", "version": "v1" }
     }
   ]
@@ -338,12 +341,12 @@ group's name, versions and preferred version. The designed promotion procedure
 is in [`roadmap.md`](./roadmap.md#designed-not-built).
 
 Extension paths are therefore not a permanent statement about a capability. This
-is the reason the tier is expressed as a *named group* rather than an `-ext` or
+is the reason the tier is expressed as a _named group_ rather than an `-ext` or
 `x-` marker: RFC 6648 deprecated the `X-` header convention precisely because
 such markers outlive the experimental status they describe.
 
 **Cron is the live case — and it has since landed.** Claude's cron scheduling
-*is* core API — `POST /v1/deployments` with
+_is_ core API — `POST /v1/deployments` with
 `schedule: {type: "cron", expression, timezone}`, plus `/v1/deployment_runs`
 for run history. This model said a cron schedule belongs in the open-source
 engine, and the engine now ships it: `/v1/triggers` is the cron-only durable
@@ -374,18 +377,19 @@ tracked in [`roadmap.md`](./roadmap.md#first-party-clients-on-v1).
 
 ## Where this is implemented
 
-| Concern                        | File                                                                                                      |
-| ------------------------------ | --------------------------------------------------------------------------------------------------------- |
-| `/api/v1` alias                | `services/registry-service-ts/src/middleware/api-v1-alias.ts`                                             |
-| Discovery routes               | `services/registry-service-ts/src/api/discovery.routes.ts`                                                |
-| Discovery contract             | `services/registry-service-ts/src/contracts/discovery.contract.ts`                                        |
-| `policy.runorca.ai/v1` routes  | `services/registry-service-ts/src/api/guardrails.routes.ts`                                               |
-| `pricing.runorca.ai/v1` routes | `services/registry-service-ts/src/api/model-prices.routes.ts`                                             |
-| Probe contract                 | `services/registry-service-ts/src/contracts/health.contract.ts`                                           |
-| Unauthenticated allowlist      | `services/registry-service-ts/src/auth/auth.ts`                                                           |
-| Claude error envelope          | `services/registry-service-ts/src/middleware/claude-edge.ts`                                              |
-| Extension tagging + tripwire   | `services/registry-service-ts/scripts/orca-extension-tagging.mjs`                                         |
-| Contract/route drift test      | `services/registry-service-ts/test/unit/route-contract-parity.spec.ts`                                    |
+| Concern                        | File                                                                   |
+| ------------------------------ | ---------------------------------------------------------------------- |
+| `/api/v1` alias                | `services/registry-service-ts/src/middleware/api-v1-alias.ts`          |
+| Discovery routes               | `services/registry-service-ts/src/api/discovery.routes.ts`             |
+| Discovery contract             | `services/registry-service-ts/src/contracts/discovery.contract.ts`     |
+| `policy.runorca.ai/v1` routes  | `services/registry-service-ts/src/api/guardrails.routes.ts`            |
+| `pricing.runorca.ai/v1` routes | `services/registry-service-ts/src/api/model-prices.routes.ts`          |
+| `pricing.runorca.ai/v2` routes | `services/registry-service-ts/src/api/model-price-rules.routes.ts`     |
+| Probe contract                 | `services/registry-service-ts/src/contracts/health.contract.ts`        |
+| Unauthenticated allowlist      | `services/registry-service-ts/src/auth/auth.ts`                        |
+| Claude error envelope          | `services/registry-service-ts/src/middleware/claude-edge.ts`           |
+| Extension tagging + tripwire   | `services/registry-service-ts/scripts/orca-extension-tagging.mjs`      |
+| Contract/route drift test      | `services/registry-service-ts/test/unit/route-contract-parity.spec.ts` |
 
 A contract and its routes must move together. The drift test builds the real
 public app, collects the route table through the `recordRouteTable` hook and
@@ -395,7 +399,6 @@ that carry no contract surface — so a contract entry with no route, or a route
 with no contract entry, fails the build. It found one on its first run: an undeclared PATCH alias had been served
 for months without appearing in any spec or any conformance row.
 `discovery-routes.spec.ts` checks the discovery corner of the same comparison.
-
 
 `runtime.runorca.ai/v1` serves `GET /apis/runtime.runorca.ai/v1/harnesses`, the
 managed SDK harness/model/capability catalog, including `claude_agent_sdk`,

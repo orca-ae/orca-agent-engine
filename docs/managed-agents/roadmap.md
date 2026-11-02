@@ -28,6 +28,19 @@ and its row in the proposals index together.
 
 Each item is proposed as an OIP pull request; the design is reviewed there before the code lands.
 
+- **Conditional model prices and dynamic provider price sources.**
+  The Engine catalog/resolver, organization rule-set API, HTTP request facts/receipts and bounded
+  public-source acquisition are implemented with conversion disabled by default. Trigger for
+  activation: qualify complete
+  per-request writers and every downstream consumer for the selected model/profile. Workspace
+  Registry proxy/discovery/pinned contracts/OpenAPI/SDKs and Spyhop negotiation, cache invalidation,
+  receipt provenance and Rust conformance remain coordinated rollout work. Native aggregate
+  producers and JSON/proto/tunnel capability negotiation need per-request response-tier/context
+  evidence before conversion of traffic they own; they remain unpriced for converted models.
+  Automated consumer/admission qualification, metadata credential references, wider official
+  model/tier coverage, interactive source-diff approval and deployed expiry/restart/rollback/native-cost
+  reconciliation remain gated on those implementations and their fixtures. Live inference or
+  deployment acceptance is not implied by offline vectors or public-source retrieval.
 - **Self-hosted DSH credential consumer.** Trigger: connect the dormant
   Registry credential issuer/handoff to self-hosted DSH preparation and dispatch.
   Record runner monotonic M0 on the first provisional receipt and set expiry to

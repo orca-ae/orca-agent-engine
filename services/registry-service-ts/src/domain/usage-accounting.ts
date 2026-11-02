@@ -13,6 +13,7 @@ import {
 } from '@orca/harness-catalog';
 import { SHARED_USAGE_KEYS, STATE_ACTIONS, type StateAction } from '@orca/guardrails';
 import type { DbClient } from '../persistence/postgres/client.js';
+import { priceUsageReceipt, type UsagePricingContext } from '../pricing/usage-receipt.js';
 import {
   agentTriggerFires,
   agentTriggers,
@@ -85,6 +86,7 @@ export async function priceUsageDelta(
   provider: string,
   modelId: string,
   usage: UsageDelta,
+  excluded: readonly { provider: string; model_id: string }[] = [],
 ): Promise<bigint | null> {
   const { entries, organizationId } = await loadModelPriceEntries(
     db,
@@ -92,7 +94,15 @@ export async function priceUsageDelta(
     provider,
     modelId,
   );
-  return usageCostNanoUsd(usage, provider, modelId, entries, organizationId);
+  return usageCostNanoUsd(
+    usage,
+    provider,
+    modelId,
+    entries.filter(
+      (e) => !excluded.some((m) => m.provider === e.provider && m.model_id === e.modelId),
+    ),
+    organizationId,
+  );
 }
 
 export function usageCostNanoUsd(
@@ -750,6 +760,8 @@ export async function persistUsage(
     sessionId: string;
     usage: UsageDelta;
     costNanoUsd: bigint | null;
+    pricingContext?: UsagePricingContext;
+    pricingClock?: () => Date;
     now: Date;
     threadId?: string;
     subagentId?: string;
@@ -761,13 +773,13 @@ export async function persistUsage(
     workspaceId,
     sessionId: id,
     usage,
-    costNanoUsd,
-    now,
     threadId,
     subagentId,
     usageEventId,
     turnSubject,
   } = input;
+  let costNanoUsd = input.costNanoUsd;
+  let now = input.now;
   if (typeof threadId === 'string') {
     // Resolve the thread before writing anything so an unknown thread
     // rejects the whole report rather than recording spend it cannot
@@ -803,6 +815,29 @@ export async function persistUsage(
       .onConflictDoNothing()
       .returning({ eventId: sessionUsageEvents.eventId });
     if (inserted.length === 0) return 'replayed' as const;
+  }
+
+  if (input.pricingContext) {
+    const priced = await priceUsageReceipt(
+      tx,
+      workspaceId,
+      input.pricingContext,
+      usage,
+      input.pricingClock ?? (() => new Date()),
+    );
+    costNanoUsd = priced.costNanoUsd;
+    now = new Date(priced.receipt.pricing_time);
+    if (typeof usageEventId === 'string')
+      await tx
+        .update(sessionUsageEvents)
+        .set({ pricingReceipt: priced.receipt })
+        .where(
+          and(
+            eq(sessionUsageEvents.workspaceId, workspaceId),
+            eq(sessionUsageEvents.sessionId, id),
+            eq(sessionUsageEvents.eventId, usageEventId),
+          ),
+        );
   }
 
   const rows = await tx
