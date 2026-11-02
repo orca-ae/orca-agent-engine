@@ -30,6 +30,9 @@ export const PREFIX_MAP: Record<string, PrefixPair> = {
   guardrail: { internal: 'grd', wire: 'grd' },
   skill: { internal: 'skill', wire: 'skill' },
   skillVersion: { internal: 'skillver', wire: 'skillver' },
+  modelPriceRuleSet: { internal: 'prs', wire: 'prs' },
+  modelPriceRule: { internal: 'prule', wire: 'prule' },
+  pricingCatalog: { internal: 'pcat', wire: 'pcat' },
 };
 
 const PAIRS = Object.values(PREFIX_MAP);

@@ -140,7 +140,10 @@ describe('discovery', () => {
         },
         {
           name: 'pricing.runorca.ai',
-          versions: [{ group_version: 'pricing.runorca.ai/v1', version: 'v1' }],
+          versions: [
+            { group_version: 'pricing.runorca.ai/v1', version: 'v1' },
+            { group_version: 'pricing.runorca.ai/v2', version: 'v2' },
+          ],
           preferred_version: { group_version: 'pricing.runorca.ai/v1', version: 'v1' },
         },
       ],

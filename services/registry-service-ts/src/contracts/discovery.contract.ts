@@ -107,6 +107,7 @@ export const ApiResourceList = z.object({
   kind: z.literal('APIResourceList'),
   group_version: z.string(),
   resources: z.array(ApiResource),
+  required_features: z.array(z.string()).optional(),
 });
 
 export const HarnessList = z.object({
@@ -162,6 +163,12 @@ export const discoveryContract = c.router({
     method: 'GET',
     path: '/apis/pricing.runorca.ai/v1',
     summary: 'Resources served by the pricing.runorca.ai/v1 group.',
+    responses: { 200: ApiResourceList },
+  },
+  pricingV2GroupResources: {
+    method: 'GET',
+    path: '/apis/pricing.runorca.ai/v2',
+    summary: 'Conditional pricing resources and required features.',
     responses: { 200: ApiResourceList },
   },
 });

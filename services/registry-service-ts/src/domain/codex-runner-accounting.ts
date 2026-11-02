@@ -31,7 +31,6 @@ import {
   loadGuardrailTurnSubject,
   parseUsageDelta,
   persistUsage,
-  priceUsageDelta,
   utcDateWindow,
   type DbTransaction,
   type UsageDelta,
@@ -407,18 +406,13 @@ export class CodexRunnerAccounting implements RunnerTurnAccounting {
     )
       throw new Error('Invalid Codex usage identity or counters');
     await this.locked(async (tx) => {
-      const costNanoUsd = await priceUsageDelta(
-        tx as unknown as DbClient,
-        c.workspaceId,
-        turn.provider,
-        turn.model,
-        usage,
-      );
       const outcome = await persistUsage(tx, {
         workspaceId: c.workspaceId,
         sessionId: c.sessionId,
         usage,
-        costNanoUsd,
+        costNanoUsd: null,
+        pricingContext: { provider: turn.provider, modelId: turn.model, facts: null },
+        pricingClock: () => this.now(),
         now: this.now(),
         turnSubject: turn.subject,
         usageEventId: turn.usageEventId,

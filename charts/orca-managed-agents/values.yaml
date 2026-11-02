@@ -322,6 +322,9 @@ secretStore:
     secretName: ''
 
 registry:
+  pricing:
+    conditionalEnabled: false
+    sources: []
   # Optional MCP endpoint; defaults to harness.aiGatewayUrl or the in-chart Gateway.
   aiGatewayMcpUrl: ''
   # Optional native LLM proxy base URL; Codex appends /responses.
