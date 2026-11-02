@@ -97,6 +97,11 @@ environment: process essentials, the locale family, TLS trust stores, the
 session-runner's own operator knobs, and the four runner-wiring variables layered
 on last.
 
+Cloud OpenSandbox workers also forward `ORCA_ENVIRONMENT_PACKAGES`, the provider's
+prepared package declarations. It contains configuration, not credentials. The
+runner compares its declaration revision with the Registry's resource manifest
+before staging any resources; a mismatch rejects the Session setup.
+
 The line the allowlist draws is **secrets versus configuration**, not worker
 variables versus runner ones. That distinction is load-bearing: a self-hosted
 operator runs one command, so the worker's environment is the only surface they

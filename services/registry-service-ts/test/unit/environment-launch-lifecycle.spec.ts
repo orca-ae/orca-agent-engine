@@ -17,7 +17,7 @@
 // multi-session) Environment model — in particular why "bind" is deliberately
 // NOT part of this module (the `SessionDistributor` owns it).
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_POLL_INTERVAL_MS,
   DEFAULT_WAIT_ONLINE_TIMEOUT_MS,
@@ -122,6 +122,34 @@ describe('EnvironmentLaunchLifecycle — defaults', () => {
 });
 
 describe('EnvironmentLaunchLifecycle.ensureLaunched — happy path', () => {
+  it('loads authoritative packages and completes provisioning before minting any credential', async () => {
+    const launcher = new FakeLauncher();
+    const tokens = new FakeTokenIssuer();
+    const workerOnline = new FakeWorkerOnline();
+    const spec = { packages: { npm: ['typescript'] }, networking: { type: 'unrestricted' } };
+    const loadProvisionSpec = vi.fn(async (id: string) => {
+      expect(id).toBe(ENV_ID);
+      expect(tokens.minted).toEqual([]);
+      return spec;
+    });
+    const provision = vi.spyOn(launcher, 'provision').mockImplementation(async () => {
+      expect(tokens.minted).toEqual([]);
+      return 'prepared_packages';
+    });
+    const lifecycle = new EnvironmentLaunchLifecycle({
+      launcher,
+      tokens,
+      workerOnline,
+      loadProvisionSpec,
+      registryTunnelUrl: REGISTRY_TUNNEL_URL,
+      sleep: async () => workerOnline.markOnline(ENV_ID),
+    });
+    await lifecycle.ensureLaunched(ENV_ID, { name: 'packages' });
+    expect(loadProvisionSpec).toHaveBeenCalledOnce();
+    expect(provision).toHaveBeenCalledWith('packages', spec);
+    expect(tokens.minted).toEqual([ENV_ID]);
+  });
+
   it('provisions, mints a token, starts the worker, and resolves once the worker is observed online', async () => {
     const launcher = new FakeLauncher();
     const tokens = new FakeTokenIssuer();

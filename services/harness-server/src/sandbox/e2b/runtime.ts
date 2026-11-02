@@ -5,6 +5,7 @@ import { rejectUnsupportedCancellation, type SandboxCallOptions } from '@orca/sa
 
 import { randomUUID } from 'node:crypto';
 import { posix as posixPath } from 'node:path';
+import { normalizeEnvironmentPackages } from '@orca/sandbox-runtime';
 import type {
   EnvironmentSpec,
   SandboxCapabilities,
@@ -142,6 +143,9 @@ export class E2BSandboxRuntime implements SandboxRuntime {
   constructor(private readonly opts: E2BSandboxRuntimeOptions) {}
 
   async acquire(env: EnvironmentSpec): Promise<SandboxHandle> {
+    if (Object.keys(normalizeEnvironmentPackages(env.packages)).length > 0) {
+      throw new Error('E2B does not support isolated Environment package preparation');
+    }
     // Dynamic import so this file's compile + the harness's startup work
     // even when @e2b/code-interpreter isn't actually used (InMemory path).
     const mod = (await import('@e2b/code-interpreter')) as unknown as {

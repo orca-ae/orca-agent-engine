@@ -1,6 +1,10 @@
 // Copyright The Orca Authors
 // SPDX-License-Identifier: Apache-2.0
 
+import type { EnvironmentSpec } from '@orca/sandbox-runtime';
+
+export type EnvironmentProvisionSpec = Pick<EnvironmentSpec, 'packages' | 'networking'>;
+
 // Environment launcher framework — provider-agnostic lifecycle + start-worker
 // contract for running `environment-worker` inside one Environment backend
 // (a local child process, an E2B/OpenSandbox sandbox, ...).
@@ -56,7 +60,7 @@ export interface EnvironmentLauncher {
    * in the returned id (provider-assigned sandbox ids routinely differ from
    * the label passed in).
    */
-  provision(name: string): Promise<string>;
+  provision(name: string, spec?: EnvironmentProvisionSpec): Promise<string>;
   /** Start `environment-worker` inside the environment identified by `environmentId`. */
   startWorker(environmentId: string, opts: StartWorkerOptions): Promise<void>;
   /** Tear down the environment, releasing its resources. Safe to call more than once. */

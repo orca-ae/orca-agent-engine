@@ -29,7 +29,10 @@ ephemeral bookkeeping paths (for example Claude's private temp/debug
 directory) are implementation exceptions, not session storage: they are never
 indexed, survive no sandbox teardown, and must not overlap `/mnt`,
 `/workspace`, or a resource mount. SDK user/project setting sources are
-disabled so they cannot add writable paths.
+disabled so they cannot add writable paths. Claude's SDK sandbox is mandatory with
+`allowUnsandboxedCommands: false`. For Environment packages, the Bash hook also
+removes `dangerouslyDisableSandbox` before forwarding the command to the SDK and
+wraps the command in the read-only package filesystem boundary.
 
 The default access for `memory_store` and `github_repository` remains
 `read_write`; callers can set `access=read_only`. This preserves the existing
@@ -202,9 +205,9 @@ Repository trust relies on publisher ACLs and proxy integrity, not cryptographic
 release verification: tags remain mutable and this policy installs no signing
 infrastructure. See [OpenSandbox trust configuration](../opensandbox/README.md#repository-and-exact-image-trust)
 for defaults and custom operator authorization. OpenSandbox API is not
-tenant-facing, runtime package
-installation rejects before agent isolation, every acquisition uses gVisor
-FUSE, and pause/resume rejects before lifecycle or CR patch.
+tenant-facing. OpenSandbox prepares Environment packages in a separate credential-free
+init container; other runtimes reject nonempty package declarations. Every acquisition
+uses gVisor FUSE, and pause/resume rejects before lifecycle or CR patch.
 
 The sandbox-harness image also installs `bubblewrap` and `socat`, the Claude
 Agent SDK's Linux sandbox dependencies. Its image entrypoint uses

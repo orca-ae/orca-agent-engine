@@ -216,12 +216,13 @@ providers expose no provider-owned sealed mount namespace that can exclude image
 background processes from the setup window, so `colocated` rejects every
 Environment-supplied custom image and uses only the operator-owned harness
 catalog image (see [`roadmap.md`](./roadmap.md#known-limitations)). Managed
-sandbox execution also rejects non-empty Environment package installer
-declarations, because installer hooks could leave a concurrent process behind.
-In `separate` mode an Environment
-image is not used; the operator-selected runtime image or template remains the
-trust boundary. An Environment that sets those fields fails these checks; remove
-the fields or select an operator-controlled catalog/runtime image.
+sandbox execution accepts Environment package declarations only on OpenSandbox,
+which runs installers in a credential-free init container. After it terminates,
+tools use a staged read-only workload filesystem while trusted setup and SDK
+processes retain the original image. Pinned Skills replace any package-provided
+Skill tree. See [resource mounting](resource-mounting.md). In `separate` mode an
+Environment image is not used; the operator-selected runtime image or template
+remains the trust boundary.
 
 Session resources cannot mount at `/workspace/skills`, below it, or at an
 ancestor that could replace the tree. Registry enforces this on Session create,

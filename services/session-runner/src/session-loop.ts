@@ -75,7 +75,7 @@ import {
   selectManagedSkills,
 } from './skills-materialize.js';
 import { RunnerResources } from './resources.js';
-import { composeSkillsCatalog } from './sandbox/seam.js';
+import { composeSkillsCatalog, currentEnvironmentPackagesRevision } from './sandbox/seam.js';
 import {
   sessionSandboxRuntime,
   supportsNativeFileCompletion,
@@ -661,6 +661,11 @@ export class SessionLoop {
     if (this.hasActiveWork()) throw new Error('cannot configure snapshot during a turn');
     const snapshot = parseSnapshotBody(body);
     const managed = snapshot.managed_resources;
+    if (currentEnvironmentPackagesRevision() && managed === undefined) {
+      throw new Error(
+        'prepared Environment packages require a provider with managed tool resources',
+      );
+    }
     const native = snapshot.sandbox_resources;
     const fingerprint = native ? nativeSnapshotFingerprint(snapshot) : undefined;
     if (native) {

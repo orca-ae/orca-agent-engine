@@ -66,6 +66,7 @@ interface SessionResponse {
 
 interface FileResponse {
   id: string;
+  downloadable: boolean;
 }
 
 interface MemoryStoreResponse {
@@ -183,6 +184,7 @@ describe('Layer B.1: sandbox harness mode (live registry + harness + OpenSandbox
     memStores: string[];
     skills: string[];
     guardrails: string[];
+    environments: string[];
   } = {
     sessions: [],
     agents: [],
@@ -190,6 +192,7 @@ describe('Layer B.1: sandbox harness mode (live registry + harness + OpenSandbox
     memStores: [],
     skills: [],
     guardrails: [],
+    environments: [],
   };
 
   beforeAll(async () => {
@@ -259,6 +262,9 @@ describe('Layer B.1: sandbox harness mode (live registry + harness + OpenSandbox
         method: 'DELETE',
         body: JSON.stringify({}),
       }).catch(() => {});
+    }
+    for (const id of created.environments.splice(0)) {
+      await deleteTestEnvironment(cfg, id).catch(() => {});
     }
   });
 
@@ -955,6 +961,135 @@ describe('Layer B.1: sandbox harness mode (live registry + harness + OpenSandbox
     ).toBe(false);
     expect(listed.data.some((frame) => frame.type === 'agent.tool_result')).toBe(false);
   }, 480_000);
+
+  it('runs Environment-installed packages through the real Session tool and Files API', async () => {
+    const suffix = randomUUID();
+    const marker = `package-input-${randomUUID()}`;
+    const filename = `environment-packages-${suffix}.json`;
+    const inputPath = '/mnt/package-input.txt';
+    const scriptPath = '/mnt/package-check.sh';
+    const outputPath = `/mnt/session/outputs/${filename}`;
+    const environment = await apiCall(cfg, '/v1/environments', {
+      method: 'POST',
+      body: JSON.stringify({
+        name: `package-environment-${suffix}`,
+        config: {
+          type: 'cloud',
+          networking: { type: 'unrestricted' },
+          packages: { apt: ['jq'], pip: ['idna==3.10'], npm: ['is-number@7.0.0'] },
+        },
+      }),
+    });
+    expect(environment.status, environment.text).toBe(200);
+    const packageEnvironmentId = environment.json<{ id: string }>().id;
+    created.environments.push(packageEnvironmentId);
+    const upload = new FormData();
+    upload.append('file', new Blob([marker], { type: 'text/plain' }), 'package-input.txt');
+    const fileResponse = await apiCall(cfg, '/v1/files', { method: 'POST', body: upload });
+    expect(fileResponse.status, fileResponse.text).toBe(200);
+    const file = fileResponse.json<FileResponse>();
+    expect(file.downloadable).toBe(false);
+    created.files.push(file.id);
+    const script = [
+      '#!/bin/bash',
+      'set -eu',
+      'test -z "${EXECD_ACCESS_TOKEN:-}"',
+      "node -e \"if(require('fs').readFileSync('/proc/1/environ','utf8').includes('EXECD_ACCESS_TOKEN='))process.exit(1)\"",
+      'node -e "fetch(\'http://127.0.0.1:44772/ping\', {signal:AbortSignal.timeout(5000)}).then(r=>{if(r.status<400)process.exit(1)}).catch(()=>{})"',
+      `if printf denied >> '${inputPath}'; then exit 81; fi`,
+      `input="$(cat '${inputPath}')"`,
+      'pip="$(python -c \'import idna; print(idna.__version__)\')"',
+      'npm="$(node -e "console.log(require(\'is-number\')(42))")"',
+      'test "$npm" = true',
+      `jq -cn --arg input "$input" --arg pip "$pip" --arg npm "$npm" '{input:$input,pip:$pip,npm:$npm}' > '${outputPath}'`,
+    ].join('\n');
+    const scriptUpload = new FormData();
+    scriptUpload.append('file', new Blob([script], { type: 'text/plain' }), 'package-check.sh');
+    const scriptResponse = await apiCall(cfg, '/v1/files', { method: 'POST', body: scriptUpload });
+    expect(scriptResponse.status, scriptResponse.text).toBe(200);
+    const scriptFile = scriptResponse.json<FileResponse>();
+    created.files.push(scriptFile.id);
+    const agentResponse = await apiCall(cfg, '/v1/agents', {
+      method: 'POST',
+      body: JSON.stringify({
+        name: `package-agent-${suffix}`,
+        model: COLOCATED_AGENT.model,
+        system:
+          'Execute the exact requested shell command once. Do not substitute file-writing tools, guess results, or repair failed commands. Wait for the tool result before replying.',
+        tools: ALWAYS_ALLOW_SANDBOX_TOOLS,
+        mcp_servers: [],
+        skills: [],
+        metadata: COLOCATED_AGENT.metadata,
+      }),
+    });
+    expect(agentResponse.status, agentResponse.text).toBe(200);
+    const agent = agentResponse.json<AgentResponse>();
+    created.agents.push(agent.id);
+    const sessionResponse = await apiCall(cfg, '/v1/sessions', {
+      method: 'POST',
+      body: JSON.stringify({
+        environment_id: packageEnvironmentId,
+        agent_id: agent.id,
+        resources: [
+          { type: 'file', file_id: file.id, mount_path: inputPath, access: 'read_only' },
+          { type: 'file', file_id: scriptFile.id, mount_path: scriptPath, access: 'read_only' },
+        ],
+      }),
+    });
+    expect(sessionResponse.status, sessionResponse.text).toBe(200);
+    const session = sessionResponse.json<SessionResponse>();
+    created.sessions.push(session.id);
+    const command = `bash ${scriptPath}`;
+    const submitted = await apiCall(cfg, `/v1/sessions/${session.id}/events`, {
+      method: 'POST',
+      body: JSON.stringify({
+        events: [
+          {
+            type: 'user.message',
+            content: [
+              {
+                type: 'text',
+                text: `Use ${COLOCATED_AGENT.tools.bash} once with command exactly ${JSON.stringify(command)}. Reply after the tool finishes.`,
+              },
+            ],
+          },
+        ],
+        request_id: `environment-packages-${suffix}`,
+      }),
+    });
+    expect(submitted.status, submitted.text).toBe(200);
+    const frames = await collectSseFrames(cfg, session.id, {
+      deadlineMs: 1_080_000,
+      until: (items) =>
+        items.some((frame) => frame.type === 'session.error' || frame.type === 'agent.tool_result'),
+    });
+    const error = frames.find((frame) => frame.type === 'session.error');
+    expect(error, error ? JSON.stringify(error) : undefined).toBeUndefined();
+    expect(
+      frames.some(
+        (frame) =>
+          frame.type === 'agent.tool_use' &&
+          frame.name === COLOCATED_AGENT.tools.bash &&
+          JSON.stringify(frame.input ?? {}).includes(scriptPath),
+      ),
+      JSON.stringify(frames),
+    ).toBe(true);
+    const results = frames.filter((frame) => frame.type === 'agent.tool_result');
+    expect(results.length).toBeGreaterThan(0);
+    expect(
+      results.every((result) => result.is_error === false),
+      JSON.stringify(results),
+    ).toBe(true);
+    const output = await waitForScopedOutputFile(cfg, session.id, filename, 30_000);
+    created.files.push(output.id);
+    expect(JSON.parse(await downloadFileText(cfg, output.id)), JSON.stringify(results)).toEqual({
+      input: marker,
+      pip: '3.10',
+      npm: 'true',
+    });
+    const inputDownload = await apiCall(cfg, `/v1/files/${file.id}/content`, { method: 'GET' });
+    expect(inputDownload.status, inputDownload.text).toBe(403);
+  }, 1_200_000);
 
   it('captures an in-sandbox output immediately after its tool result', async () => {
     const suffix = Date.now();

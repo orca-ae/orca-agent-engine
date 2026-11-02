@@ -130,7 +130,8 @@ describe('Claude SDK bounded agent Read wire', () => {
             : block.content
                 .map((item: { type: string; text?: string }) => item.text ?? '')
                 .join('');
-        const metadata = /\[orca_read (\{[^\n]+\})\]$/.exec(text);
+        // The SDK can append a token budget reminder after the tool's payload.
+        const metadata = /^\[orca_read (\{[^\n]+\})\]$/m.exec(text);
         expect(
           metadata,
           'Read must remain an inline page with continuation metadata',

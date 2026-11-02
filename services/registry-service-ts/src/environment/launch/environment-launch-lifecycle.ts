@@ -71,7 +71,11 @@
 // box. Cross-replica single-flighting belongs in the durable claim (or a new
 // lease row), not in this in-memory map.
 
-import type { EnvironmentLauncher, StartWorkerOptions } from '../launcher/types.js';
+import type {
+  EnvironmentLauncher,
+  StartWorkerOptions,
+  EnvironmentProvisionSpec,
+} from '../launcher/types.js';
 
 /** Default wait-online timeout (ms): how long a started worker has to dial in before the launch fails. */
 export const DEFAULT_WAIT_ONLINE_TIMEOUT_MS = 120_000;
@@ -112,6 +116,7 @@ export interface LifecycleLogger {
 
 /** Options for {@link EnvironmentLaunchLifecycle}. */
 export interface EnvironmentLaunchLifecycleOptions {
+  loadProvisionSpec?: (environmentId: string) => Promise<EnvironmentProvisionSpec>;
   /** The provider backend (local, or a cloud sandbox backend) that actually provisions/starts/terminates. */
   launcher: EnvironmentLauncher;
   /** Mints/revokes the per-launch Environment Token. */
@@ -167,6 +172,7 @@ export class EnvironmentLaunchLifecycle {
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly now: () => number;
   private readonly logger: LifecycleLogger | undefined;
+  private readonly loadProvisionSpec: EnvironmentLaunchLifecycleOptions['loadProvisionSpec'];
 
   /** The launch tracker: in-flight launches keyed by REGISTRY environment id. */
   private readonly inFlight = new Map<string, Promise<LaunchOutcome>>();
@@ -183,6 +189,7 @@ export class EnvironmentLaunchLifecycle {
     this.sleep = opts.sleep ?? defaultSleep;
     this.now = opts.now ?? Date.now;
     this.logger = opts.logger;
+    this.loadProvisionSpec = opts.loadProvisionSpec;
   }
 
   /**
@@ -286,7 +293,10 @@ export class EnvironmentLaunchLifecycle {
 
     let launcherEnvironmentId: string;
     try {
-      launcherEnvironmentId = await this.launcher.provision(opts.name);
+      const spec = await this.loadProvisionSpec?.(environmentId);
+      launcherEnvironmentId = spec
+        ? await this.launcher.provision(opts.name, spec)
+        : await this.launcher.provision(opts.name);
     } catch (err) {
       // Nothing was armed yet — no terminate/revoke needed, just report.
       this.logger?.error?.({ err, environmentId }, 'environment-launch: provision failed');

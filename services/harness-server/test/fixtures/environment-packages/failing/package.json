@@ -1,0 +1,8 @@
+{
+  "name": "orca-package-failing-fixture",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "install": "node -e \"console.error('installer-private-output'); process.exit(42)\""
+  }
+}

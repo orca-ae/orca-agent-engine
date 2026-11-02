@@ -7,6 +7,8 @@ import type { MemoryStore } from '@orca/memory-store';
 import {
   buildSandboxWritePolicy,
   parseResourceManifest,
+  normalizeEnvironmentPackages,
+  environmentPackagesRevision,
   type ResourceMountDescriptor,
   type ResourceManifest,
   type GitProxyCapability,
@@ -53,6 +55,9 @@ export function runnerResourceRevision(
           })),
         domains: runnerToolNetworkDomains(prepared, additionalDomains),
         unrestricted: runnerToolNetworkUnrestricted(prepared),
+        ...(Object.keys(normalizeEnvironmentPackages(prepared.environment?.packages)).length > 0
+          ? { environmentPackages: environmentPackagesRevision(prepared.environment!.packages!) }
+          : {}),
       }),
     )
     .digest('hex');
@@ -186,7 +191,14 @@ export async function prepareRunnerResources(
     }
     return {
       manifest: parseResourceManifest({
-        version: 1,
+        ...(Object.keys(normalizeEnvironmentPackages(prepared.environment?.packages)).length > 0
+          ? {
+              version: 2,
+              environment_packages_revision: environmentPackagesRevision(
+                prepared.environment!.packages!,
+              ),
+            }
+          : { version: 1 }),
         revision,
         resources,
       }),

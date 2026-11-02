@@ -4769,6 +4769,7 @@ export class Dispatcher {
           mode: selection.mode,
           image: prepared?.environment?.image,
           packages: prepared?.environment?.packages,
+          supportsEnvironmentPackages: runtime.capabilities.supportsEnvironmentPackages,
         });
 
         if (selection.mode === 'colocated') {
@@ -4781,6 +4782,7 @@ export class Dispatcher {
             })),
             {
               includeSkillsRoot: sessionSkills.length > 0,
+              environmentPackages: Object.keys(environmentSpec.packages ?? {}).length > 0,
               networkAllowedDomains:
                 repoUrls.length > 0 && this.opts.gitCredsPublicUrl
                   ? networkAllowedDomainsFromUrls([...repoUrls, this.opts.gitCredsPublicUrl])
@@ -5283,6 +5285,11 @@ export class Dispatcher {
             if (!inSandboxWritePolicy) {
               throw new Error('in-sandbox write policy was not initialized');
             }
+            if (inSandboxWritePolicy.environmentPackages) {
+              if (!sandbox.prepareWritePolicy)
+                throw new Error('package runtime cannot prepare its write policy');
+              await sandbox.prepareWritePolicy(inSandboxWritePolicy);
+            }
             const filesystemBoundaryProbe = await sandbox.run({
               tool: 'bash',
               args: {
@@ -5338,7 +5345,10 @@ export class Dispatcher {
                 access: normalizeWritePolicyAccess(resource?.access),
               };
             }),
-            { includeSkillsRoot: sessionSkills.length > 0 },
+            {
+              includeSkillsRoot: sessionSkills.length > 0,
+              environmentPackages: Object.keys(environmentSpec.packages ?? {}).length > 0,
+            },
           );
           try {
             agentSandbox = await createPolicyEnforcedSandbox(

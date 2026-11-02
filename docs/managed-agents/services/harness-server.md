@@ -327,8 +327,11 @@ policy used by the other remote runtimes.
    referenced files on demand. Before the first sandbox write, remote runtimes
    reject aliases and pre-existing mounts at or below every planned filesystem
    root. Until providers expose a sealed setup namespace, `colocated` rejects
-   Environment custom images and all managed sandbox executions reject package
-   installer hooks. See [`../skills.md`](../skills.md).
+   Environment custom images remain rejected. OpenSandbox package installers run
+   in a completed init container with no Session credentials or resources; the
+   agent uses their prepared filesystem through the write boundary while platform
+   probes, SDKs and mount helpers retain the original image. Other runtimes reject
+   packages. See [`../resource-mounting.md`](../resource-mounting.md).
 
 7. Tool dispatch:
    - **`agent_toolset`** (bash, read, write, edit, glob, grep, web_fetch — seven tools; `web_search` is accepted as a wire name but has no implementation) → `SandboxRuntime.run(tool, input)`. Accept `agent_toolset_20260401` from inbound SDK and normalize.

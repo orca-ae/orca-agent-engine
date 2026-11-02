@@ -20,7 +20,32 @@ describe('Skill execution environment trust boundary', () => {
         mode: 'separate',
         packages: { npm: ['untrusted-package'] },
       }),
-    ).toThrow(/package installers/);
+    ).toThrow(/package preparation/);
+  });
+
+  it('allows all package managers only behind an isolated preparation capability', () => {
+    expect(() =>
+      assertSandboxEnvironmentTrust({
+        mode: 'colocated',
+        supportsEnvironmentPackages: true,
+        packages: {
+          apt: ['jq'],
+          cargo: ['ripgrep'],
+          gem: ['rake'],
+          go: ['example.com/tool@v1.0.0'],
+          npm: ['typescript'],
+          pip: ['requests'],
+        },
+      }),
+    ).not.toThrow();
+    expect(() =>
+      assertSandboxEnvironmentTrust({
+        mode: 'colocated',
+        supportsEnvironmentPackages: true,
+        image: 'untrusted.example/image:latest',
+        packages: { apt: ['jq'] },
+      }),
+    ).toThrow(/custom in-sandbox images/);
   });
 
   it('allows the operator catalog image and empty package declarations', () => {

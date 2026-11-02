@@ -22,20 +22,24 @@
 //
 // Provisioning model — "exec the worker" (see types.ts's module doc for the
 // entrypoint-as-worker/exec-the-worker distinction): `provision` acquires a
-// bare box via the injected `SandboxRuntime` (no packages/image overrides —
-// those are per-SESSION `EnvironmentSpec` concerns; an Environment-level box
-// takes its image from the runtime's OWN constructor config). `startWorker`
+// box via the injected `SandboxRuntime`, forwarding the stored Environment's
+// package declarations and networking. The runtime completes isolated package
+// preparation before the lifecycle mints the worker's token. The box takes its
+// image from the runtime's constructor config. `startWorker`
 // then execs `environment-worker` INSIDE that box, detached (`nohup ... &`)
 // so the blocking bash tool-call returns immediately while the worker keeps
 // running — the box must already have `environment-worker` (and, for when
 // it in turn spawns session-runner per session, `session-runner`) installed,
 // e.g. via a custom Orca Environment template/image, exactly like the E2B
 // `orca-default` template already bakes in FUSE tooling for session sandboxes
-// today. Building/publishing that image is an infra follow-up, not this
-// module's concern — this module only supplies the launcher-side wiring.
+// today. This module supplies the launcher-side wiring for those images.
 
-import type { SandboxHandle, SandboxRuntime } from '@orca/sandbox-runtime';
-import type { EnvironmentLauncher, StartWorkerOptions } from './types.js';
+import {
+  normalizeEnvironmentPackages,
+  type SandboxHandle,
+  type SandboxRuntime,
+} from '@orca/sandbox-runtime';
+import type { EnvironmentLauncher, StartWorkerOptions, EnvironmentProvisionSpec } from './types.js';
 import { dialBackEnv } from './worker-env.js';
 
 /** Default workspace dir inside the box, under which environment-worker creates session-runner workspaces. Override per deployment if the Environment image uses a different layout. */
@@ -111,8 +115,14 @@ export class CloudEnvironmentLauncher implements EnvironmentLauncher {
    * config, not a per-acquire override (mirrors `LocalEnvironmentLauncher`,
    * which likewise ignores `name`).
    */
-  async provision(_name: string): Promise<string> {
-    const handle = await this.runtime.acquire({});
+  async provision(_name: string, spec?: EnvironmentProvisionSpec): Promise<string> {
+    if (
+      Object.keys(normalizeEnvironmentPackages(spec?.packages)).length > 0 &&
+      this.runtime.capabilities.supportsEnvironmentPackages !== true
+    ) {
+      throw new Error('Environment launcher runtime does not support isolated package preparation');
+    }
+    const handle = await this.runtime.acquire(spec ?? {});
     this.handles.set(handle.id, handle);
     return handle.id;
   }

@@ -3,6 +3,11 @@
 
 import copy
 import json
+import hashlib
+from pathlib import Path
+
+from kubernetes import client as k8s
+from fastapi import HTTPException
 
 import pytest
 
@@ -14,10 +19,57 @@ from opensandbox_server.config import (
     SecureRuntimeConfig,
 )
 from opensandbox_server.services.k8s.batchsandbox_provider import BatchSandboxProvider
+from opensandbox_server.services.k8s.batchsandbox_provider import _package_plan, _package_init_container
 from opensandbox_server.services.k8s.security_context import (
     build_security_context_from_dict,
     serialize_security_context_to_dict,
 )
+
+
+PACKAGE_FIXTURES = json.loads(Path(__file__).with_name("environment-packages.json").read_text())
+
+
+@pytest.mark.parametrize("case", PACKAGE_FIXTURES["valid"], ids=lambda case: case["name"])
+def test_package_plan_matches_typescript_golden(case):
+    normalized = _package_plan(json.dumps({"version": 1, "packages": case["packages"]}))
+    assert normalized == case["normalized"]
+    revision = hashlib.sha256(json.dumps(normalized, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+    assert revision == case["revision"]
+    assert case["revision"] in _package_init_container("image", normalized, {})["command"][-1]
+
+
+@pytest.mark.parametrize("case", PACKAGE_FIXTURES["invalid"], ids=lambda case: case["name"])
+def test_package_plan_rejects_typescript_golden(case):
+    with pytest.raises(ValueError, match="specification"):
+        _package_plan(json.dumps({"version": 1, "packages": case["packages"]}))
+
+
+def test_package_spec_length_uses_utf16_units():
+    assert _package_plan(json.dumps({"version": 1, "packages": {"npm": ["🚀" * 512]}}))
+    with pytest.raises(ValueError, match="specification"):
+        _package_plan(json.dumps({"version": 1, "packages": {"npm": ["🚀" * 513]}}))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", [
+    "ENVIRONMENT_PACKAGES_INSTALL_FAILED", "ENVIRONMENT_PACKAGES_START_FAILED",
+    "ENVIRONMENT_PACKAGES_STORAGE_LIMIT", "ENVIRONMENT_PACKAGES_POD_EVICTED",
+])
+async def test_package_failure_during_creation_rolls_back_without_logs(
+    k8s_service, mock_workload, create_sandbox_request, reason
+):
+    k8s_service.app_config.kubernetes.sandbox_create_timeout_seconds = 1
+    k8s_service.app_config.kubernetes.sandbox_create_poll_interval_seconds = 0.01
+    k8s_service.workload_provider.get_workload.return_value = mock_workload
+    k8s_service.workload_provider.get_status.return_value = {
+        "state": "Failed", "reason": reason, "message": "installer-private-output",
+    }
+    with pytest.raises(HTTPException) as exc:
+        await k8s_service.create_sandbox(create_sandbox_request)
+    assert exc.value.status_code == 500
+    assert exc.value.detail["code"] == reason
+    assert "installer-private-output" not in json.dumps(exc.value.detail)
+    k8s_service.workload_provider.delete_workload.assert_called_once()
 
 
 TRUSTED_IMAGE = "registry.example/orca@sha256:" + "b" * 64
@@ -33,6 +85,250 @@ OFFICIAL_WORKLOADS = [
     ("sandbox-harness-dsh", ["/usr/local/bin/orca-sandbox-harness"]),
 ]
 MIRROR_PREFIXES = ["registry.example.com:5000/mirror/orca", "docker.io/orca-mirror"]
+
+
+@pytest.mark.parametrize("image_pull_policy", ["IfNotPresent", "Always", "Never"])
+def test_package_preparation_is_a_separate_credential_free_init_container(
+    mock_k8s_client, image_pull_policy
+):
+    packages = {
+        "apt": ["jq"],
+        "cargo": ["ripgrep"],
+        "gem": ["rake"],
+        "go": ["example.com/tool@v1.0.0"],
+        "npm": ["typescript"],
+        "pip": ["requests"],
+    }
+    provider = BatchSandboxProvider(mock_k8s_client, _app_config())
+    provider.image_pull_policy = image_pull_policy
+    provider.create_workload(
+        sandbox_id="packages-id",
+        namespace="test-ns",
+        image_spec=ImageSpec(uri="ghcr.io/orca-ae/sandbox-harness-claude-code:latest"),
+        entrypoint=["/usr/local/bin/orca-sandbox-harness"],
+        env={"LITELLM_API_KEY": "runtime-only-sentinel", "EXECD_ACCESS_TOKEN": "a" * 64},
+        resource_limits={"cpu": "1", "memory": "2Gi"},
+        labels={},
+        expires_at=None,
+        execd_image="execd:test",
+        extensions={
+            **ISOLATION_EXTENSIONS,
+            "orca.environment.packages.v1": json.dumps({"version": 1, "packages": packages}),
+        },
+    )
+    pod = mock_k8s_client.create_custom_object.call_args.kwargs["body"]["spec"]["template"]["spec"]
+    installer = next(
+        item for item in pod["initContainers"] if item["name"] == "orca-environment-packages"
+    )
+    assert "runtime-only-sentinel" not in json.dumps(installer)
+    assert installer["volumeMounts"] == [
+        {"name": "orca-environment-packages", "mountPath": "/opt/orca-environment-packages"}
+    ]
+    runtime = next(item for item in pod["containers"] if item["name"] == "sandbox")
+    assert installer.get("imagePullPolicy") == image_pull_policy
+    assert runtime["imagePullPolicy"] == image_pull_policy
+    assert {
+        "name": "orca-environment-packages",
+        "mountPath": "/opt/orca-environment-packages",
+        "readOnly": True,
+    } in runtime["volumeMounts"]
+    assert pod["shareProcessNamespace"] is False
+    assert pod["automountServiceAccountToken"] is False
+    script = installer["command"][-1]
+    assert script.index("apt-get install") < script.index("pip install")
+    for command in ("cargo install", "gem install", "go install", "npm install", "pip install"):
+        assert command in script
+
+
+@pytest.mark.parametrize(
+    "packages",
+    [
+        {"brew": ["jq"]},
+        {"apt": ["--allow-unauthenticated"]},
+        {"pip": ["requests\nother"]},
+        {"gem": "rake"},
+    ],
+)
+def test_invalid_package_plans_fail_before_workload_creation(packages):
+    with pytest.raises(ValueError):
+        _package_plan(json.dumps({"version": 1, "packages": packages}))
+
+
+def test_package_specs_are_shell_arguments_and_go_versions_are_independent():
+    container = _package_init_container(
+        "image",
+        {
+            "npm": ["name; touch /tmp/injected"],
+            "go": ["example.com/a@v1.0.0", "example.com/b@v2.0.0"],
+        },
+        {},
+    )
+    script = container["command"][-1]
+    assert "-- 'name; touch /tmp/injected'" in script
+    assert "go install example.com/a@v1.0.0\ngo install example.com/b@v2.0.0" in script
+
+
+@pytest.mark.parametrize("phase", ["", "Pending", "Failed"])
+def test_package_preparation_returns_allocated_without_hiding_failure(mock_k8s_client, phase):
+    provider = BatchSandboxProvider(mock_k8s_client, _app_config())
+    workload = {
+        "metadata": {"annotations": {"sandbox.opensandbox.io/endpoints": '["10.0.0.1"]'}},
+        "status": {"phase": phase},
+        "spec": {"template": {"spec": {"initContainers": [{"name": "orca-environment-packages"}]}}},
+    }
+    assert provider.get_status(workload)["state"] == (
+        "Failed" if phase == "Failed" else "Allocated"
+    )
+    if phase == "Pending":
+        workload["spec"]["template"]["spec"]["initContainers"] = []
+        assert provider.get_status(workload)["state"] == "Pending"
+
+
+@pytest.mark.parametrize(("state", "reason"), [
+    (k8s.V1ContainerState(terminated=k8s.V1ContainerStateTerminated(exit_code=42, message="installer-private-output")), "ENVIRONMENT_PACKAGES_INSTALL_FAILED"),
+    (k8s.V1ContainerState(waiting=k8s.V1ContainerStateWaiting(reason="CrashLoopBackOff", message="installer-private-output")), "ENVIRONMENT_PACKAGES_START_FAILED"),
+    (k8s.V1ContainerState(waiting=k8s.V1ContainerStateWaiting(reason="ImagePullBackOff", message="installer-private-output")), "ENVIRONMENT_PACKAGES_START_FAILED"),
+])
+def test_package_init_failure_is_terminal_and_redacted(mock_k8s_client, state, reason):
+    provider = BatchSandboxProvider(mock_k8s_client, _app_config())
+    container = k8s.V1ContainerStatus(name="orca-environment-packages", image="image", image_id="image", ready=False, restart_count=1, state=state)
+    mock_k8s_client.list_pods.return_value = [k8s.V1Pod(status=k8s.V1PodStatus(init_container_statuses=[container]))]
+    workload = {
+        "metadata": {"name": "package-sandbox", "namespace": "test-ns", "annotations": {"sandbox.opensandbox.io/endpoints": '["10.0.0.1"]'}},
+        "status": {"phase": "Pending"},
+        "spec": {"template": {"spec": {"initContainers": [{"name": "orca-environment-packages"}]}}},
+    }
+    result = provider.get_status(workload)
+    assert result["state"] == "Failed"
+    assert result["reason"] == reason
+    assert "installer-private-output" not in json.dumps(result)
+    mock_k8s_client.list_pods.assert_called_once_with(namespace="test-ns", label_selector="batch-sandbox.sandbox.opensandbox.io/name=package-sandbox")
+
+
+@pytest.mark.parametrize("recovery", ["running", "backoff"])
+def test_package_image_pull_error_can_recover_or_reach_backoff(mock_k8s_client, recovery):
+    provider = BatchSandboxProvider(mock_k8s_client, _app_config())
+    container = k8s.V1ContainerStatus(name="orca-environment-packages", image="image", image_id="image", ready=False, restart_count=0, state=k8s.V1ContainerState(waiting=k8s.V1ContainerStateWaiting(reason="ErrImagePull", message="installer-private-output")))
+    mock_k8s_client.list_pods.return_value = [k8s.V1Pod(status=k8s.V1PodStatus(init_container_statuses=[container]))]
+    workload = {
+        "metadata": {"name": "package-sandbox", "namespace": "test-ns", "annotations": {"sandbox.opensandbox.io/endpoints": '["10.0.0.1"]'}},
+        "status": {"phase": "Pending"},
+        "spec": {"template": {"spec": {"initContainers": [{"name": "orca-environment-packages"}]}}},
+    }
+    result = provider.get_status(workload)
+    assert result["state"] == "Allocated"
+    assert "installer-private-output" not in json.dumps(result)
+    if recovery == "running":
+        container.state = k8s.V1ContainerState(running=k8s.V1ContainerStateRunning())
+        assert provider.get_status(workload)["state"] == "Allocated"
+        workload["status"]["phase"] = "Running"
+        assert provider.get_status(workload)["state"] == "Running"
+    else:
+        container.state.waiting.reason = "ImagePullBackOff"
+        assert provider.get_status(workload)["reason"] == "ENVIRONMENT_PACKAGES_START_FAILED"
+
+
+@pytest.mark.parametrize(("pod_message", "reason"), [
+    ("Pod ephemeral-storage usage exceeds limit: installer-private-output", "ENVIRONMENT_PACKAGES_STORAGE_LIMIT"),
+    ("The node was low on resource: installer-private-output", "ENVIRONMENT_PACKAGES_POD_EVICTED"),
+])
+def test_package_pod_eviction_is_terminal_and_redacted(mock_k8s_client, pod_message, reason):
+    provider = BatchSandboxProvider(mock_k8s_client, _app_config())
+    mock_k8s_client.list_pods.return_value = [k8s.V1Pod(status=k8s.V1PodStatus(reason="Evicted", message=pod_message))]
+    workload = {
+        "metadata": {"name": "package-sandbox", "namespace": "test-ns"},
+        "status": {"phase": "Failed"},
+        "spec": {"template": {"spec": {"initContainers": [{"name": "orca-environment-packages"}]}}},
+    }
+    result = provider.get_status(workload)
+    assert result["state"] == "Failed"
+    assert result["reason"] == reason
+    assert "installer-private-output" not in json.dumps(result)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "shared-volume",
+        "writable-runtime",
+        "no-runtime-mount",
+        "credential-env",
+        "unbounded-installer",
+        "service-account",
+        "ephemeral-writer",
+        "execd-auth",
+        "installer-pull-policy",
+        "runtime-pull-policy",
+    ],
+)
+def test_template_cannot_weaken_package_preparation(mock_k8s_client, monkeypatch, change):
+    provider = BatchSandboxProvider(mock_k8s_client, _app_config())
+    merge = provider.template_manager.merge_with_runtime_values
+
+    def mutate(manifest):
+        result = merge(manifest)
+        pod = result["spec"]["template"]["spec"]
+        installer = next(
+            item for item in pod["initContainers"] if item["name"] == "orca-environment-packages"
+        )
+        runtime = next(item for item in pod["containers"] if item["name"] == "sandbox")
+        if change == "shared-volume":
+            pod["volumes"] = [
+                {
+                    "name": "orca-environment-packages",
+                    "persistentVolumeClaim": {"claimName": "shared"},
+                }
+            ]
+        elif change == "writable-runtime":
+            next(
+                mount
+                for mount in runtime["volumeMounts"]
+                if mount["name"] == "orca-environment-packages"
+            )["readOnly"] = False
+        elif change == "no-runtime-mount":
+            runtime["volumeMounts"] = [
+                mount
+                for mount in runtime["volumeMounts"]
+                if mount["name"] != "orca-environment-packages"
+            ]
+        elif change == "credential-env":
+            installer["envFrom"] = [{"secretRef": {"name": "runtime-credentials"}}]
+        elif change == "service-account":
+            pod["automountServiceAccountToken"] = True
+        elif change == "ephemeral-writer":
+            pod["ephemeralContainers"] = [
+                {"name": "debug", "volumeMounts": copy.deepcopy(installer["volumeMounts"])}
+            ]
+        elif change == "execd-auth":
+            next(entry for entry in runtime["env"] if entry["name"] == "EXECD_ACCESS_TOKEN")["value"] = "f" * 64
+        elif change == "installer-pull-policy":
+            installer["imagePullPolicy"] = "Always"
+        elif change == "runtime-pull-policy":
+            runtime["imagePullPolicy"] = "Always"
+        else:
+            installer["resources"] = {}
+        return result
+
+    monkeypatch.setattr(provider.template_manager, "merge_with_runtime_values", mutate)
+    with pytest.raises(ValueError, match="package"):
+        provider.create_workload(
+            sandbox_id="packages-id",
+            namespace="test-ns",
+            image_spec=ImageSpec(uri="ghcr.io/orca-ae/sandbox-harness-claude-code:v1"),
+            entrypoint=["/usr/local/bin/orca-sandbox-harness"],
+            env={"EXECD_ACCESS_TOKEN": "a" * 64},
+            resource_limits={"cpu": "1", "memory": "2Gi"},
+            labels={},
+            expires_at=None,
+            execd_image="execd:test",
+            extensions={
+                **ISOLATION_EXTENSIONS,
+                "orca.environment.packages.v1": json.dumps(
+                    {"version": 1, "packages": {"apt": ["jq"]}}
+                ),
+            },
+        )
+    mock_k8s_client.create_custom_object.assert_not_called()
 
 
 @pytest.fixture(autouse=True)

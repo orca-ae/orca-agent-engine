@@ -29,6 +29,7 @@ import {
 } from './sandbox/seam.js';
 import {
   buildSandboxWritePolicy,
+  currentEnvironmentPackagesRevision,
   planSkillBundleChmod,
   createPolicyEnforcedSandbox,
   createManagedToolSandboxRuntime,
@@ -422,6 +423,13 @@ export class RunnerResources {
 
   private async begin(message: Record<string, unknown>): Promise<{ committed: boolean }> {
     const manifest = parseResourceManifest(message.manifest);
+    if (manifest.environment_packages_revision !== currentEnvironmentPackagesRevision()) {
+      throw new Error(
+        'Environment packages changed; provision a matching cloud worker before starting this Session',
+      );
+    }
+    if (message.placement === 'session_sandbox' && currentEnvironmentPackagesRevision())
+      throw new Error('prepared Environment packages require managed tool resources');
     const native = message.placement === 'session_sandbox';
     if (message.placement !== undefined && !native)
       throw new Error('Unsupported resource placement');
@@ -541,6 +549,12 @@ export class RunnerResources {
       const rawRoot = (raw as SandboxHandle & { rootDir?(): string }).rootDir?.();
       if (!rawRoot) throw new Error('managed tool sandbox has no private root');
       const root = await realpath(rawRoot);
+      await raw.prepareFilesystemRoots?.([
+        ...incoming.manifest.resources.map((resource) => resource.mount_path),
+        '/workspace/skills',
+        '/mnt/session/outputs',
+        GIT_PROXY_AUTH_ROOT,
+      ]);
       const baseline = new Map<string, string>();
       for (const resource of incoming.manifest.resources) {
         if (resource.kind !== 'file')
@@ -1521,6 +1535,7 @@ function policyFor(manifest: ResourceManifest, domains: string[], unrestricted =
     {
       networkAllowedDomains: domains,
       networkUnrestricted: unrestricted,
+      environmentPackages: manifest.version === 2,
       includeSkillsRoot: true,
       includeGitProxyRoot: true,
     },

@@ -126,6 +126,39 @@ describe('patched Pulsar native build', () => {
     expect(build.cleanup).toHaveBeenCalledOnce();
   });
 
+  it('falls back to the archive when the official CDN has removed a release', async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: false, status: 404, body: { cancel: async () => undefined } })
+      .mockResolvedValueOnce(response());
+    const build = install(fetch);
+    await expect(build.result).resolves.toBeUndefined();
+    expect(fetch.mock.calls.map(([url]) => new URL(url).hostname)).toEqual([
+      'dlcdn.apache.org',
+      'archive.apache.org',
+    ]);
+    expect(build.sleep).not.toHaveBeenCalled();
+  });
+
+  it('uses the archive after the official CDN exhausts its retries', async () => {
+    const fetch = vi
+      .fn()
+      .mockRejectedValueOnce(new TypeError('fetch failed'))
+      .mockRejectedValueOnce(new TypeError('fetch failed'))
+      .mockRejectedValueOnce(new TypeError('fetch failed'))
+      .mockResolvedValueOnce(response());
+    const build = install(fetch);
+    await expect(build.result).resolves.toBeUndefined();
+    expect(fetch.mock.calls.map(([url]) => new URL(url).hostname)).toEqual([
+      'dlcdn.apache.org',
+      'dlcdn.apache.org',
+      'dlcdn.apache.org',
+      'archive.apache.org',
+    ]);
+    expect(build.sleep.mock.calls).toEqual([[1_000], [2_000]]);
+    expect(build.write).toHaveBeenCalledWith('/tmp/orca-pulsar-build-fixture/archive', archive);
+  });
+
   it('restarts the complete download when reading the response body fails', async () => {
     const fetch = vi
       .fn()
@@ -150,7 +183,7 @@ describe('patched Pulsar native build', () => {
     expect(cancel).toHaveBeenCalledOnce();
   });
 
-  it.each([403, 404])('does not retry permanent HTTP %s failures', async (status) => {
+  it.each([403])('does not retry permanent HTTP %s failures', async (status) => {
     const fetch = vi
       .fn()
       .mockResolvedValue({ ok: false, status, body: { cancel: async () => undefined } });
@@ -162,15 +195,39 @@ describe('patched Pulsar native build', () => {
     expect(build.cleanup).toHaveBeenCalledOnce();
   });
 
-  it('fails after three attempts without compiling or writing an unverified archive', async () => {
+  it('fails after exhausting both mirrors without compiling or writing an unverified archive', async () => {
     const fetch = vi.fn().mockRejectedValue(new TypeError('fetch failed'));
     const build = install(fetch);
     await expect(build.result).rejects.toThrow(/download failed.*3 attempts/);
-    expect(fetch).toHaveBeenCalledTimes(3);
-    expect(build.sleep.mock.calls).toEqual([[1_000], [2_000]]);
+    expect(fetch).toHaveBeenCalledTimes(6);
+    expect(build.sleep.mock.calls).toEqual([[1_000], [2_000], [1_000], [2_000]]);
     expect(build.write).not.toHaveBeenCalled();
     expect(build.run).not.toHaveBeenCalled();
     expect(build.cleanup).toHaveBeenCalledOnce();
+  });
+
+  it('fails when both mirrors have removed the archive without retrying a 404', async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValue({ ok: false, status: 404, body: { cancel: async () => undefined } });
+    const build = install(fetch);
+    await expect(build.result).rejects.toThrow(/archive.apache.org.*HTTP 404/);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(build.sleep).not.toHaveBeenCalled();
+    expect(build.write).not.toHaveBeenCalled();
+    expect(build.run).not.toHaveBeenCalled();
+  });
+
+  it('still checks the pinned digest when using the archive fallback', async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: false, status: 404, body: { cancel: async () => undefined } })
+      .mockResolvedValueOnce(response(Buffer.from('corrupt archive')));
+    const build = install(fetch);
+    await expect(build.result).rejects.toThrow('archive checksum mismatch');
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(build.write).not.toHaveBeenCalled();
+    expect(build.run).not.toHaveBeenCalled();
   });
 
   it('does not retry or build an archive with a checksum mismatch', async () => {

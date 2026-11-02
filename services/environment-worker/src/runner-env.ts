@@ -32,6 +32,7 @@ import {
   RUNNER_WORKSPACE_ENV_VAR,
   stripRunnerAuthSecrets,
 } from '@orca/harness-tunnel';
+import { ENVIRONMENT_PACKAGES_ENV } from '@orca/sandbox-runtime';
 
 // `RUNNER_REGISTRY_URL_ENV_VAR` is IMPORTED, never declared here — the same rule
 // its three siblings above already follow. It lives in `@orca/harness-tunnel`'s
@@ -91,6 +92,7 @@ const RUNNER_OPERATOR_KNOBS: readonly string[] = [
  * {@link RUNNER_ENV_PASSTHROUGH_ENV_VAR}.
  */
 const RUNNER_ENV_ALLOWLIST: ReadonlySet<string> = new Set([
+  ENVIRONMENT_PACKAGES_ENV,
   'PATH',
   'HOME',
   'USER',

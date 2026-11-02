@@ -17,6 +17,11 @@ import type {
 } from './sandbox-runtime.js';
 import type { ReadPage, ReadPageInput } from './read-page.js';
 import { SKILLS_ROOT } from './skills/materialize.js';
+import {
+  ENVIRONMENT_PACKAGES_EXEC_ROOT,
+  environmentPackageShellEnvironment,
+  environmentPackageShellCommand,
+} from '@orca/sandbox-runtime';
 
 export const OUTPUT_WRITABLE_PATH = '/mnt/session/outputs';
 export const SANDBOX_WRITE_POLICY_ENV = 'ORCA_SANDBOX_WRITE_POLICY';
@@ -35,6 +40,7 @@ export interface WritePolicyDenial {
 }
 
 export interface BuildSandboxWritePolicyOptions {
+  environmentPackages?: boolean;
   networkAllowedDomains?: readonly string[];
   /** Expose the reserved Skill tree only for executions with a non-empty catalog. */
   includeSkillsRoot?: boolean;
@@ -83,6 +89,7 @@ export function buildSandboxWritePolicy(
   }
   const networkAllowedDomains = dedupeNetworkDomains(options.networkAllowedDomains ?? []);
   return Object.freeze({
+    ...(options.environmentPackages === true ? { environmentPackages: true } : {}),
     writablePaths: Object.freeze(normalizedWritable),
     readonlyPaths: Object.freeze(normalizedReadonly),
     ...(networkAllowedDomains.length > 0
@@ -169,6 +176,9 @@ export async function createPolicyEnforcedSandbox(
 
 export function buildBubblewrapCommand(command: string, policy: SandboxWritePolicy): string {
   const args = [
+    '/usr/bin/env',
+    '-u',
+    'EXECD_ACCESS_TOKEN',
     'bwrap',
     '--new-session',
     '--die-with-parent',
@@ -180,8 +190,10 @@ export function buildBubblewrapCommand(command: string, policy: SandboxWritePoli
     '1000',
     '--cap-drop',
     'ALL',
+    '--unsetenv',
+    'EXECD_ACCESS_TOKEN',
     '--ro-bind',
-    '/',
+    policy.environmentPackages ? ENVIRONMENT_PACKAGES_EXEC_ROOT : '/',
     '/',
     '--perms',
     '1777',
@@ -196,6 +208,12 @@ export function buildBubblewrapCommand(command: string, policy: SandboxWritePoli
     '--proc',
     '/proc',
   ];
+  if (policy.environmentPackages) {
+    for (const root of policy.readonlyPaths) args.push('--ro-bind', root, root);
+    for (const [name, value] of Object.entries(environmentPackageShellEnvironment())) {
+      args.push('--setenv', name, value);
+    }
+  }
   for (const root of policy.writablePaths) {
     args.push('--bind', root.path, root.path);
   }
@@ -210,8 +228,8 @@ export function buildBubblewrapCommand(command: string, policy: SandboxWritePoli
     '/tmp',
     '--',
     'bash',
-    '-lc',
-    command,
+    ...(policy.environmentPackages ? ['--noprofile', '--norc', '-c'] : ['-lc']),
+    policy.environmentPackages ? environmentPackageShellCommand(command) : command,
   );
   return args.map(shellQuote).join(' ');
 }

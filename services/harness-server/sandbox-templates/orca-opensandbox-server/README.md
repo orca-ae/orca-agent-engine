@@ -2,7 +2,7 @@
 
 OpenSandbox `server/v0.2.2` supplies base Kubernetes provider. Orca runtime
 changes come from [`charts/opensandbox-patches`](../../../../charts/opensandbox-patches),
-mounted as three ConfigMap-backed Python modules.
+mounted as four ConfigMap-backed Python modules.
 
 Overlay enforces one runtime contract:
 

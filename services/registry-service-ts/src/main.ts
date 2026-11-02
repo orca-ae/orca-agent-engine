@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { Pool } from 'pg';
+import { and, eq, isNull } from 'drizzle-orm';
+import { environments } from './persistence/postgres/schema.js';
+import { normalizeStoredPackages } from './contracts/environment-wire.js';
 import { Kafka } from 'kafkajs';
 import { S3Client } from '@aws-sdk/client-s3';
 import {
@@ -280,6 +283,18 @@ const environmentLaunchLifecycle = environmentLauncherBackend
       launcher: launcherFactory(environmentLauncherBackend),
       tokens: new EnvironmentTokenStore(db),
       workerOnline: workerRegistry,
+      loadProvisionSpec: async (environmentId) => {
+        const [environment] = await db
+          .select()
+          .from(environments)
+          .where(and(eq(environments.id, environmentId), isNull(environments.deletedAt)))
+          .limit(1);
+        if (!environment) throw new Error('Environment was deleted before provisioning');
+        return {
+          packages: normalizeStoredPackages(environment.packages),
+          networking: environment.networking as Record<string, unknown>,
+        };
+      },
       registryTunnelUrl:
         process.env['ORCA_REGISTRY_TUNNEL_URL'] ?? `http://localhost:${config.httpPort}`,
     })

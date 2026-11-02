@@ -3139,7 +3139,7 @@ describe('Dispatcher with custom SessionEventSource', () => {
         name: 'packages',
         packages: { npm: ['untrusted-package'] },
       },
-      error: /package installers/,
+      error: /package preparation/,
     },
   ])('rejects $label before sandbox acquisition', async ({ agentMetadata, environment, error }) => {
     const source = new FakeEventSource();

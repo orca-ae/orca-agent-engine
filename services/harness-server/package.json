@@ -11,6 +11,7 @@
     "dev": "tsx src/main.ts",
     "test": "vitest run",
     "test:integration": "vitest run -c vitest.integration.config.ts test/integration",
+    "test:e2e:opensandbox": "vitest run -c vitest.opensandbox.config.ts",
     "lint": "eslint 'src/**/*.ts' 'test/**/*.ts'"
   },
   "dependencies": {

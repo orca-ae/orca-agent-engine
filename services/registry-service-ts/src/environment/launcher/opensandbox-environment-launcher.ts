@@ -16,7 +16,7 @@
 import { OpenSandboxRuntime, type OpenSandboxRuntimeOptions } from '@orca/cloud-sandbox';
 import type { SandboxRuntime } from '@orca/sandbox-runtime';
 import { CloudEnvironmentLauncher } from './cloud-environment-launcher.js';
-import type { EnvironmentLauncher, StartWorkerOptions } from './types.js';
+import type { EnvironmentLauncher, StartWorkerOptions, EnvironmentProvisionSpec } from './types.js';
 
 /** Default sandbox lifetime, seconds. Mirrors harness-server's `OPEN_SANDBOX_TIMEOUT_SECONDS` default. */
 export const DEFAULT_TIMEOUT_SECONDS = 1800;
@@ -104,8 +104,8 @@ export class OpenSandboxEnvironmentLauncher implements EnvironmentLauncher {
     });
   }
 
-  provision(name: string): Promise<string> {
-    return this.inner.provision(name);
+  provision(name: string, spec?: EnvironmentProvisionSpec): Promise<string> {
+    return this.inner.provision(name, spec);
   }
 
   startWorker(environmentId: string, opts: StartWorkerOptions): Promise<void> {

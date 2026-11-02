@@ -80,6 +80,9 @@ export async function streamRunnerEvents(
     {
       async sendText(raw) {
         const frame = decodeFrame(raw);
+        // Responses below are queued synchronously. Bridge shutdown may still
+        // cancel while the client is draining the final response frame.
+        if (frame.kind === FrameKind.RequestCancel) return;
         if (frame.kind !== FrameKind.Request)
           throw new Error('Unexpected tunnel frame: ' + frame.kind);
         if (frame.path !== RUNNER_TURN_PATH)

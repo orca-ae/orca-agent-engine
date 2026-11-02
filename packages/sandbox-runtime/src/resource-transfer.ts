@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import { posix as path } from 'node:path';
 import { OUTPUT_WRITABLE_PATH, SKILLS_ROOT } from './write-policy.js';
 import { parseNativeCompletion, type NativeCompletion } from './native-completion.js';
+import { assertEnvironmentPackageMountPaths } from './environment-packages.js';
 
 /** Bounds shared by Registry producers and credential-free runner consumers. */
 export const RESOURCE_CHUNK_BYTES = 1024 * 1024;
@@ -49,7 +50,9 @@ export interface ResourceMountDescriptor {
   files: ResourceFileDescriptor[];
 }
 export interface ResourceManifest {
-  version: 1;
+  version: 1 | 2;
+  /** Version 2 pins the provider-prepared workload filesystem; older runners reject it. */
+  environment_packages_revision?: string;
   /** Stable resource-binding revision; reconnect must not overwrite live local changes. */
   revision: string;
   resources: ResourceMountDescriptor[];
@@ -118,7 +121,11 @@ function overlaps(left: string, right: string): boolean {
 export function parseResourceManifest(value: unknown): ResourceManifest {
   const raw = object(value);
   if (
-    raw.version !== 1 ||
+    (raw.version !== 1 && raw.version !== 2) ||
+    (raw.version === 2 &&
+      (typeof raw.environment_packages_revision !== 'string' ||
+        !SHA256.test(raw.environment_packages_revision))) ||
+    (raw.version === 1 && raw.environment_packages_revision !== undefined) ||
     typeof raw.revision !== 'string' ||
     !SHA256.test(raw.revision) ||
     !Array.isArray(raw.resources) ||
@@ -136,6 +143,7 @@ export function parseResourceManifest(value: unknown): ResourceManifest {
     const kind = resource.kind;
     const mount = resource.mount_path;
     const access = resource.access;
+    if (raw.version === 2 && typeof mount === 'string') assertEnvironmentPackageMountPaths([mount]);
     if (
       typeof id !== 'string' ||
       !/^[A-Za-z0-9_-]{1,128}$/.test(id) ||
@@ -215,7 +223,14 @@ export function parseResourceManifest(value: unknown): ResourceManifest {
       files,
     };
   });
-  return { version: 1, revision: raw.revision, resources };
+  return {
+    version: raw.version,
+    revision: raw.revision,
+    resources,
+    ...(raw.version === 2
+      ? { environment_packages_revision: raw.environment_packages_revision as string }
+      : {}),
+  };
 }
 
 export function resourceManifestDigest(manifest: ResourceManifest): string {

@@ -20,6 +20,8 @@ import logging
 import json
 import os
 import re
+import hashlib
+import shlex
 from datetime import datetime
 from typing import Dict, List, Any, Optional
 
@@ -51,6 +53,9 @@ from opensandbox_server.services.runtime_resolver import SecureRuntimeResolver
 logger = logging.getLogger(__name__)
 
 _FUSE_DEVICE_EXTENSION = "orca.fuse.device"
+_PACKAGES_EXTENSION = "orca.environment.packages.v1"
+_PACKAGES_ROOT = "/opt/orca-environment-packages"
+_PACKAGE_MANAGERS = ("apt", "cargo", "gem", "go", "npm", "pip")
 _TRUSTED_WORKLOADS_ENV = "ORCA_TRUSTED_SANDBOX_WORKLOADS"
 _TRUSTED_NON_FUSE_WORKLOADS_ENV = "ORCA_TRUSTED_NON_FUSE_WORKLOADS"
 _TRUSTED_REPOSITORIES_ENV = "ORCA_TRUSTED_SANDBOX_REPOSITORIES"
@@ -69,6 +74,184 @@ _OFFICIAL_IMAGES = (
 # ORCA_TRUSTED_SANDBOX_REPOSITORY_PREFIXES instead. Each prefix expands to the
 # exact <prefix>/<name> repositories above, never to a string-prefix match.
 _DEFAULT_REPOSITORY_PREFIXES = ("ghcr.io/orca-ae",)
+
+
+def _valid_package_spec(entry: Any) -> bool:
+    if not isinstance(entry, str):
+        return False
+    try:
+        return (
+            0 < len(entry.encode("utf-16-le")) <= 2048
+            and entry.encode("utf-8").decode("utf-8") == entry
+            and entry.strip().strip("\ufeff") == entry
+            and not entry.startswith("-")
+            and not any(ord(char) < 32 or ord(char) == 127 for char in entry)
+        )
+    except UnicodeError:
+        return False
+
+
+def _package_plan(raw: Optional[str]) -> Optional[dict]:
+    if raw is None:
+        return None
+    if len(raw.encode("utf-8")) > 131072:
+        raise ValueError("environment package plan exceeds size limit")
+    try:
+        plan = json.loads(raw)
+    except (ValueError, TypeError) as exc:
+        raise ValueError("invalid environment package plan") from exc
+    if (
+        not isinstance(plan, dict)
+        or set(plan) != {"version", "packages"}
+        or type(plan["version"]) is not int
+        or plan["version"] != 1
+    ):
+        raise ValueError("unsupported environment package plan")
+    packages = plan["packages"]
+    if not isinstance(packages, dict) or set(packages) - set(_PACKAGE_MANAGERS):
+        raise ValueError("unsupported environment package manager")
+    normalized = {}
+    for manager in _PACKAGE_MANAGERS:
+        entries = packages.get(manager, [])
+        if entries is None:
+            continue
+        if not isinstance(entries, list) or len(entries) > 128:
+            raise ValueError("invalid environment package specifications")
+        for entry in entries:
+            if not _valid_package_spec(entry):
+                raise ValueError("invalid environment package specification")
+        if entries:
+            normalized[manager] = entries
+    if not normalized:
+        raise ValueError("environment package plan is empty")
+    if len(json.dumps(normalized, separators=(",", ":"), ensure_ascii=False).encode()) > 128000:
+        raise ValueError("environment package plan exceeds size limit")
+    return normalized
+
+
+def _package_init_container(
+    image: str, packages: dict, resources: dict, image_pull_policy: str = "IfNotPresent"
+) -> dict:
+    """Install in a credential-free container which never runs concurrently with the agent.
+
+    Its entire output is untrusted. Only the subsequent main container's original
+    image supplies execd, policy probes, mount helpers and the agent controller.
+    Kubernetes terminates the init container's processes before starting that main
+    container; no installer receives its environment, volumes or ServiceAccount.
+    """
+    quote = shlex.quote
+    commands = [
+        "set -eu",
+        "umask 022",
+        "export HOME=/root TMPDIR=/tmp DEBIAN_FRONTEND=noninteractive",
+        'export PATH="/opt/orca-packages/python/bin:/opt/orca-packages/npm/bin:/opt/orca-packages/cargo/bin:/opt/orca-packages/gems/bin:/opt/orca-packages/go/bin:${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"',
+        "export CARGO_HOME=/opt/orca-packages/cargo GEM_HOME=/opt/orca-packages/gems",
+        "export GOPATH=/opt/orca-packages/go GOBIN=/opt/orca-packages/go/bin",
+        "mkdir -p /opt/orca-packages",
+    ]
+    if packages.get("apt"):
+        commands += [
+            "apt-get update",
+            "apt-get install -y --no-install-recommends -- "
+            + " ".join(map(quote, packages["apt"])),
+        ]
+    # Toolchains are installed only in the workload image, never in the main
+    # controller. Existing operator-provided toolchains take precedence.
+    bootstrap = {
+        "pip": ("python3", "python3 python3-venv python3-pip"),
+        "npm": ("npm", "nodejs npm"),
+        "cargo": ("cargo", "cargo rustc"),
+        "gem": ("gem", "ruby ruby-dev build-essential"),
+        "go": ("go", "golang-go"),
+    }
+    for manager, (binary, apt_packages) in bootstrap.items():
+        if packages.get(manager):
+            commands.append(
+                f"if ! command -v {binary} >/dev/null 2>&1; then "
+                f"apt-get update && apt-get install -y --no-install-recommends {apt_packages}; fi"
+            )
+    if packages.get("pip"):
+        commands += [
+            "if ! python3 -c 'import venv, ensurepip' >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends python3-venv python3-pip; fi",
+            "python_bin=python3; if ! python3 -c 'import venv, ensurepip' >/dev/null 2>&1; then python_bin=/usr/bin/python3; fi",
+            '"$python_bin" -m venv /opt/orca-packages/python',
+            "/opt/orca-packages/python/bin/python -m pip install -- "
+            + " ".join(map(quote, packages["pip"])),
+        ]
+    if packages.get("npm"):
+        commands.append(
+            "npm install --global --prefix /opt/orca-packages/npm -- "
+            + " ".join(map(quote, packages["npm"]))
+        )
+    for spec in packages.get("cargo", []):
+        commands.append("cargo install --locked --root /opt/orca-packages/cargo -- " + quote(spec))
+    if packages.get("gem"):
+        commands.append(
+            "gem install --no-document --install-dir /opt/orca-packages/gems "
+            "--bindir /opt/orca-packages/gems/bin " + " ".join(map(quote, packages["gem"]))
+        )
+    for spec in packages.get("go", []):
+        commands.append("go install " + quote(spec if "@" in spec else spec + "@latest"))
+    commands += [
+        "mkdir -p /opt/orca-packages/toolchain-bin",
+        'for tool in node npm python3 ruby gem cargo rustc rustup go; do tool_path="$(command -v "$tool" || true)"; if [ -n "$tool_path" ]; then ln -s "$tool_path" "/opt/orca-packages/toolchain-bin/$tool"; fi; done',
+        "printf 'export RUSTUP_HOME=%q\\n' \"${RUSTUP_HOME:-/root/.rustup}\" > /opt/orca-packages/environment.sh",
+        'if [ -n "${GOROOT:-}" ]; then printf \'export GOROOT=%q\\n\' "$GOROOT" >> /opt/orca-packages/environment.sh; fi',
+    ]
+    # The volume is new on every Pod. Never export pseudo filesystems, mounts,
+    # controller state or runtime scratch. An init failure cannot publish ready.
+    rootfs = _PACKAGES_ROOT + "/rootfs"
+    commands += [
+        "mkdir -p " + rootfs,
+        "tar --one-file-system --exclude=./proc --exclude=./sys --exclude=./dev "
+        "--exclude=./tmp --exclude=./run --exclude=./mnt --exclude=./workspace "
+        "--exclude=./app --exclude=./opt/opensandbox --exclude=./opt/orca "
+        "--exclude=." + _PACKAGES_ROOT + " -C / -cf - . | tar -C " + rootfs + " -xf -",
+        "mkdir -p "
+        + rootfs
+        + "/dev "
+        + rootfs
+        + "/proc "
+        + rootfs
+        + "/sys "
+        + rootfs
+        + "/tmp "
+        + rootfs
+        + "/run "
+        + rootfs
+        + "/workspace/skills "
+        + rootfs
+        + "/mnt/session/outputs",
+    ]
+    revision = hashlib.sha256(
+        json.dumps(packages, separators=(",", ":"), ensure_ascii=False).encode()
+    ).hexdigest()
+    manifest = json.dumps({"version": 1, "revision": revision}, separators=(",", ":"))
+    commands.append("printf '%s' " + quote(manifest) + " > " + _PACKAGES_ROOT + "/manifest.json")
+    return {
+        "name": "orca-environment-packages",
+        "image": image,
+        "imagePullPolicy": image_pull_policy,
+        "command": [
+            "/usr/bin/timeout",
+            "--signal=KILL",
+            "840",
+            "/bin/bash",
+            "-o",
+            "pipefail",
+            "-c",
+            "\n".join(commands),
+        ],
+        "resources": resources,
+        "securityContext": {
+            "runAsUser": 0,
+            "allowPrivilegeEscalation": False,
+            "capabilities": {"drop": ["NET_RAW", "MKNOD"]},
+        },
+        "volumeMounts": [{"name": "orca-environment-packages", "mountPath": _PACKAGES_ROOT}],
+    }
+
+
 # Require an explicit registry and an explicit tag and/or sha256 digest. Do not
 # normalize aliases, infer Docker Hub, or use prefix/glob repository matching.
 _REPOSITORY_PATTERN = (
@@ -283,6 +466,9 @@ class BatchSandboxProvider(WorkloadProvider):
     ) -> Dict[str, Any]:
         """Create a gVisor BatchSandbox workload."""
         extensions = extensions or {}
+        packages = _package_plan(extensions.get(_PACKAGES_EXTENSION))
+        if packages and not re.fullmatch(r"[0-9a-f]{64}", env.get("EXECD_ACCESS_TOKEN", "")):
+            raise ValueError("package preparation requires authenticated execd access")
         isolation_enabled = (
             extensions.get(BOOTSTRAP_EXECD_ISOLATION_KEY) == "enable"
         )
@@ -353,7 +539,8 @@ class BatchSandboxProvider(WorkloadProvider):
             resource_requests=resource_requests or None,
         )
         
-        containers = [_container_to_dict(main_container)]
+        main_container_dict = _container_to_dict(main_container)
+        containers = [main_container_dict]
         pod_volumes = [
             {
                 "name": "opensandbox-bin",
@@ -372,6 +559,14 @@ class BatchSandboxProvider(WorkloadProvider):
             "volumes": pod_volumes,
             "runtimeClassName": _GVISOR_RUNTIME_CLASS,
         }
+        if packages:
+            main_container_dict.setdefault("resources", {}).setdefault("limits", {}).setdefault("ephemeral-storage", "16Gi")
+            pod_spec["shareProcessNamespace"] = False
+            pod_spec["initContainers"].append(_package_init_container(
+                image_spec.uri, packages, main_container_dict.get("resources", {}), self.image_pull_policy))
+            pod_spec["volumes"].append({"name": "orca-environment-packages", "emptyDir": {"sizeLimit": "8Gi"}})
+            main_container_dict.setdefault("volumeMounts", []).append({
+                "name": "orca-environment-packages", "mountPath": _PACKAGES_ROOT, "readOnly": True})
 
         self._apply_platform_node_selector(pod_spec, platform)
 
@@ -417,6 +612,41 @@ class BatchSandboxProvider(WorkloadProvider):
             merged_pod_spec,
             isolation_enabled=isolation_enabled,
         )
+        if packages:
+            if merged_pod_spec.get("automountServiceAccountToken") is not False:
+                raise ValueError("package preparation must not receive a ServiceAccount token")
+            expected = _package_init_container(image_spec.uri, packages, main_container_dict.get("resources", {}), self.image_pull_policy)
+            installers = [item for item in merged_pod_spec.get("initContainers", [])
+                          if item.get("name") == "orca-environment-packages"]
+            if len(installers) != 1 or any(installers[0].get(key) != expected[key]
+                                           for key in ("image", "imagePullPolicy", "command", "volumeMounts", "securityContext", "resources")):
+                raise ValueError("template changes the isolated environment package installer")
+            if installers[0].get("env") or installers[0].get("envFrom"):
+                raise ValueError("package installer must not inherit runtime credentials")
+            artifacts = [volume for volume in merged_pod_spec.get("volumes", [])
+                         if volume.get("name") == "orca-environment-packages"]
+            if artifacts != [{"name": "orca-environment-packages", "emptyDir": {"sizeLimit": "8Gi"}}]:
+                raise ValueError("environment package artifacts require a fresh bounded emptyDir")
+            runtimes = [item for item in merged_pod_spec.get("containers", [])
+                        if item.get("name") == "sandbox"]
+            if len(runtimes) != 1 or runtimes[0].get("imagePullPolicy") != self.image_pull_policy:
+                raise ValueError("template changes package runtime image pull policy")
+            tokens = [entry.get("value") for item in runtimes for entry in item.get("env", [])
+                      if entry.get("name") == "EXECD_ACCESS_TOKEN"]
+            if tokens != [env["EXECD_ACCESS_TOKEN"]]:
+                raise ValueError("template changes package runtime execd authentication")
+            mounts = [mount for item in runtimes for mount in item.get("volumeMounts", [])
+                      if mount.get("name") == "orca-environment-packages"]
+            if mounts != [{"name": "orca-environment-packages", "mountPath": _PACKAGES_ROOT, "readOnly": True}]:
+                raise ValueError("environment package runtime requires the exact read-only artifact mount")
+            for field in ("initContainers", "containers", "ephemeralContainers"):
+                for container in merged_pod_spec.get(field, []):
+                    if field == "initContainers" and container.get("restartPolicy") == "Always":
+                        raise ValueError("package installer cannot share a Pod with sidecar init containers")
+                    for mount in container.get("volumeMounts", []):
+                        if mount.get("name") == "orca-environment-packages" and not (field == "initContainers" and container is installers[0]):
+                            if field != "containers" or container.get("name") != "sandbox" or mount.get("mountPath") != _PACKAGES_ROOT or mount.get("readOnly") is not True:
+                                raise ValueError("environment package artifacts must be read-only in the runtime")
         if platform is not None:
             WorkloadProvider.ensure_platform_compatible_with_affinity(merged_pod_spec, platform)
 
@@ -497,6 +727,8 @@ class BatchSandboxProvider(WorkloadProvider):
         for field in ("hostNetwork", "hostPID", "hostIPC"):
             if pod_spec.get(field) is True:
                 raise ValueError(f"sandbox Pod must not set {field}=true")
+        if pod_spec.get("shareProcessNamespace") is True:
+            raise ValueError("sandbox Pod must not share process namespaces")
 
         volumes = pod_spec.get("volumes", []) or []
         if any(isinstance(volume, dict) and "hostPath" in volume for volume in volumes):
@@ -778,6 +1010,47 @@ class BatchSandboxProvider(WorkloadProvider):
                 return message
         return None
 
+    def _package_preparation_failure(self, workload: Dict[str, Any]) -> Optional[str]:
+        """Inspect init status, never installer logs or termination messages."""
+        metadata = workload.get("metadata", {})
+        name = metadata.get("name")
+        namespace = metadata.get("namespace")
+        if not name or not namespace:
+            return None
+        # BatchSandboxStatus has no selector field. The controller writes this
+        # label on every non-pooled Pod, independently of template labels.
+        selector = f"batch-sandbox.sandbox.opensandbox.io/name={name}"
+        try:
+            pods = self.k8s_client.list_pods(namespace=namespace, label_selector=selector)
+        except Exception:
+            # A transient read failure must not invent an installer failure.
+            return None
+        for pod in pods:
+            status = pod.status
+            if status is None:
+                continue
+            if status.reason == "Evicted":
+                message = (status.message or "").lower()
+                if "ephemeral-storage" in message or "emptydir" in message:
+                    return "ENVIRONMENT_PACKAGES_STORAGE_LIMIT"
+                return "ENVIRONMENT_PACKAGES_POD_EVICTED"
+            for container in status.init_container_statuses or []:
+                if container.name != "orca-environment-packages":
+                    continue
+                state = container.state
+                if state is None:
+                    continue
+                if state.terminated is not None and state.terminated.exit_code != 0:
+                    return "ENVIRONMENT_PACKAGES_INSTALL_FAILED"
+                # ErrImagePull may recover on the next pull; persistent backoff
+                # and configuration failures still fail acquisition promptly.
+                if state.waiting is not None and state.waiting.reason in (
+                    "CrashLoopBackOff", "ImagePullBackOff",
+                    "CreateContainerConfigError", "CreateContainerError", "RunContainerError",
+                ):
+                    return "ENVIRONMENT_PACKAGES_START_FAILED"
+        return None
+
     def get_status(self, workload: Dict[str, Any]) -> Dict[str, Any]:
         """Derive sandbox state from BatchSandbox status and pod readiness."""
         status = workload.get("status", {})
@@ -785,6 +1058,20 @@ class BatchSandboxProvider(WorkloadProvider):
 
         # Phase is authoritative when set (Pausing/Paused/Resuming/Failed)
         phase = status.get("phase", "")
+        init_containers = workload.get("spec", {}).get("template", {}).get("spec", {}).get("initContainers", [])
+        has_packages = any(item.get("name") == "orca-environment-packages" for item in init_containers)
+        if has_packages and phase in ("", "Pending", "Failed"):
+            failure = self._package_preparation_failure(workload)
+            if failure:
+                return {"state": "Failed", "reason": failure,
+                        "message": "Isolated Environment package preparation failed",
+                        "last_transition_at": creation_timestamp}
+        if phase in ("", "Pending") and has_packages and self._parse_pod_ip(workload):
+            # Lifecycle creation waits only for allocation. Execd readiness is
+            # checked by the client after the bounded package init has completed.
+            return {"state": "Allocated", "reason": "ENVIRONMENT_PACKAGES_PREPARING",
+                    "message": "Pod allocated; preparing isolated Environment packages",
+                    "last_transition_at": creation_timestamp}
         failed_message = self._first_true_condition_message(
             status.get("conditions", []),
             ["PodFailed", "ResumeFailed", "PauseFailed"],

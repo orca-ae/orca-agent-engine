@@ -1,0 +1,86 @@
+{
+  "valid": [
+    {
+      "name": "six managers",
+      "packages": {
+        "pip": ["idna==3.10"],
+        "npm": ["is-number@7.0.0"],
+        "go": ["example.com/a@v1.0.0"],
+        "gem": ["rake:13.2.1"],
+        "cargo": ["ripgrep@14.1.1"],
+        "apt": ["jq", "curl", "jq"]
+      },
+      "normalized": {
+        "apt": ["jq", "curl", "jq"],
+        "cargo": ["ripgrep@14.1.1"],
+        "gem": ["rake:13.2.1"],
+        "go": ["example.com/a@v1.0.0"],
+        "npm": ["is-number@7.0.0"],
+        "pip": ["idna==3.10"]
+      },
+      "revision": "182bc26eb3a0fb8242030491613138d8318aa417292f486c299140946ddd8cda"
+    },
+    {
+      "name": "unicode and empty managers",
+      "packages": {
+        "pip": null,
+        "npm": ["tool-\u4e2d\u6587-\ud83d\ude80"],
+        "apt": []
+      },
+      "normalized": {
+        "npm": ["tool-\u4e2d\u6587-\ud83d\ude80"]
+      },
+      "revision": "b7745cfa98fcc2315008021169cd18b671c3152facc29dbd4fad7b65c0319677"
+    }
+  ],
+  "invalid": [
+    {
+      "name": "leading NEL",
+      "packages": {
+        "npm": ["\u0085tool"]
+      }
+    },
+    {
+      "name": "trailing NEL",
+      "packages": {
+        "npm": ["tool\u0085"]
+      }
+    },
+    {
+      "name": "leading BOM",
+      "packages": {
+        "npm": ["\ufefftool"]
+      }
+    },
+    {
+      "name": "trailing BOM",
+      "packages": {
+        "npm": ["tool\ufeff"]
+      }
+    },
+    {
+      "name": "unpaired surrogate",
+      "packages": {
+        "npm": ["tool-\ud800"]
+      }
+    },
+    {
+      "name": "option argument",
+      "packages": {
+        "npm": ["--prefix=/tmp"]
+      }
+    },
+    {
+      "name": "line break",
+      "packages": {
+        "npm": ["tool\nother"]
+      }
+    },
+    {
+      "name": "empty specification",
+      "packages": {
+        "npm": [""]
+      }
+    }
+  ]
+}

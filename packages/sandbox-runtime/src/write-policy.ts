@@ -18,6 +18,11 @@ import type {
   WritePolicyCapableHandle,
 } from './sandbox-runtime.js';
 import type { ReadPage, ReadPageInput } from './read-page.js';
+import {
+  ENVIRONMENT_PACKAGES_EXEC_ROOT,
+  environmentPackageShellEnvironment,
+  environmentPackageShellCommand,
+} from './environment-packages.js';
 
 /**
  * Reserved sandbox path for exact Registry-pinned Skill bundles.
@@ -74,6 +79,7 @@ export interface WritePolicyDenial {
 }
 
 export interface BuildSandboxWritePolicyOptions {
+  environmentPackages?: boolean;
   networkAllowedDomains?: readonly string[];
   networkUnrestricted?: boolean;
   /** Expose the reserved Skill tree only for executions with a non-empty catalog. */
@@ -118,6 +124,7 @@ export function buildSandboxWritePolicy(
 
   const networkAllowedDomains = dedupeNetworkDomains(options.networkAllowedDomains ?? []);
   return validateSandboxWritePolicy({
+    ...(options.environmentPackages === true ? { environmentPackages: true } : {}),
     ...(options.networkUnrestricted === true ? { networkUnrestricted: true } : {}),
     writablePaths: dedupeWritablePaths(writablePaths),
     readonlyPaths: [...new Set(readonlyPaths)].sort(),
@@ -140,6 +147,8 @@ export function buildSandboxWritePolicy(
 export function validateSandboxWritePolicy(
   policy: SandboxWritePolicy,
 ): ValidatedSandboxWritePolicy {
+  if (policy.environmentPackages !== undefined && typeof policy.environmentPackages !== 'boolean')
+    throw new Error('invalid environment package policy');
   if (policy.networkUnrestricted !== undefined && typeof policy.networkUnrestricted !== 'boolean')
     throw new Error('invalid unrestricted network policy');
   const normalizedWritable = dedupeWritablePaths(policy.writablePaths);
@@ -184,6 +193,7 @@ export function validateSandboxWritePolicy(
   }
   const networkAllowedDomains = dedupeNetworkDomains(policy.networkAllowedDomains ?? []);
   return Object.freeze({
+    ...(policy.environmentPackages === true ? { environmentPackages: true } : {}),
     ...(policy.networkUnrestricted === true ? { networkUnrestricted: true } : {}),
     writablePaths: Object.freeze(normalizedWritable),
     readonlyPaths: Object.freeze(normalizedReadonly),
@@ -270,6 +280,9 @@ export function buildBubblewrapCommand(
   policy: ValidatedSandboxWritePolicy,
 ): string {
   const args = [
+    '/usr/bin/env',
+    '-u',
+    'EXECD_ACCESS_TOKEN',
     'bwrap',
     '--new-session',
     '--die-with-parent',
@@ -281,8 +294,10 @@ export function buildBubblewrapCommand(
     '1000',
     '--cap-drop',
     'ALL',
+    '--unsetenv',
+    'EXECD_ACCESS_TOKEN',
     '--ro-bind',
-    '/',
+    policy.environmentPackages ? ENVIRONMENT_PACKAGES_EXEC_ROOT : '/',
     '/',
     '--perms',
     '1777',
@@ -297,6 +312,12 @@ export function buildBubblewrapCommand(
     '--proc',
     '/proc',
   ];
+  if (policy.environmentPackages) {
+    for (const root of policy.readonlyPaths) args.push('--ro-bind', root, root);
+    for (const [name, value] of Object.entries(environmentPackageShellEnvironment())) {
+      args.push('--setenv', name, value);
+    }
+  }
   for (const root of policy.writablePaths) {
     args.push('--bind', root.path, root.path);
   }
@@ -311,8 +332,8 @@ export function buildBubblewrapCommand(
     '/tmp',
     '--',
     'bash',
-    '-lc',
-    command,
+    ...(policy.environmentPackages ? ['--noprofile', '--norc', '-c'] : ['-lc']),
+    policy.environmentPackages ? environmentPackageShellCommand(command) : command,
   );
   return args.map(shellQuote).join(' ');
 }
@@ -369,6 +390,9 @@ export function buildMappedToolBubblewrapCommand(
     throw new Error('mapped tool filesystem needs a canonical private root');
   }
   const args = [
+    '/usr/bin/env',
+    '-u',
+    'EXECD_ACCESS_TOKEN',
     'bwrap',
     '--new-session',
     '--die-with-parent',
@@ -380,6 +404,8 @@ export function buildMappedToolBubblewrapCommand(
     '1000',
     '--cap-drop',
     'ALL',
+    '--unsetenv',
+    'EXECD_ACCESS_TOKEN',
     '--ro-bind',
     root,
     '/',
@@ -397,6 +423,11 @@ export function buildMappedToolBubblewrapCommand(
   }
   for (const writable of policy.writablePaths) {
     args.push('--bind', `${root}${writable.path}`, writable.path);
+  }
+  if (policy.environmentPackages) {
+    for (const [name, value] of Object.entries(environmentPackageShellEnvironment())) {
+      args.push('--setenv', name, value);
+    }
   }
   args.push(
     '--perms',
@@ -427,13 +458,15 @@ export function buildMappedToolBubblewrapCommand(
     '/tmp',
     '--setenv',
     'PATH',
-    '/usr/local/bin:/usr/bin:/bin',
+    policy.environmentPackages
+      ? environmentPackageShellEnvironment().PATH!
+      : '/usr/local/bin:/usr/bin:/bin',
     '--',
     '/bin/bash',
     '--noprofile',
     '--norc',
     '-c',
-    command,
+    policy.environmentPackages ? environmentPackageShellCommand(command) : command,
   );
   return args.map(shellQuote).join(' ');
 }

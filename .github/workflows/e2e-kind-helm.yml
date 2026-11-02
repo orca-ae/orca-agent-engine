@@ -113,6 +113,7 @@ jobs:
           grep -q '^  batchsandbox_provider.py:' <<< "${rendered}"
           grep -q '^  provider_common.py:' <<< "${rendered}"
           grep -q '^  security_context.py:' <<< "${rendered}"
+          grep -q '^  status_helpers.py:' <<< "${rendered}"
           grep -q 'ORCA_TRUSTED_SANDBOX_WORKLOADS' <<< "${rendered}"
           grep -q 'runtimeClassName.*gvisor' <<< "${rendered}"
           grep -q 'orca.fuse.device' <<< "${rendered}"

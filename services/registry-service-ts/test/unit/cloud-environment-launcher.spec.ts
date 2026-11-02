@@ -80,7 +80,7 @@ class FakeSandboxHandle implements SandboxHandle {
 
 /** A fake runtime that hands back fresh FakeSandboxHandles and records every acquire() call. */
 class FakeSandboxRuntime implements SandboxRuntime {
-  readonly capabilities = { supportsFuse: false };
+  readonly capabilities = { supportsFuse: false, supportsEnvironmentPackages: false };
   readonly acquireCalls: EnvironmentSpec[] = [];
   readonly handles: FakeSandboxHandle[] = [];
   private counter = 0;
@@ -114,6 +114,23 @@ function buildLauncher(runtime: FakeSandboxRuntime, label = 'Fake'): CloudEnviro
 }
 
 describe('CloudEnvironmentLauncher — lifecycle contract', () => {
+  it('prepares the stored package and networking configuration before worker startup', async () => {
+    const runtime = new FakeSandboxRuntime();
+    const launcher = buildLauncher(runtime);
+    const spec = {
+      packages: { apt: ['jq'], cargo: ['ripgrep'] },
+      networking: { type: 'unrestricted' },
+    };
+    await expect(launcher.provision('packages', spec)).rejects.toThrow(
+      /isolated package preparation/,
+    );
+    expect(runtime.acquireCalls).toEqual([]);
+    runtime.capabilities.supportsEnvironmentPackages = true;
+    await launcher.provision('packages', spec);
+    expect(runtime.acquireCalls).toEqual([spec]);
+    expect(runtime.handles[0]!.runCalls).toEqual([]);
+  });
+
   it('provision returns the acquired sandbox id', async () => {
     const runtime = new FakeSandboxRuntime();
     const launcher = buildLauncher(runtime);
