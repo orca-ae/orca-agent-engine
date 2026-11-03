@@ -60,7 +60,7 @@ import {
   encodeFrame,
   tokenBoundRunnerId,
   RUNNER_TUNNEL_TOKEN_HEADER,
-  INTERNAL_WS_ORIGIN,
+  LOCAL_TUNNEL_OWNER,
   type Frame,
   type HelloFrame,
 } from '@orca/harness-tunnel';
@@ -69,6 +69,7 @@ import {
   type RegistrySession,
   type RegistryWebSocketLike,
 } from '../tunnel/tunnel-registry.js';
+import { hostnameIsLoopback, websocketOriginAllowed } from '../auth/tunnel-origin.js';
 import { RunnerExitReports } from '../tunnel/runner-exit-reports.js';
 
 /** Wire-protocol major the server speaks; refuse a runner on a major mismatch. */
@@ -108,18 +109,6 @@ const PING_TIMEOUT_CLOSE_CODE = 4003;
 export const FORBIDDEN_ORIGIN_CLOSE_CODE = 4403;
 
 /**
- * Reserved owner id assigned to the unauthenticated loopback runner.
- *
- * A local server starts a runner that dials this endpoint over loopback with no
- * credentials. Assigning it a stable reserved identity (rather than leaving the
- * owner unset) keeps single-user ownership checks coherent: the listing filter
- * and the binding-ownership check both treat an owner-less runner as visible to
- * and bindable by every tenant, so an unauthenticated local runner is given this
- * id instead of `undefined`.
- */
-export const LOCAL_TUNNEL_OWNER = 'local';
-
-/**
  * Auth provider seam used to resolve the caller identity from a WebSocket
  * handshake.
  *
@@ -144,7 +133,16 @@ export interface RunnerTunnelRouteOptions {
   /** Shared registry the HTTP transport routes requests through. */
   registry: TunnelRegistry;
   /**
-   * Optional set of accepted binding tokens. When set, a remote runner's tunnel
+   * Resolve a distributor-issued runner's tenant from durable state. The synchronous
+   * callback runs under the assignment locks; no tunnel I/O may be awaited there.
+   * Unassigned ids retain the existing local/static/provider authentication paths.
+   */
+  authorizeAssignedRunner?: (
+    runnerId: string,
+    accept: (owner: string) => void,
+  ) => Promise<'accepted' | 'unassigned' | 'rejected'>;
+  /**
+   * Optional set of accepted binding tokens for unassigned runner ids. When set, a remote runner's tunnel
    * token must be present in this set and the runner may use a stable (not
    * token-derived) runner id. `undefined` keeps shared remote-server behavior by
    * accepting any token-bound runner id. Loopback peers bypass the allow-list
@@ -262,59 +260,16 @@ class WsAdapter implements RegistryWebSocketLike {
   }
 }
 
-/**
- * Return the runner id authorized by the WebSocket tunnel headers.
- *
- * - No token header: with an allow-list configured the token is required (throw);
- *   without one, the path runner id is accepted as-is (return `undefined`).
- * - Empty token: rejected (throw).
- * - Allow-list configured: the token must be in the set — then the path runner id
- *   is authorized directly (return `undefined`); otherwise rejected (throw).
- * - No allow-list: the token authorizes its derived token-bound runner id
- *   (return the derived id).
- *
- * @throws Error when the token is required-but-missing, present-but-empty, or
- *   not in the configured allow-list.
- */
-function expectedRunnerIdFromHeaders(
-  req: FastifyRequest,
-  allowedTunnelTokens: ReadonlySet<string> | undefined,
-): string | undefined {
+/** Parse once; durable assignments and static tokens use the same credential. */
+function runnerTunnelToken(req: FastifyRequest): string | undefined {
   const raw = req.headers[RUNNER_TUNNEL_TOKEN_HEADER.toLowerCase()];
   const token = Array.isArray(raw) ? raw[0] : raw;
-  if (token === undefined) {
-    if (allowedTunnelTokens !== undefined) {
-      throw new Error('runner tunnel token is required');
-    }
-    return undefined;
-  }
+  if (token === undefined) return undefined;
   const stripped = token.trim();
   if (stripped.length === 0) {
     throw new Error('runner tunnel token must not be empty');
   }
-  if (allowedTunnelTokens !== undefined) {
-    if (!allowedTunnelTokens.has(stripped)) {
-      throw new Error('runner tunnel token is not authorized');
-    }
-    return undefined;
-  }
-  return tokenBoundRunnerId(token);
-}
-
-/**
- * Return whether the dialing peer is a loopback client.
- *
- * A local server starts an unauthenticated runner that dials over loopback;
- * remote runners reach shared servers through the auth proxy and must present the
- * tunnel binding token. `localhost`, IPv4/IPv6 loopback (`127.0.0.0/8`, `::1`),
- * and IPv4-mapped loopback (`::ffff:127.0.0.1`) all count as loopback; everything
- * else (including a missing / unparseable host) does not.
- */
-function isLoopbackPeer(host: string | undefined): boolean {
-  if (host === undefined) {
-    return false;
-  }
-  return hostnameIsLoopback(host);
+  return stripped;
 }
 
 /**
@@ -374,113 +329,10 @@ function requireUserId(
   return { kind: 'user', userId };
 }
 
-/**
- * Decide whether a WebSocket handshake's `Origin` is acceptable.
- *
- * - The internal sentinel and any origin in `extraAllowed` are always allowed.
- * - A missing `Origin` is allowed: non-browser clients never send one and
- *   browsers always do, so its absence is not a browser CSWSH vector.
- * - In `localMode` an `Origin` is allowed only when its hostname is a loopback
- *   host — the CSWSH guard for the unauthenticated single-user server.
- * - In non-local modes the connection is authenticated by cookie / proxy header,
- *   so any `Origin` is allowed unless `extraAllowed` is non-empty (then only the
- *   allow-list passes).
- */
-function websocketOriginAllowed(
-  origin: string | undefined,
-  localMode: boolean,
-  extraAllowed: ReadonlySet<string>,
-): boolean {
-  if (origin === INTERNAL_WS_ORIGIN) {
-    return true;
-  }
-  if (origin !== undefined && extraAllowed.has(origin)) {
-    return true;
-  }
-  if (origin === undefined) {
-    return true;
-  }
-  if (localMode) {
-    return originHostnameIsLoopback(origin);
-  }
-  // Non-local modes rely on cookie / proxy auth. Passthrough by default; if a
-  // deployment configured an allow-list, anything not matched above is denied.
-  return extraAllowed.size === 0;
-}
-
 /** Read the `Origin` header off the upgrade request, or `undefined` when absent. */
 function originHeader(req: FastifyRequest): string | undefined {
   const raw = req.headers.origin;
   return Array.isArray(raw) ? raw[0] : raw;
-}
-
-/**
- * Return whether an `Origin` header points at a loopback host.
- *
- * Parses the URL and inspects its hostname; `localhost`, IPv4/IPv6 loopback, and
- * IPv4-mapped loopback all count. A missing / unparseable host does not.
- */
-function originHostnameIsLoopback(origin: string): boolean {
-  let host: string | null;
-  try {
-    host = new URL(origin).hostname;
-  } catch {
-    return false;
-  }
-  if (host === null || host === '') {
-    return false;
-  }
-  // `URL` wraps IPv6 hosts in brackets; strip them before address parsing.
-  if (host.startsWith('[') && host.endsWith(']')) {
-    host = host.slice(1, -1);
-  }
-  return hostnameIsLoopback(host);
-}
-
-/**
- * Return whether a bare hostname / IP literal is a loopback host.
- *
- * `localhost`, the IPv4 loopback block `127.0.0.0/8`, IPv6 `::1`, and IPv4-mapped
- * loopback (`::ffff:127.0.0.1`, including the `0:0:…:ffff:127.0.0.1` long form)
- * all count; anything else does not.
- */
-function hostnameIsLoopback(host: string): boolean {
-  if (host === 'localhost') {
-    return true;
-  }
-  // IPv4 (and the IPv4 tail of a mapped IPv6) loopback is the entire 127.0.0.0/8
-  // block.
-  if (isIpv4LoopbackLiteral(host)) {
-    return true;
-  }
-  if (host === '::1') {
-    return true;
-  }
-  // IPv4-mapped IPv6 loopback: `::ffff:127.0.0.1` and its long forms. Match the
-  // `ffff:` marker (case-insensitive) and validate the trailing dotted-quad as a
-  // 127.0.0.0/8 address.
-  const mapped = host.toLowerCase().match(/:ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
-  if (mapped !== null && isIpv4LoopbackLiteral(mapped[1]!)) {
-    return true;
-  }
-  return false;
-}
-
-/** Whether `host` is a dotted-quad IPv4 literal inside `127.0.0.0/8`. */
-function isIpv4LoopbackLiteral(host: string): boolean {
-  const parts = host.split('.');
-  if (parts.length !== 4) {
-    return false;
-  }
-  const octets = parts.map((p) => Number(p));
-  if (octets.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) {
-    return false;
-  }
-  // Reject non-canonical octets like "01" or "" that `Number` would accept.
-  if (parts.some((p) => p.length === 0 || (p.length > 1 && p.startsWith('0')))) {
-    return false;
-  }
-  return octets[0] === 127;
 }
 
 /** One entry in the `GET /internal/runners` listing. */
@@ -678,54 +530,7 @@ async function runTunnel(
   }
 
   const peerHost = resolvePeerHost(req);
-  const isLoopback = isLoopbackPeer(peerHost);
-
-  // 2. Token-binding correlation check. This endpoint is PUBLIC (off-mesh), so
-  //    this gate is part of the auth itself — not defense in depth on top of a
-  //    mesh layer. It proves the dialing peer holds a binding token bound to the
-  //    path runner id (or an allow-listed token); the owner fail-closed gate in
-  //    step 3 then refuses an unauthenticated non-loopback peer.
-  let expectedRunnerId: string | undefined;
-  try {
-    expectedRunnerId = expectedRunnerIdFromHeaders(req, allowedTunnelTokens);
-  } catch (exc) {
-    if (!isLoopback) {
-      socket.close(RUNNER_ID_MISMATCH_CLOSE_CODE, errMessage(exc));
-      return;
-    }
-    // Loopback fallback: the token wasn't in the server's allow-list (an
-    // external runner dialing a local server). Retry WITHOUT the allow-list so
-    // token-bound id derivation kicks in instead of rejecting.
-    try {
-      expectedRunnerId = expectedRunnerIdFromHeaders(req, undefined);
-    } catch (innerExc) {
-      socket.close(RUNNER_ID_MISMATCH_CLOSE_CODE, errMessage(innerExc));
-      return;
-    }
-  }
-  if (expectedRunnerId === undefined && allowedTunnelTokens === undefined && !isLoopback) {
-    socket.close(RUNNER_ID_MISMATCH_CLOSE_CODE, 'runner tunnel token is required');
-    return;
-  }
-  if (expectedRunnerId !== undefined && runnerId !== expectedRunnerId) {
-    socket.close(RUNNER_ID_MISMATCH_CLOSE_CODE, 'runner_id does not match tunnel token');
-    return;
-  }
-
-  // 3. Resolve the tunnel owner from the handshake and fail closed for an
-  //    unauthenticated non-loopback peer before any protocol I/O. The
-  //    token-binding gate above only proves the peer knows *a* token; in
-  //    no-allowlist mode (the standard deployed posture) any attacker-chosen
-  //    non-empty token derives a valid runner id and clears that gate without
-  //    establishing a user identity. Registering with no owner would bypass both
-  //    owner-scoped guards (the listing filter and the binding-ownership check
-  //    each skip enforcement when the owner is unset), so an owner-less runner
-  //    would become visible to — and bindable by — every other tenant.
-  const tunnelOwner = resolveTunnelOwner(req, authProvider, isLoopback);
-  if (tunnelOwner === undefined && authProvider !== undefined) {
-    socket.close(RUNNER_ID_MISMATCH_CLOSE_CODE, 'unauthenticated');
-    return;
-  }
+  const isLoopback = hostnameIsLoopback(peerHost);
 
   // The `@fastify/websocket` socket is already accepted/open by the time the
   // handler runs, so inbound `message` events can fire immediately. Attach the
@@ -755,27 +560,61 @@ async function runTunnel(
 
   let session: RegistrySession | undefined;
 
-  // Exactly-once disconnect dispatch. A naive teardown that fired the disconnect
-  // hook from both the inner `finally` and the outer exception handler would
-  // double-fire on the exception-disconnect path: the inner `finally` fires once,
-  // then a re-raised disconnect error propagates to the outer handler, which
-  // fires it again. That double-fire is a hazard — a consumer that decrements a
-  // gauge or emits a `runner_offline` event on each call would do so twice for one
-  // close. We fire it exactly once on every path instead (the contract the route's
-  // own callers, e.g. the sessions module, rely on). This guard makes that
-  // structural: the inner teardown and the pre-loop `catch` both route through it,
-  // so even if a loop or `closeNotice` were to reject after `Promise.race` the
-  // hook still fires once, not twice.
-  let disconnectFired = false;
-  const fireDisconnectOnce = async (): Promise<void> => {
-    if (disconnectFired) {
+  try {
+    // Attach the inbound pump before the database await: a runner can send hello
+    // immediately after upgrade. Token derivation alone is never authorization.
+    let token: string | undefined;
+    let tokenRunnerId: string | undefined;
+    try {
+      token = runnerTunnelToken(req);
+      tokenRunnerId = token === undefined ? undefined : tokenBoundRunnerId(token);
+    } catch (err) {
+      req.log.info({ err, runnerId }, 'runner tunnel token rejected');
+      socket.close(RUNNER_ID_MISMATCH_CLOSE_CODE, 'invalid tunnel token');
       return;
     }
-    disconnectFired = true;
-    await fireDisconnect(req, opts, runnerId);
-  };
+    let tunnelOwner: string | undefined;
+    const assignment = await opts.authorizeAssignedRunner?.(runnerId, (owner) => {
+      tunnelOwner = owner;
+    });
+    if (assignment === 'rejected' || (assignment === 'accepted' && tokenRunnerId !== runnerId)) {
+      req.log.info(
+        { runnerId, reason: assignment === 'rejected' ? 'assignment rejected' : 'token mismatch' },
+        'runner tunnel assignment rejected',
+      );
+      socket.close(RUNNER_ID_MISMATCH_CLOSE_CODE, 'invalid runner assignment');
+      return;
+    }
+    if (assignment !== 'accepted') {
+      const staticToken = token !== undefined && allowedTunnelTokens?.has(token) === true;
+      if (
+        !staticToken &&
+        ((!isLoopback && allowedTunnelTokens !== undefined) ||
+          (tokenRunnerId === undefined ? !isLoopback : tokenRunnerId !== runnerId))
+      ) {
+        req.log.info(
+          {
+            runnerId,
+            reason:
+              token === undefined
+                ? 'token missing'
+                : tokenRunnerId !== runnerId
+                  ? 'token mismatch'
+                  : 'token not allow-listed',
+          },
+          'runner tunnel token rejected',
+        );
+        socket.close(RUNNER_ID_MISMATCH_CLOSE_CODE, 'invalid tunnel token');
+        return;
+      }
+      tunnelOwner = resolveTunnelOwner(req, authProvider, isLoopback);
+      if (tunnelOwner === undefined && authProvider !== undefined) {
+        req.log.info({ runnerId }, 'runner tunnel owner could not be authenticated');
+        socket.close(RUNNER_ID_MISMATCH_CLOSE_CODE, 'unauthenticated');
+        return;
+      }
+    }
 
-  try {
     // 4. Receive the hello frame.
     const helloRaw = await inbound.get();
     if (helloRaw === null) {
@@ -811,9 +650,38 @@ async function runTunnel(
     //    no resolved owner: under `exactOptionalPropertyTypes` an explicit
     //    `undefined` is not assignable to the `{ owner?: string }` option, and a
     //    missing key resolves to the same single-user `owner = undefined`.
-    session = registry.register(runnerId, new WsAdapter(socket), hello, {
-      ...(tunnelOwner !== undefined ? { owner: tunnelOwner } : {}),
-    });
+    const register = (owner: string | undefined): void => {
+      if (socket.readyState !== socket.OPEN) return;
+      // Replacement may synchronously close the old socket; no tunnel I/O is awaited.
+      session = registry.register(runnerId, new WsAdapter(socket), hello, {
+        ...(owner !== undefined ? { owner } : {}),
+      });
+    };
+    if (opts.authorizeAssignedRunner !== undefined) {
+      const current = await opts.authorizeAssignedRunner(runnerId, (owner) => {
+        if (tokenRunnerId === runnerId && (assignment !== 'accepted' || owner === tunnelOwner)) {
+          register(owner);
+        }
+      });
+      if (current === 'rejected' || (assignment === 'accepted' && current !== 'accepted')) {
+        req.log.info({ runnerId }, 'runner tunnel assignment retired during hello');
+        socket.close(RUNNER_ID_MISMATCH_CLOSE_CODE, 'runner assignment retired');
+        return;
+      }
+      if (current === 'unassigned') register(tunnelOwner);
+    } else {
+      register(tunnelOwner);
+    }
+    if (session === undefined) {
+      req.log.info({ runnerId }, 'runner tunnel registration rejected');
+      socket.close(RUNNER_ID_MISMATCH_CLOSE_CODE, 'invalid runner assignment');
+      return;
+    }
+    // A newer connection or socket close may win while the admission transaction commits.
+    if (socket.readyState !== socket.OPEN || registry.get(runnerId) !== session) {
+      registry.deregister(runnerId, session);
+      return;
+    }
 
     // 7. Start the tunnel loops. The sender loop is the only writer to the
     //    socket; request-side callers enqueue through the registry. One shared
@@ -865,26 +733,22 @@ async function runTunnel(
       // keeps a late loop rejection from surfacing as an unhandled rejection.
       registry.deregister(runnerId, session);
       await Promise.allSettled(loops);
-      await fireDisconnectOnce();
     }
   } catch (exc) {
-    // Normally reached only on a pre-loop failure (hello read / register) — once
-    // the loops are running their own try/finally owns teardown and has already
-    // fired the disconnect hook. The once-guard keeps a post-loop rejection
-    // (should one ever surface) from double-firing here. Deregister with the
-    // generation guard when we have a session, unconditionally otherwise.
+    // A failed admission may already have registered; only retire that generation.
     req.log?.error?.({ err: exc, runnerId }, 'runner tunnel error');
     if (session !== undefined) {
       registry.deregister(runnerId, session);
-    } else {
-      registry.deregister(runnerId);
     }
     try {
-      socket.close();
+      // Infrastructure errors must not turn a valid grant into a permanent 4004 rejection.
+      socket.close(1011);
     } catch {
       // best-effort
     }
-    await fireDisconnectOnce();
+  } finally {
+    // One dispatch site covers normal teardown, admission failure, and replacement.
+    if (session !== undefined) await fireDisconnect(req, opts, runnerId);
   }
 }
 
@@ -1082,7 +946,3 @@ function defaultPeerHost(req: FastifyRequest): string | undefined {
 
 /** Shared empty origin allow-list, reused so the common case allocates nothing. */
 const EMPTY_ORIGIN_SET: ReadonlySet<string> = new Set<string>();
-
-function errMessage(exc: unknown): string {
-  return exc instanceof Error ? exc.message : String(exc);
-}

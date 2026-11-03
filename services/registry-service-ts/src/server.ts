@@ -13,6 +13,7 @@ import type { IncomingMessage, ServerOptions } from 'node:http';
 import type { DbClient } from './persistence/postgres/client.js';
 import type { OidcConfig } from './auth/oidc.js';
 import { buildAuth } from './auth/auth.js';
+import { buildRunnerAssignmentAuth } from './auth/runner-assignment-auth.js';
 import { registerApiPerformance } from './observability/api-performance.js';
 import { registerReadAdmission, type ReadAdmissionOptions } from './middleware/read-admission.js';
 import { buildAdminAuth } from './auth/admin-auth.js';
@@ -1104,6 +1105,7 @@ function buildSurfaceApp(
       });
       registerRunnerTunnelRoutes(tunnelScope, {
         registry: tunnelRegistry,
+        authorizeAssignedRunner: buildRunnerAssignmentAuth(opts.db),
         ...(opts.allowedTunnelTokens !== undefined
           ? { allowedTunnelTokens: opts.allowedTunnelTokens }
           : {}),

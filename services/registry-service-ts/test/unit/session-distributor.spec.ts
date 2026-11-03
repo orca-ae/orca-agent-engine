@@ -24,7 +24,7 @@
 //      (runner connects) ASSIGNED, or (no worker / launch refusal / runner
 //      exited) the pending/failed branches.
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   FrameKind,
   WorkerFrameKind,
@@ -92,9 +92,16 @@ class FakeSessionStore implements DistributionSessionStore {
     return row === undefined ? null : { ...row };
   }
 
-  async applyDistributionPatch(id: string, patch: DistributionSessionPatch): Promise<boolean> {
+  async applyDistributionPatch(
+    id: string,
+    patch: DistributionSessionPatch,
+    expectedRunnerId?: string | null,
+  ): Promise<boolean> {
     const row = this.rows.get(id);
-    if (row === undefined) {
+    if (
+      row === undefined ||
+      (expectedRunnerId !== undefined && row.runnerId !== expectedRunnerId)
+    ) {
       return false;
     }
     this.patches.push({ id, patch: { ...patch } });
@@ -423,6 +430,29 @@ describe('session-distributor — state-field transitions (pure patches)', () =>
 // ── 2. SessionDistributor orchestration ───────────────────
 
 describe('SessionDistributor.dispatch — connected worker (happy path)', () => {
+  it('does not launch when the binding could not be persisted', async () => {
+    const store = seededSession(new FakeSessionStore());
+    const tunnelRegistry = new TunnelRegistry();
+    const workerRegistry = new WorkerRegistry();
+    makeWorkerConn(workerRegistry, ENV_ID);
+    vi.spyOn(store, 'applyDistributionPatch').mockResolvedValue(false);
+    const send = vi.spyOn(workerRegistry, 'sendText');
+    const distributor = new SessionDistributor({
+      sessions: store,
+      environments: SELF_HOSTED_LOOKUP,
+      tunnelRegistry,
+      workerRegistry,
+    });
+    const result = await distributor.dispatch({
+      sessionId: SESSION_ID,
+      environment: selfHostedEnv(),
+    });
+    expect(result.runnerId).toBeNull();
+    expect(await result.launchSettled).toEqual({ status: 'send_failed' });
+    expect(send).not.toHaveBeenCalled();
+    expect(tunnelRegistry.connectWaiterCount()).toBe(0);
+  });
+
   it('mints a token, pre-registers the runner id, sends launch_runner, persists PENDING', async () => {
     const tunnelRegistry = new TunnelRegistry();
     const workerRegistry = new WorkerRegistry();
@@ -738,39 +768,46 @@ describe('SessionDistributor.dispatch — no connected worker', () => {
 });
 
 describe('SessionDistributor.dispatch — launch refusal + send failure', () => {
-  it('marks the session FAILED when the worker refuses the launch (harness not configured)', async () => {
-    const tunnelRegistry = new TunnelRegistry();
-    const workerRegistry = new WorkerRegistry();
-    const store = seededSession(new FakeSessionStore());
-    const { conn, drainLaunch } = makeWorkerConn(workerRegistry, ENV_ID);
-    const distributor = new SessionDistributor({
-      sessions: store,
-      environments: SELF_HOSTED_LOOKUP,
-      tunnelRegistry,
-      workerRegistry,
-    });
+  it.each(['claude-sdk', 'pi-sdk'])(
+    'rechecks runner capabilities after a refused launch when it later connects with %s',
+    async (provider) => {
+      const tunnelRegistry = new TunnelRegistry();
+      const workerRegistry = new WorkerRegistry();
+      const store = seededSession(new FakeSessionStore());
+      const { conn, drainLaunch } = makeWorkerConn(workerRegistry, ENV_ID);
+      const distributor = new SessionDistributor({
+        sessions: store,
+        environments: SELF_HOSTED_LOOKUP,
+        tunnelRegistry,
+        workerRegistry,
+      });
 
-    const drained = drainLaunch();
-    const outcome = await distributor.dispatch({
-      sessionId: SESSION_ID,
-      environment: selfHostedEnv(),
-    });
-    const launch = await drained;
-    answerLaunch(conn, launch.requestId, {
-      status: 'failed',
-      runnerId: null,
-      error: "harness 'claude-sdk' is not configured on the worker",
-      errorCode: 'harness_not_configured',
-    });
-    const settled = await outcome.launchSettled;
+      const drained = drainLaunch();
+      const outcome = await distributor.dispatch({
+        sessionId: SESSION_ID,
+        environment: selfHostedEnv(),
+      });
+      const launch = await drained;
+      answerLaunch(conn, launch.requestId, {
+        status: 'failed',
+        runnerId: null,
+        error: "harness 'claude-sdk' is not configured on the worker",
+        errorCode: 'harness_not_configured',
+      });
+      const settled = await outcome.launchSettled;
 
-    expect(settled.status).toBe('failed');
-    const row = store.get(SESSION_ID)!;
-    expect(row.distributionState).toBe(DISTRIBUTION_FAILED);
-    // The pre-registered connect-waiter was cleaned up on the refusal (the
-    // runner will never dial).
-    expect(tunnelRegistry.connectWaiterCount(outcome.runnerId!)).toBe(0);
-  });
+      expect(settled.status).toBe('failed');
+      const row = store.get(SESSION_ID)!;
+      expect(row.distributionState).toBe(DISTRIBUTION_FAILED);
+      // Refusal releases the waiter even if the same token later reconnects.
+      expect(tunnelRegistry.connectWaiterCount(outcome.runnerId!)).toBe(0);
+      connectRunner(tunnelRegistry, outcome.runnerId!, WORKSPACE_ID, [provider]);
+      await distributor.onRunnerConnect(outcome.runnerId!);
+      expect(store.get(SESSION_ID)!.distributionState).toBe(
+        provider === 'claude-sdk' ? DISTRIBUTION_ASSIGNED : DISTRIBUTION_FAILED,
+      );
+    },
+  );
 
   it('leaves the session PENDING (clean binding rollback) when the worker connection was replaced at send', async () => {
     const tunnelRegistry = new TunnelRegistry();
@@ -901,6 +938,27 @@ describe('SessionDistributor.markRunnerExited — worker.runner_exited', () => {
 });
 
 describe('SessionDistributor.onRunnerConnect — unrelated runner', () => {
+  it.each(['connect', 'exit', 'disconnect'])(
+    'ignores a stale %s callback after reassignment',
+    async (action) => {
+      const store = seededSession(new FakeSessionStore(), { runnerId: 'old-runner' });
+      const distributor = new SessionDistributor({
+        sessions: store,
+        environments: SELF_HOSTED_LOOKUP,
+        tunnelRegistry: new TunnelRegistry(),
+        workerRegistry: new WorkerRegistry(),
+      });
+      vi.spyOn(store, 'findBoundSessionId').mockImplementation(async () => {
+        store.seed({ ...store.get(SESSION_ID)!, runnerId: 'replacement' });
+        return SESSION_ID;
+      });
+      if (action === 'connect') await distributor.onRunnerConnect('old-runner');
+      if (action === 'exit') await distributor.markRunnerExited('old-runner', 'exited');
+      if (action === 'disconnect') await distributor.markRunnerDisconnected('old-runner');
+      expect(store.patches).toEqual([]);
+    },
+  );
+
   it('is a no-op when the connecting runner matches no bound session', async () => {
     const tunnelRegistry = new TunnelRegistry();
     const workerRegistry = new WorkerRegistry();

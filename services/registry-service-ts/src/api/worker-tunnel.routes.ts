@@ -44,7 +44,6 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { WebSocket as WsWebSocket } from 'ws';
 import {
   WorkerTunnelServer,
-  INTERNAL_WS_ORIGIN,
   type WorkerAuthProvider,
   type WorkerHandshake,
   type WorkerSocketMessage,
@@ -54,6 +53,7 @@ import {
 } from '@orca/harness-tunnel';
 import { randomUUID } from 'node:crypto';
 import { verifyEnvKeyForEnvironment } from '../domain/environment-key-state.js';
+import { websocketOriginAllowed } from '../auth/tunnel-origin.js';
 import { WorkerRegistry } from '../tunnel/worker-registry.js';
 
 /**
@@ -655,103 +655,3 @@ function defaultPeerHost(req: FastifyRequest): string | undefined {
 
 /** Shared empty origin allow-list, reused so the common case allocates nothing. */
 const EMPTY_ORIGIN_SET: ReadonlySet<string> = new Set<string>();
-
-// ── CSWSH origin policy (mirrors the runner tunnel) ─────────
-
-/**
- * Decide whether a WebSocket handshake's `Origin` is acceptable.
- *
- * - The internal sentinel and any origin in `extraAllowed` are always allowed.
- * - A missing `Origin` is allowed: non-browser clients never send one and
- *   browsers always do, so its absence is not a browser CSWSH vector.
- * - In `localMode` an `Origin` is allowed only when its hostname is a loopback
- *   host — the CSWSH guard for an unauthenticated single-user server.
- * - In non-local modes the connection is authenticated by the Env Key, so any
- *   `Origin` is allowed unless `extraAllowed` is non-empty (then only the
- *   allow-list passes).
- */
-function websocketOriginAllowed(
-  origin: string | undefined,
-  localMode: boolean,
-  extraAllowed: ReadonlySet<string>,
-): boolean {
-  if (origin === INTERNAL_WS_ORIGIN) {
-    return true;
-  }
-  if (origin !== undefined && extraAllowed.has(origin)) {
-    return true;
-  }
-  if (origin === undefined) {
-    return true;
-  }
-  if (localMode) {
-    return originHostnameIsLoopback(origin);
-  }
-  // Non-local modes rely on the Env Key. Passthrough by default; if a deployment
-  // configured an allow-list, anything not matched above is denied.
-  return extraAllowed.size === 0;
-}
-
-/**
- * Return whether an `Origin` header points at a loopback host.
- *
- * Parses the URL and inspects its hostname; `localhost`, IPv4/IPv6 loopback, and
- * IPv4-mapped loopback all count. A missing / unparseable host does not.
- */
-function originHostnameIsLoopback(origin: string): boolean {
-  let host: string | null;
-  try {
-    host = new URL(origin).hostname;
-  } catch {
-    return false;
-  }
-  if (host === null || host === '') {
-    return false;
-  }
-  // `URL` wraps IPv6 hosts in brackets; strip them before address parsing.
-  if (host.startsWith('[') && host.endsWith(']')) {
-    host = host.slice(1, -1);
-  }
-  return hostnameIsLoopback(host);
-}
-
-/**
- * Return whether a bare hostname / IP literal is a loopback host.
- *
- * `localhost`, the IPv4 loopback block `127.0.0.0/8`, IPv6 `::1`, and IPv4-mapped
- * loopback (`::ffff:127.0.0.1`, including the long form) all count; anything else
- * does not.
- */
-function hostnameIsLoopback(host: string): boolean {
-  if (host === 'localhost') {
-    return true;
-  }
-  if (isIpv4LoopbackLiteral(host)) {
-    return true;
-  }
-  if (host === '::1') {
-    return true;
-  }
-  const mapped = host.toLowerCase().match(/:ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
-  if (mapped !== null && isIpv4LoopbackLiteral(mapped[1]!)) {
-    return true;
-  }
-  return false;
-}
-
-/** Whether `host` is a dotted-quad IPv4 literal inside `127.0.0.0/8`. */
-function isIpv4LoopbackLiteral(host: string): boolean {
-  const parts = host.split('.');
-  if (parts.length !== 4) {
-    return false;
-  }
-  const octets = parts.map((p) => Number(p));
-  if (octets.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) {
-    return false;
-  }
-  // Reject non-canonical octets like "01" or "" that `Number` would accept.
-  if (parts.some((p) => p.length === 0 || (p.length > 1 && p.startsWith('0')))) {
-    return false;
-  }
-  return octets[0] === 127;
-}

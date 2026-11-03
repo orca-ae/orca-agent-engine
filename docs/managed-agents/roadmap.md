@@ -803,7 +803,8 @@ respawn.
 `WS /v1/tunnels/runners/:runnerId` (`services/registry-service-ts/src/api/runner-tunnel.routes.ts`)
 and the Environment worker tunnel `WS /v1/tunnels/environments/:environmentId`
 (`worker-tunnel.routes.ts`), both registered in `src/server.ts`: a WebSocket channel, binding-token
-runner authentication that is loopback-only by default and fails closed on owner resolution, and
+runner authentication against durable Session assignments, local/static authentication for
+unassigned runners with fail-closed owner resolution, and
 resolved-owner registration plus claim-based dispatch. `@orca/session-runner` dials the runner tunnel
 and serves the pushed `/v1/runner/*` routes; `environment-worker` dials the worker tunnel and launches
 runners — see [`services/session-runner.md`](./services/session-runner.md),

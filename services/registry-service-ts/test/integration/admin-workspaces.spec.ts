@@ -5,6 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { and, eq, sql } from 'drizzle-orm';
 import { InMemorySkillStore } from '@orca/skill-store';
+import { Deferred, tokenBoundRunnerId } from '@orca/harness-tunnel';
 import {
   fingerprintAdminApiKey,
   generateAdminApiKey,
@@ -12,6 +13,8 @@ import {
   partialAdminApiKeyHint,
 } from '../../src/auth/admin-api-key.js';
 import { fingerprintApiKey, hashApiKey } from '../../src/auth/api-key.js';
+import { buildRunnerAssignmentAuth } from '../../src/auth/runner-assignment-auth.js';
+import { mintBindingToken } from '../../src/tunnel/session-distributor.js';
 import { buildAdminApp, buildPublicApp } from '../../src/server.js';
 import { reconcileSessionLifecycleOutbox } from '../../src/domain/session-lifecycle-outbox.js';
 import {
@@ -609,6 +612,84 @@ describe('organization admin workspace control plane', () => {
       expect.arrayContaining(['workspace.created', 'api_key.created', 'workspace.archived']),
     );
     expect(JSON.stringify(organizationAudit)).not.toContain(workspaceKey);
+  });
+
+  it('serializes runner admission with Workspace archive without a lock-order deadlock', async () => {
+    const fixture = await createArchiveRollbackFixture(`Runner admission race ${Date.now()}`);
+    const runnerId = tokenBoundRunnerId(mintBindingToken());
+    await db
+      .update(sessions)
+      .set({
+        runnerId,
+        hostEnvironmentId: sql`${sessions.environmentId}`,
+        distributionState: 'pending',
+      })
+      .where(eq(sessions.id, fixture.sessionId));
+
+    // Pause the real archive after it locks Workspace, before it locks Sessions.
+    const locked = new Deferred<number>(),
+      release = new Deferred<void>();
+    const barrier = db.transaction(async (tx) => {
+      await tx
+        .select()
+        .from(agentObservabilityWorkspaceSettings)
+        .where(eq(agentObservabilityWorkspaceSettings.workspaceId, fixture.workspaceId))
+        .for('update');
+      const result = await tx.execute<{ pid: number }>(sql`SELECT pg_backend_pid() AS pid`);
+      locked.resolve(result.rows[0]!.pid);
+      await release.promise;
+    });
+    let archive: Promise<Awaited<ReturnType<FastifyInstance['inject']>>> | undefined;
+    let admission: Promise<string> | undefined;
+    try {
+      const barrierPid = await locked.promise;
+      archive = adminApp!
+        .inject({
+          method: 'POST',
+          url: `/v1/organizations/workspaces/${fixture.workspaceId}/archive`,
+          headers: { 'x-api-key': adminKey },
+        })
+        .then((response) => response);
+      let archivePid = 0;
+      await expect
+        .poll(async () => {
+          const result = await db.execute<{ pid: number }>(sql`
+          SELECT pid FROM pg_stat_activity WHERE ${barrierPid} = ANY(pg_blocking_pids(pid))
+        `);
+          archivePid = result.rows[0]?.pid ?? 0;
+          return archivePid !== 0;
+        })
+        .toBe(true);
+
+      let admitted = false;
+      admission = buildRunnerAssignmentAuth(db)(runnerId, (owner) => {
+        expect(owner).toBe(fixture.workspaceId);
+        admitted = true;
+      });
+      // On the old code, admission locks Session then waits on archive's Workspace.
+      await expect
+        .poll(async () => {
+          if (admitted) return true;
+          const waiting = await db.execute(sql`
+          SELECT 1 FROM pg_stat_activity WHERE ${archivePid} = ANY(pg_blocking_pids(pid))
+        `);
+          return waiting.rows.length > 0;
+        })
+        .toBe(true);
+      release.resolve();
+      const [admissionResult, archiveResult] = await Promise.allSettled([admission, archive]);
+      expect(admissionResult).toEqual({ status: 'fulfilled', value: 'accepted' });
+      expect(archiveResult.status).toBe('fulfilled');
+      if (archiveResult.status === 'fulfilled') expect(archiveResult.value.statusCode).toBe(200);
+      expect(
+        await buildRunnerAssignmentAuth(db)(runnerId, () => {
+          throw new Error('archived assignment must not be admitted');
+        }),
+      ).toBe('rejected');
+    } finally {
+      if (!release.done) release.resolve();
+      await Promise.allSettled([barrier, admission, archive]);
+    }
   });
 
   it('rolls back workspace archive when one Session observability pin is missing', async () => {

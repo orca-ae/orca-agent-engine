@@ -594,7 +594,11 @@ export function buildDistributionSessionStore(db: DbClient): DistributionSession
       const agentInfo = { provider: harnessToProvider(selection.harness), ...selection };
       return toDistributionRow(row, workspace, agentInfo);
     },
-    async applyDistributionPatch(id: string, patch: DistributionSessionPatch): Promise<boolean> {
+    async applyDistributionPatch(
+      id: string,
+      patch: DistributionSessionPatch,
+      expectedRunnerId?: string | null,
+    ): Promise<boolean> {
       const set: Partial<typeof sessions.$inferInsert> = { updatedAt: new Date() };
       if ('runnerId' in patch) set.runnerId = patch.runnerId ?? null;
       if ('hostEnvironmentId' in patch) set.hostEnvironmentId = patch.hostEnvironmentId ?? null;
@@ -602,7 +606,19 @@ export function buildDistributionSessionStore(db: DbClient): DistributionSession
       const updated = await db
         .update(sessions)
         .set(set)
-        .where(and(isNull(sessions.deletedAt), eq(sessions.id, id)))
+        .where(
+          and(
+            isNull(sessions.deletedAt),
+            isNull(sessions.archivedAt),
+            ne(sessions.status, 'terminated'),
+            eq(sessions.id, id),
+            expectedRunnerId === undefined
+              ? undefined
+              : expectedRunnerId === null
+                ? isNull(sessions.runnerId)
+                : eq(sessions.runnerId, expectedRunnerId),
+          ),
+        )
         .returning({ id: sessions.id });
       return updated.length > 0;
     },
@@ -703,6 +719,8 @@ export function buildBoundSessionResolver(db: DbClient): BoundSessionResolver {
             isNull(sessions.deletedAt),
             eq(sessions.runnerId, runnerId),
             ne(sessions.distributionState, DISTRIBUTION_FAILED),
+            isNull(sessions.archivedAt),
+            ne(sessions.status, 'terminated'),
           ),
         )
         .limit(1);

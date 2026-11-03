@@ -251,11 +251,12 @@ const secretStore = await buildSecretStore();
 // mesh layer in front of it. `buildRunnerTunnelAuth` turns config into the route
 // options that make those gates fail closed by default: with no
 // `RUNNER_TUNNEL_TOKENS` allow-list it wires a loopback-only auth provider so a
-// LOCAL runner registers while every remote peer is refused by the owner
+// LOCAL runner registers while an unassigned remote peer is refused by the owner
 // fail-closed gate; provisioning `RUNNER_TUNNEL_TOKENS` is the explicit opt-in
 // that admits allow-listed remote runners. Wiring an auth provider here is what
 // keeps the route OUT of single-user mode, which is what makes the fail-closed
-// gate reachable in production at all.
+// gate reachable in production at all. server.ts additionally authenticates
+// distributor-issued runners against their durable Session/Environment assignment.
 const runnerTunnelAuth = buildRunnerTunnelAuth(config);
 // Worker-reported runner exit causes (`worker.runner_exited`). Wired on the READ side
 // so `GET /internal/runners/:id/status` surfaces an (owner-scoped) failure cause

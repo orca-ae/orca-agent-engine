@@ -1415,6 +1415,7 @@ export const sessions = pgTable(
     uniqueIndex('sessions_workspace_id_idx').on(t.workspaceId, t.id),
     index('sessions_workspace_idx').on(t.workspaceId, t.archivedAt),
     index('sessions_workspace_environment_idx').on(t.workspaceId, t.environmentId),
+    index('sessions_runner_id_idx').on(t.runnerId),
     foreignKey({
       name: 'sessions_workspace_fk',
       columns: [t.workspaceId],
