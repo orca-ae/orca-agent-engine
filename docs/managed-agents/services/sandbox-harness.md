@@ -174,4 +174,7 @@ via `ORCA_E2E_SANDBOX_HARNESS=1`. It needs a stack on an endpoint-capable
 runtime (`SANDBOX_RUNTIME=opensandbox` or `e2b`); `local` and `in-memory` do not
 expose the harness HTTP endpoint.
 
-Codex receives its scoped Gateway JWT and Responses URL through the private command channel; credentials refresh between turns.
+Codex receives its scoped Gateway JWT and Responses URL through the private command channel;
+credentials refresh between turns. For Codex, Pi and DSH, the sandbox command dispatcher removes
+the refresh command's `type` discriminator before passing credential and configuration options to
+the SDK worker. DSH's native refresh validation accepts only those options.
