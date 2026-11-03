@@ -1,0 +1,1 @@
+CREATE INDEX "sessions_runner_id_idx" ON "sessions" USING btree ("runner_id");

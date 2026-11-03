@@ -1344,6 +1344,8 @@ any counting (the row lookup is the tenancy boundary). It returns three fields:
 `depth` + `in_flight` are a disjoint partition of the non-terminal distributed
 sessions; FAILED (terminal) sessions and sessions with a null
 `distribution_state` match no filter and are excluded by the counting query.
+Archived, deleted, and terminated Sessions are excluded even when they retain
+a runner binding or a pending/assigned distribution state.
 `POST /v1/sessions` dispatches every session it creates on a `self_hosted` or
 `cloud` environment; a Trigger-created session is not dispatched and keeps a
 null `distribution_state`. A dispatched session the distributor does not launch
@@ -1421,7 +1423,7 @@ below).
 ### Runner tunnel (public, token-authed) — `WS /v1/tunnels/runners/:runnerId`
 
 > The self-hosted runner transport: a WebSocket channel; binding-token +
-> loopback-only + owner-fail-closed auth; owner / registration model. See
+> durable assignment authentication plus local/static authentication; owner / registration model. See
 > [`../harness-modes.md`](../harness-modes.md) ("Transport abstraction").
 
 Every `colocated` runner (`mode: colocated`) — cloud or self-hosted — dials this
@@ -1438,7 +1440,8 @@ handler's own job, not the mesh's: the worker self-authenticates by env key, the
 runner by its per-runner binding token.
 
 The WS handler is in `src/api/runner-tunnel.routes.ts`; its auth posture is
-assembled from config in `src/auth/tunnel-auth.ts`. Because the endpoint sits on
+assembled from config in `src/auth/tunnel-auth.ts`. Runner and worker tunnels
+share the Origin/loopback rules in `src/auth/tunnel-origin.ts`. Because the endpoint sits on
 the public listener, the global app-auth pre-handler is **bypassed** for
 `/v1/tunnels/*` (see the Auth section below and `src/auth/auth.ts`): the runner
 presents no `x-api-key` and no OIDC token — only its tunnel binding token in the
@@ -1455,13 +1458,43 @@ unless every one of these gates passes:
   clients never send one) is allowed. In non-local mode the connection is
   cookie/proxy-authenticated, so any `Origin` passes unless an allow-list is
   configured (then it is deny-by-default).
-- **Binding-token correlation.** When the runner presents a tunnel token, the
+- **Registry-issued assignment.** A runner id bound to a Session is authenticated
+  against its persisted assignment, independently of the static allow-list. The
+  token must derive the path runner id. Exactly one Session must own that id; its
+  requested and dispatched Environment must agree and belong to the same active
+  workspace. Deleted/archived Sessions or Environments and terminated Sessions
+  are refused. The tunnel owner is the assignment's workspace, never a client
+  header. The lookup is repeated under database row locks immediately before
+  registration, so a revocation or reassignment during hello cannot reuse the
+  initial authorization. Admission locks Session and Environment rows; it reads
+  Workspace status without a row lock. Workspace archive locks and archives the
+  Session in the same transaction, ordering admission against archive without
+  reversing the archive path's Workspace-before-Session lock order.
+  No in-process waiter, connected worker, or worker-pod
+  affinity is required. Database failures close with retryable `1011`, not a
+  permanent credential rejection (`4004`). The runner-id lookup uses the non-unique
+  `sessions_runner_id_idx` index across all Session rows, including retired rows
+  considered by the ambiguity check. Server logs distinguish token, assignment,
+  and owner refusals while client close reasons remain generic. Admission is
+  independent of distribution state, including a legacy null state: the current
+  binding is the credential. A failed distribution can reconnect after a refused
+  launch; the connected runner's capabilities are checked again before
+  promotion to `assigned`. A completed turn does not terminate the Session. Clearing or
+  replacing `sessions.runner_id`, archiving, or terminating the Session blocks
+  subsequent admissions but does not close an already registered transport.
+  Native completion checks the current binding and live Session state on every
+  write, so a retired runner cannot persist completion or usage. Late distributor
+  callbacks leave archived or terminated rows unchanged. Environment worker keys
+  remain separate credentials: rotating one does not itself revoke existing
+  Session bindings. Native completion retains its placement/revision and durable
+  authority fencing after admission.
+- **Other runners: binding-token correlation.** When the runner presents a tunnel token, the
   path `runnerId` must equal the id cryptographically bound to that token (or, in
   an allow-list deployment, the token must be in `RUNNER_TUNNEL_TOKENS` and the
   runner may use a stable id). A loopback peer may omit the token (the single-user
   local-runner flow) and bypasses the allow-list. Mismatch / empty /
   unauthorized → `4004`.
-- **Owner resolution, fail-closed.** The owner is resolved from the handshake and
+- **Other runners: owner resolution, fail-closed.** The owner is resolved from the handshake and
   an unauthenticated **non-loopback** peer is refused with `4004` rather than
   registered owner-less. This matters because the token gate above only proves the
   peer knows _a_ token; in the no-allow-list default any attacker-chosen non-empty
@@ -1471,12 +1504,12 @@ unless every one of these gates passes:
   by — every tenant. The fail-closed gate is what stops that.
 
 **Safe default (no operator config).** With neither `RUNNER_TUNNEL_TOKENS` nor an
-external identity provider set, the route wires a **loopback-only auth provider**:
+external identity provider set, Registry-issued runners use their durable assignment.
+For other runners, the route wires a **loopback-only auth provider**:
 a local runner dialing over loopback registers as the reserved local owner
-(`'local'`), and every remote peer resolves to no identity and is refused by the
-fail-closed gate. Admitting remote runners is therefore an **explicit opt-in**
-(provision `RUNNER_TUNNEL_TOKENS`), never the silent default of a `0.0.0.0`
-listener.
+(`'local'`), and an unassigned remote peer resolves to no identity and is refused
+by the fail-closed gate. Operator-managed remote runners without a Session
+assignment require explicit provisioning through `RUNNER_TUNNEL_TOKENS`.
 
 The two companion HTTP reads — `GET /internal/runners` (list the caller's online
 runners) and `GET /internal/runners/:runnerId/status` (online + host-reported exit
@@ -1485,11 +1518,11 @@ cause) — are control-plane queries the registry / harness issue, so they stay
 namespace; the old mesh-only tunnel path is gone (`api-runner-tunnel.routes.spec.ts`
 pins both the public mount and the 404 on the retired `/internal/...` tunnel path).
 
-| Env var                         | Purpose                                                                                                                                                                                                                                                 | Default                                    |
-| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
-| `RUNNER_TUNNEL_TOKENS`          | Comma-separated binding-token allow-list. Non-empty admits **remote** runners whose `X-Orca-Runner-Tunnel-Token` is one of these exact tokens (each registers under a stable, not token-derived, id). The opt-in that opens the tunnel beyond loopback. | empty (loopback-only; remote fails closed) |
-| `RUNNER_TUNNEL_ALLOWED_ORIGINS` | Comma-separated extra permitted WS `Origin` values for the CSWSH guard, beyond the internal sentinel + loopback hosts.                                                                                                                                  | empty                                      |
-| `RUNNER_TUNNEL_LOCAL_MODE`      | CSWSH local-mode flag. In local mode an `Origin` is allowed only when its hostname is loopback (the single-user posture, no cookie/proxy auth).                                                                                                         | `true`                                     |
+| Env var                         | Purpose                                                                                                                                                                                                                                                        | Default                                       |
+| ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------- |
+| `RUNNER_TUNNEL_TOKENS`          | Comma-separated binding-token allow-list for operator-managed runners without a Session assignment. These tokens permit stable ids but cannot claim a Session-assigned runner id. Registry-issued runners authenticate independently against their assignment. | empty (assignment authentication or loopback) |
+| `RUNNER_TUNNEL_ALLOWED_ORIGINS` | Comma-separated extra permitted WS `Origin` values for the CSWSH guard, beyond the internal sentinel + loopback hosts.                                                                                                                                         | empty                                         |
+| `RUNNER_TUNNEL_LOCAL_MODE`      | CSWSH local-mode flag. In local mode an `Origin` is allowed only when its hostname is loopback (the single-user posture, no cookie/proxy auth).                                                                                                                | `true`                                        |
 
 #### AI-gateway egress + environment-launcher configuration
 
@@ -2055,7 +2088,7 @@ The global app-auth pre-handler (`src/auth/auth.ts`) runs the `x-api-key` / OIDC
 
 - `/internal/*` — mesh-only control-plane routes (vault-resolve, session lifecycle, memory-versions, environment `verify-key` + durable-claim control (claims, heartbeat, release, reap)). They are registered only on the separate internal listener, whose own pre-handler (`src/auth/internal-auth.ts`) requires a Bearer workload credential on every route except `/healthz`, `/readyz` and `/metrics` — a Kubernetes ServiceAccount JWT checked by TokenReview, or the shared internal service token — and admits each Kubernetes workload identity only to its own route families. Network and mesh policy may further restrict who reaches the listener.
 - `/v1/git-creds` — public, but Bearer-JWT-only (`aud='git-creds'`); the in-sandbox helper holds only the session JWT, so the route's handler verifies the JWT itself. Bypassing the app layer keeps the api-key check from masking the JWT-specific error.
-- `/v1/tunnels/*` — the **public** tunnel WebSockets. The runner tunnel (`WS /v1/tunnels/runners/:runnerId`, documented above): a self-hosted runner dials in from outside the mesh with no api-key / OIDC token, only its `X-Orca-Runner-Tunnel-Token`; the WS handler self-authenticates by binding token (loopback-only default, allow-list opt-in, owner fail-closed, CSWSH guard). The worker/host tunnel (`WS /v1/tunnels/environments/:environmentId`) rides the same bypass, self-authenticating with its raw env key; the `verify-key` and durable-claim control routes stay on the mesh-only `/internal/*` listener (previous bullet).
+- `/v1/tunnels/*` — the **public** tunnel WebSockets. The runner tunnel (`WS /v1/tunnels/runners/:runnerId`, documented above): a self-hosted runner dials in from outside the mesh with no api-key / OIDC token, only its `X-Orca-Runner-Tunnel-Token`; the WS handler authenticates the token against a durable Session assignment, or uses the local/static authentication paths for unassigned runners. Owner checks and the CSWSH guard remain enforced. The worker/host tunnel (`WS /v1/tunnels/environments/:environmentId`) rides the same bypass, self-authenticating with its raw env key; the `verify-key` and durable-claim control routes stay on the mesh-only `/internal/*` listener (previous bullet).
 - `/healthz`, `/readyz`, `/metrics` — unauthenticated cluster probes.
 
 ## Data model

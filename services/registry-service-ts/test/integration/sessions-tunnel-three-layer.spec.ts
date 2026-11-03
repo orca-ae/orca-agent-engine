@@ -56,6 +56,7 @@ import { buildApp, getTunnelRegistry, getWorkerRegistry } from '../../src/server
 import { sessionResources, sessions } from '../../src/persistence/postgres/schema.js';
 import type { DbClient } from '../../src/persistence/postgres/client.js';
 import { newId } from '../../src/domain/versioning.js';
+import { buildRunnerTunnelAuth } from '../../src/auth/tunnel-auth.js';
 
 const ENV_KEY_HEADER = 'x-orca-environment-key';
 
@@ -305,8 +306,16 @@ describe('claim-based distribution — three-layer (integration)', () => {
 
   beforeAll(async () => {
     const { db } = await getTestDb();
+    const auth = buildRunnerTunnelAuth({
+      runnerTunnelTokens: new Set(),
+      runnerTunnelAllowedOrigins: new Set(),
+      runnerTunnelLocalMode: true,
+    });
     const app = buildApp({
       db,
+      tunnelAuthProvider: auth.authProvider,
+      tunnelAllowedOrigins: auth.allowedOrigins,
+      tunnelLocalMode: auth.localMode,
       oidc: { allowedIssuers: [], audience: 'orca-managed-agents' },
       store: buildStubStore(),
       sse: STUB_SSE_CONFIG,
@@ -314,6 +323,15 @@ describe('claim-based distribution — three-layer (integration)', () => {
       fileStore: buildStubFileStore(),
       // Speed the bounded launch-result wait so a degenerate test (no result
       // frame) does not sit on the full 10s; the happy path answers instantly.
+    });
+    // Exercise the production remote-peer branch over the local test socket.
+    app.addHook('onRequest', async (req) => {
+      if (req.url.startsWith('/v1/tunnels/runners/')) {
+        Object.defineProperty(req.socket, 'remoteAddress', {
+          value: '203.0.113.9',
+          configurable: true,
+        });
+      }
     });
     await app.ready();
     await app.listen({ host: '127.0.0.1', port: 0 });

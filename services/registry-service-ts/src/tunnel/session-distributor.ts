@@ -376,12 +376,17 @@ export interface DistributionSessionStore {
   /** Load the distribution view of a session by id, or `null` when absent. */
   load(id: string): Promise<DistributionSessionRow | null>;
   /**
-   * Apply a distribution transition patch to a session row.
+   * Apply a distribution transition patch to an active session row. Supplying
+   * expectedRunnerId makes the update conditional on that binding still being current.
    *
    * @returns `true` when a row was updated, `false` when the session id is
    *   unknown (e.g. deleted mid-dispatch).
    */
-  applyDistributionPatch(id: string, patch: DistributionSessionPatch): Promise<boolean>;
+  applyDistributionPatch(
+    id: string,
+    patch: DistributionSessionPatch,
+    expectedRunnerId?: string | null,
+  ): Promise<boolean>;
   /**
    * Find the session currently bound to `runnerId`, or `null` when none is.
    *
@@ -688,10 +693,19 @@ export class SessionDistributor {
     });
 
     // Persist the runner binding + worker environment id (still PENDING).
-    await this.sessions.applyDistributionPatch(
+    const persisted = await this.sessions.applyDistributionPatch(
       sessionId,
       pendingDistributionPatch({ runnerId, hostEnvironmentId: environment.id }),
+      row.runnerId,
     );
+    if (!persisted) {
+      this.tunnelRegistry.cancelConnectWaiters(runnerId);
+      return {
+        state: DISTRIBUTION_PENDING,
+        runnerId: null,
+        launchSettled: Promise.resolve({ status: 'send_failed' }),
+      };
+    }
 
     // Register the pending launch waiter against the worker connection, then send
     // the frame. The worker's `worker.launch_runner_result` resolves this waiter
@@ -724,7 +738,7 @@ export class SessionDistributor {
       // exactly the recovery the replaced-connection case already relied on.
       conn.pendingLaunches.delete(requestId);
       this.tunnelRegistry.cancelConnectWaiters(runnerId);
-      await this.sessions.applyDistributionPatch(sessionId, unassignedPendingPatch());
+      await this.sessions.applyDistributionPatch(sessionId, unassignedPendingPatch(), runnerId);
       if (exc instanceof WorkerConnectionReplacedError) {
         this.logger?.warn?.(
           { sessionId, environmentId: environment.id },
@@ -789,7 +803,7 @@ export class SessionDistributor {
       // The worker refused the launch. Cancel the connect-waiter (the runner
       // will never dial) and mark the session FAILED so the failure surfaces.
       this.tunnelRegistry.cancelConnectWaiters(runnerId);
-      await this.sessions.applyDistributionPatch(sessionId, failedDistributionPatch());
+      await this.sessions.applyDistributionPatch(sessionId, failedDistributionPatch(), runnerId);
       this.logger?.warn?.(
         { sessionId, runnerId, errorCode: result.errorCode ?? null, error: result.error ?? null },
         'worker refused launch; session marked failed',
@@ -905,7 +919,7 @@ export class SessionDistributor {
     const advertised = this.tunnelRegistry.get(runnerId)?.hello.harnesses;
     const row = await this.sessions.load(sessionId);
     if (row !== null && !providerAdvertisedByRunner(row.agentHarness, advertised)) {
-      await this.sessions.applyDistributionPatch(sessionId, failedDistributionPatch());
+      await this.sessions.applyDistributionPatch(sessionId, failedDistributionPatch(), runnerId);
       this.logger?.warn?.(
         { sessionId, runnerId, provider: row.agentHarness, advertised },
         'capability mismatch: connected runner does not advertise the session provider; session marked failed',
@@ -913,7 +927,7 @@ export class SessionDistributor {
       return;
     }
 
-    await this.sessions.applyDistributionPatch(sessionId, assignedDistributionPatch());
+    await this.sessions.applyDistributionPatch(sessionId, assignedDistributionPatch(), runnerId);
     this.logger?.info?.({ sessionId, runnerId }, 'runner connected; session assigned');
   }
 
@@ -931,7 +945,7 @@ export class SessionDistributor {
     if (sessionId === null) {
       return;
     }
-    await this.sessions.applyDistributionPatch(sessionId, failedDistributionPatch());
+    await this.sessions.applyDistributionPatch(sessionId, failedDistributionPatch(), runnerId);
     this.logger?.warn?.({ sessionId, runnerId, error }, 'runner exited; session marked failed');
   }
 
@@ -967,7 +981,9 @@ export class SessionDistributor {
     if (sessionId === null) {
       return;
     }
-    await this.sessions.applyDistributionPatch(sessionId, failedDistributionPatch());
+    // A reconnect may have registered while the durable lookup was in flight.
+    if (this.tunnelRegistry.has(runnerId)) return;
+    await this.sessions.applyDistributionPatch(sessionId, failedDistributionPatch(), runnerId);
     this.logger?.warn?.({ sessionId, runnerId }, 'runner tunnel closed; session marked failed');
   }
 }

@@ -24,6 +24,7 @@ import {
   FrameKind,
   TUNNEL_MAX_MESSAGE_BYTES,
   INTERNAL_WS_ORIGIN,
+  LOCAL_TUNNEL_OWNER,
   decodeFrame,
   encodeFrame,
   tokenBoundRunnerId,
@@ -34,7 +35,6 @@ import { TunnelRegistry } from '../../src/tunnel/tunnel-registry.js';
 import { RunnerExitReports } from '../../src/tunnel/runner-exit-reports.js';
 import {
   registerRunnerTunnelRoutes,
-  LOCAL_TUNNEL_OWNER,
   FORBIDDEN_ORIGIN_CLOSE_CODE,
   RUNNER_ID_MISMATCH_CLOSE_CODE,
   type TunnelAuthProvider,
@@ -560,16 +560,19 @@ describe('api/runner-tunnel route — token binding', () => {
     expect(registry.onlineRunnerIds()).toEqual([firstRunnerId, secondRunnerId]);
   });
 
-  it('rejects an empty token header (4004)', async () => {
-    const registry = new TunnelRegistry();
-    const { baseUrl } = await buildTunnelApp(registry);
-    const ws = await connect(baseUrl, RUNNER_ID, {
-      headers: { [RUNNER_TUNNEL_TOKEN_HEADER]: '   ' },
-    });
-    const closed = nextClose(ws);
-    expect(await closed).toBe(RUNNER_ID_MISMATCH_CLOSE_CODE);
-    expect(registry.onlineRunnerIds()).toEqual([]);
-  });
+  it.each(['203.0.113.9', '127.0.0.1'])(
+    'rejects an empty token header from %s (4004)',
+    async (peerHost) => {
+      const registry = new TunnelRegistry();
+      const { baseUrl } = await buildTunnelApp(registry, { peerHost });
+      const ws = await connect(baseUrl, RUNNER_ID, {
+        headers: { [RUNNER_TUNNEL_TOKEN_HEADER]: '   ' },
+      });
+      const closed = nextClose(ws);
+      expect(await closed).toBe(RUNNER_ID_MISMATCH_CLOSE_CODE);
+      expect(registry.onlineRunnerIds()).toEqual([]);
+    },
+  );
 });
 
 // ── Loopback detection ──────────────────────────────────────

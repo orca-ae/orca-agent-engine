@@ -839,7 +839,7 @@ function toApi(row: typeof environments.$inferSelect, orcaBeta: boolean) {
 }
 
 /**
- * Count an environment's NON-archived sessions by their distribution lifecycle
+ * Count an environment's non-archived, non-terminated sessions by their distribution lifecycle
  * position, for the work_stats partition. One conditional aggregate,
  * scoped to the environment AND its workspace (so a foreign-workspace session
  * pointing at this env id is excluded) AND `archived_at IS NULL` AND `deleted_at IS NULL` (an
@@ -866,6 +866,7 @@ async function countEnvironmentWork(
     eq(sessions.workspaceId, workspaceId),
     eq(sessions.environmentId, environmentId),
     isNull(sessions.archivedAt),
+    ne(sessions.status, 'terminated'),
   );
   const [counts] = await db
     .select({

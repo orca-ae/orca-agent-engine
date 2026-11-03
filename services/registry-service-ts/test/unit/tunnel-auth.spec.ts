@@ -20,6 +20,7 @@ import { WebSocket } from 'ws';
 import {
   TUNNEL_MAX_MESSAGE_BYTES,
   INTERNAL_WS_ORIGIN,
+  LOCAL_TUNNEL_OWNER,
   FrameKind,
   encodeFrame,
   tokenBoundRunnerId,
@@ -29,15 +30,9 @@ import {
 import { TunnelRegistry } from '../../src/tunnel/tunnel-registry.js';
 import {
   registerRunnerTunnelRoutes,
-  LOCAL_TUNNEL_OWNER,
   RUNNER_ID_MISMATCH_CLOSE_CODE,
 } from '../../src/api/runner-tunnel.routes.js';
-import {
-  buildRunnerTunnelAuth,
-  LoopbackOnlyTunnelAuthProvider,
-  AllowlistTunnelAuthProvider,
-  type RunnerTunnelAuthConfig,
-} from '../../src/auth/tunnel-auth.js';
+import { buildRunnerTunnelAuth, type RunnerTunnelAuthConfig } from '../../src/auth/tunnel-auth.js';
 
 // ── buildRunnerTunnelAuth (pure) ─────────────────────────────
 
@@ -53,7 +48,9 @@ function cfg(over: Partial<RunnerTunnelAuthConfig> = {}): RunnerTunnelAuthConfig
 describe('buildRunnerTunnelAuth', () => {
   it('with no allow-list: wires a loopback-only provider and omits allowedTunnelTokens', () => {
     const wiring = buildRunnerTunnelAuth(cfg());
-    expect(wiring.authProvider).toBeInstanceOf(LoopbackOnlyTunnelAuthProvider);
+    expect(
+      wiring.authProvider.getUserId({ socket: { remoteAddress: '203.0.113.9' } } as never),
+    ).toBeNull();
     // Omitted (not an empty set) so the route's loopback-only default is selected
     // by the provider, not turned into "remote token required" by an empty list.
     expect(wiring.allowedTunnelTokens).toBeUndefined();
@@ -63,7 +60,9 @@ describe('buildRunnerTunnelAuth', () => {
   it('with an allow-list: forwards the tokens AND keeps the route out of single-user mode', () => {
     const tokens = new Set(['tok-a', 'tok-b']);
     const wiring = buildRunnerTunnelAuth(cfg({ runnerTunnelTokens: tokens }));
-    expect(wiring.authProvider).toBeInstanceOf(AllowlistTunnelAuthProvider);
+    expect(
+      wiring.authProvider.getUserId({ socket: { remoteAddress: '203.0.113.9' } } as never),
+    ).toBe(LOCAL_TUNNEL_OWNER);
     expect(wiring.allowedTunnelTokens).toBe(tokens);
   });
 
@@ -77,8 +76,8 @@ describe('buildRunnerTunnelAuth', () => {
   });
 });
 
-describe('LoopbackOnlyTunnelAuthProvider', () => {
-  const provider = new LoopbackOnlyTunnelAuthProvider();
+describe('loopback runner identity', () => {
+  const { authProvider: provider } = buildRunnerTunnelAuth(cfg());
   const req = (remoteAddress: string | undefined): Parameters<typeof provider.getUserId>[0] =>
     ({ socket: { remoteAddress } }) as Parameters<typeof provider.getUserId>[0];
 

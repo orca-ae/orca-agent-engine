@@ -590,6 +590,29 @@ it('commits both stable reports once before no-output completion becomes visible
   ).toHaveLength(2);
 });
 
+it.each([
+  { runnerId: null },
+  { runnerId: 'replacement' },
+  { archivedAt: new Date() },
+  { status: 'terminated' },
+  { distributionState: null },
+  { distributionState: 'pending' },
+  { distributionState: 'failed' },
+])(
+  'fences native completion after binding or distribution authority changes: %j',
+  async (patch) => {
+    const f = await fixture();
+    await db.update(sessions).set(patch).where(eq(sessions.id, f.sessionId));
+    // The transport generation remains current; the durable Session fence must reject it.
+    await expect(
+      f.coordinator.prepare(f.checkpoint, resourceCheckpointDigest(f.checkpoint)),
+    ).rejects.toThrow('lost session ownership');
+    expect((await f.row()).phase).toBe('running');
+    expect((await f.session()).usageInputTokens).toBe(0);
+    expect(f.events).toEqual([]);
+  },
+);
+
 it('retains prepared evidence through ACK loss, rejects changed payload and fences the old owner', async () => {
   const f = await fixture(),
     digest = resourceCheckpointDigest(f.checkpoint);

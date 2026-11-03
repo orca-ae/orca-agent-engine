@@ -4,6 +4,7 @@
 import { describe, it, expect, beforeAll, afterEach, afterAll } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import type { AddressInfo } from 'node:net';
+import { eq } from 'drizzle-orm';
 import {
   getTestDb,
   closeTestDb,
@@ -179,6 +180,19 @@ describe('GET /v1/environments/:id/work_stats (integration)', () => {
     const body = (await (await getStats(envId)).json()) as WorkStatsBody;
     expect(body.depth).toBe(0);
     expect(body.in_flight).toBe(2);
+  });
+
+  it.each([
+    { distributionState: DISTRIBUTION_PENDING, runnerId: null },
+    { distributionState: DISTRIBUTION_PENDING, runnerId: 'retired-launch' },
+    { distributionState: DISTRIBUTION_ASSIGNED, runnerId: 'retired-runner' },
+  ])('excludes terminated Sessions from work counts: %j', async (binding) => {
+    const envId = await createEnvironment();
+    const sessionId = await insertSession({ environmentId: envId, ...binding });
+    await db.update(sessions).set({ status: 'terminated' }).where(eq(sessions.id, sessionId));
+    const body = (await (await getStats(envId)).json()) as WorkStatsBody;
+    expect(body.depth).toBe(0);
+    expect(body.in_flight).toBe(0);
   });
 
   it('partitions a mixed queue and ignores failed + cloud + archived sessions', async () => {
