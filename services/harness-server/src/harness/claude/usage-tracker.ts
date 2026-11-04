@@ -34,6 +34,8 @@ interface ModelMessage {
 export class ClaudeUsageTracker {
   private activeByScope = new Map<string, ModelMessage>();
   private messages = new Map<string, ModelMessage>();
+  private groupIds = new WeakMap<ModelMessage, string>();
+  private nextGroupId = 0;
   private byToolId = new Map<string, ModelMessage>();
   private waiters = new Map<string, Set<(acknowledged: boolean) => void>>();
   private waiterAgentIds = new Map<string, string>();
@@ -161,6 +163,17 @@ export class ClaudeUsageTracker {
         }
       }
     }
+  }
+
+  toolGroup(toolUseId: string): string | undefined {
+    const state = this.byToolId.get(toolUseId);
+    if (!state) return undefined;
+    let group = this.groupIds.get(state);
+    if (!group) {
+      group = String(++this.nextGroupId);
+      this.groupIds.set(state, group);
+    }
+    return group;
   }
 
   waitForTool(toolUseId: string, signal: AbortSignal, runtimeAgentId?: string): Promise<boolean> {

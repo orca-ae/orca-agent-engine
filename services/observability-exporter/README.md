@@ -50,6 +50,15 @@ projection retains its previous IDs and output. Older exporter binaries reject t
 Upgrade readers before enabling native children, and drain child-aware work before downgrade;
 there is no offset reset, migration service or historical replay.
 
+## Guardrail decision evidence
+
+`session.guardrail_decision` produces a bounded `guardrail_decision` observation with the phase,
+enforced decision and per-rule mode/verdict evidence. Tool names or a tool-use identity are retained;
+unknown fields, tool inputs and outputs are excluded. Traces carrying this evidence use projected
+schema v5 (metadata only) or v6 (raw I/O); other traces preserve their previous schema. Reducer
+checkpoints carrying the new observations use version 7, retain at most 256 decisions per turn and
+restore deterministic span IDs. Older readers reject these new schemas rather than discarding them.
+
 ## Default Kafka broker-native runtime
 
 `OBSERVABILITY_EXPORTER_STATE_BACKEND=kafka` is the default. The process uses
@@ -967,3 +976,6 @@ maximum 300000). Credentials and Authorization headers are never logged.
 All commands intentionally leave their synthetic traces in Litefuse because no compatible delete
 contract is assumed. Run them against a disposable validation project or apply that project's normal
 retention policy; the successful command logs the trace ID for cleanup and inspection.
+
+Dogwood decisions add bounded enforcer, deciding-rule IDs and evaluation-error metadata to
+the existing guardrail-decision projection. The allowlist excludes policy text and tool I/O.

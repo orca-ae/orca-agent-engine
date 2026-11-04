@@ -86,6 +86,7 @@ describe('Guardrails CRUD (integration)', () => {
     expect(res.json()).toEqual({
       id: expect.stringMatching(/^grd_/),
       type: 'guardrail',
+      mode: 'enforce',
       name: 'no-shell',
       description: '',
       enabled: true,
@@ -121,6 +122,7 @@ describe('Guardrails CRUD (integration)', () => {
     expect(res.json()).toEqual({
       id: expect.stringMatching(/^grd_/),
       type: 'guardrail',
+      mode: 'enforce',
       name: 'bounded-calls',
       description: 'stop after ten calls',
       enabled: false,
@@ -573,6 +575,58 @@ describe('Guardrails CRUD (integration)', () => {
     expect(dailyBudget.statusCode).toBe(201);
   });
 
+  it('round-trips observe mode on the organization listener with independent rollout gates', async () => {
+    const gated = buildAdminApp({
+      db,
+      oidc: { allowedIssuers: [], audience: 'admin-test' },
+      platformOidc: { allowedIssuers: [], audience: 'platform-test' },
+      store: buildStubStore(),
+      guardrails: { observeEnabled: true },
+    });
+    await gated.ready();
+    try {
+      const blocked = await adminApp.inject({
+        method: 'POST',
+        url: '/v1/organizations/guardrails',
+        headers: adminHeaders(),
+        payload: {
+          name: 'closed-observer',
+          mode: 'observe',
+          rule: { kind: 'builtin', builtin: 'block_tools', params: { tools: ['Bash'] } },
+        },
+      });
+      expect(blocked.statusCode).toBe(400);
+      const created = await gated.inject({
+        method: 'POST',
+        url: '/v1/organizations/guardrails',
+        headers: adminHeaders(),
+        payload: {
+          name: 'gated-observer',
+          mode: 'observe',
+          rule: { kind: 'builtin', builtin: 'block_tools', params: { tools: ['Bash'] } },
+        },
+      });
+      expect(created.statusCode).toBe(201);
+      expect(created.json().mode).toBe('observe');
+      const id = created.json().id as string;
+      const changed = await gated.inject({
+        method: 'PATCH',
+        url: `/v1/organizations/guardrails/${id}`,
+        headers: adminHeaders(),
+        payload: { mode: 'enforce' },
+      });
+      expect(changed.statusCode).toBe(200);
+      expect(changed.json().mode).toBe('enforce');
+      await gated.inject({
+        method: 'DELETE',
+        url: `/v1/organizations/guardrails/${id}`,
+        headers: adminHeaders(),
+      });
+    } finally {
+      await gated.close();
+    }
+  });
+
   // ------------------------------------------------------------- organization
 
   describe('organization tier', () => {
@@ -593,6 +647,7 @@ describe('Guardrails CRUD (integration)', () => {
       expect(res.json()).toEqual({
         id: expect.stringMatching(/^grd_/),
         type: 'guardrail',
+        mode: 'enforce',
         name: expect.stringMatching(/^org-wide-/),
         description: 'no shell anywhere',
         enabled: true,

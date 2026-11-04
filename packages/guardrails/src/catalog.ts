@@ -140,7 +140,7 @@ function costParams(required?: readonly string[]): JsonSchema {
   );
 }
 
-const CATALOG: readonly GuardrailTypeEntry[] = [
+const DEFINITIONS: readonly (GuardrailTypeEntry & { counterPeriod?: 'day' | 'month' })[] = [
   // ---------------------------------------------------------------- tools
   {
     name: 'tool_permission_policy',
@@ -608,6 +608,31 @@ const CATALOG: readonly GuardrailTypeEntry[] = [
     phases: ['request', 'tool_call'],
     stateful: true,
     stateScope: 'subject_window',
+    counterPeriod: 'day',
+    allowedScopes: ['workspace', 'organization'],
+    verdicts: ['ask', 'deny'],
+    paramsSchema: costParams(['max_cost_usd']),
+  },
+  {
+    name: 'user_monthly_cost_budget',
+    title: 'Monthly cost budget per principal',
+    description: "Caps a principal's spend per UTC month across sessions.",
+    phases: ['request', 'tool_call'],
+    stateful: true,
+    stateScope: 'subject_window',
+    counterPeriod: 'month',
+    allowedScopes: ['workspace', 'organization'],
+    verdicts: ['ask', 'deny'],
+    paramsSchema: costParams(['max_cost_usd']),
+  },
+  {
+    name: 'workspace_monthly_cost_budget',
+    title: 'Monthly cost budget per workspace',
+    description: "Caps a workspace's spend per UTC month across all its principals and sessions.",
+    phases: ['request', 'tool_call'],
+    stateful: true,
+    stateScope: 'workspace_window',
+    counterPeriod: 'month',
     allowedScopes: ['workspace', 'organization'],
     verdicts: ['ask', 'deny'],
     paramsSchema: costParams(['max_cost_usd']),
@@ -628,6 +653,16 @@ const CATALOG: readonly GuardrailTypeEntry[] = [
 ];
 
 /** Every builtin, internal entries included. */
+const CATALOG: readonly GuardrailTypeEntry[] = DEFINITIONS.map(
+  ({ counterPeriod: _counterPeriod, ...entry }) => entry,
+);
+const COUNTER_PERIODS = new Map(DEFINITIONS.map((entry) => [entry.name, entry.counterPeriod]));
+
+/** Registry counter period declared by the builtin; absent for non-counter types. */
+export function getGuardrailCounterPeriod(name: string): 'day' | 'month' | undefined {
+  return COUNTER_PERIODS.get(name);
+}
+
 export const GUARDRAIL_CATALOG: readonly GuardrailTypeEntry[] = CATALOG;
 
 const BY_NAME: ReadonlyMap<string, GuardrailTypeEntry> = new Map(

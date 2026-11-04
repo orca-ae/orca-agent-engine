@@ -1694,14 +1694,18 @@ describe('ClaudeAgentSdkHarness managed-agent protocol', () => {
       payload: { tool_use_id: eventId, result: 'allow' },
     });
     await expect(decision).resolves.toMatchObject({ behavior: 'allow' });
-    expect(onGuardrailState).toHaveBeenCalledWith([
-      {
-        scope: 'session',
-        key: 'g:grd_calls:tool_calls',
-        action: 'increment',
-        value: 1,
-      },
-    ]);
+    expect(onGuardrailState).toHaveBeenCalledWith(
+      [
+        {
+          scope: 'session',
+          key: 'g:grd_calls:tool_calls',
+          action: 'increment',
+          value: 1,
+        },
+      ],
+      undefined,
+      undefined,
+    );
     const deniedDecision = options.canUseTool(
       'mcp__github__create_issue',
       { title: 'Second bug' },
@@ -2012,14 +2016,18 @@ describe('ClaudeAgentSdkHarness managed-agent protocol', () => {
       kind: 'agent.mcp_tool_result',
       payload: { content: { id: 'doc-9' }, is_error: false },
     });
-    expect(onGuardrailState).toHaveBeenCalledWith([
-      {
-        scope: 'session',
-        key: 'g:grd_drive:gdrive_created',
-        action: 'append',
-        value: 'doc-9',
-      },
-    ]);
+    expect(onGuardrailState).toHaveBeenCalledWith(
+      [
+        {
+          scope: 'session',
+          key: 'g:grd_drive:gdrive_created',
+          action: 'append',
+          value: 'doc-9',
+        },
+      ],
+      undefined,
+      undefined,
+    );
     await expect(
       options.canUseTool(
         'mcp__google_drive__update_file',

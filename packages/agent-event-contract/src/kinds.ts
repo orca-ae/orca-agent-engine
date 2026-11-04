@@ -26,6 +26,7 @@ export const SessionEventKind = {
   statusRescheduled: 'session.status_rescheduled',
   statusTerminated: 'session.status_terminated',
   error: 'session.error',
+  guardrailDecision: 'session.guardrail_decision',
 } as const;
 
 /** Canonical lifecycle events for a session thread. */
@@ -84,6 +85,7 @@ export const CANONICAL_AGENT_EVENT_KINDS: readonly CanonicalAgentEventKind[] = O
   SessionEventKind.statusRescheduled,
   SessionEventKind.statusTerminated,
   SessionEventKind.error,
+  SessionEventKind.guardrailDecision,
   SessionThreadEventKind.created,
   SessionThreadEventKind.statusRunning,
   SessionThreadEventKind.statusIdle,

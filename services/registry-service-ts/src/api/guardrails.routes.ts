@@ -1,10 +1,25 @@
 // Copyright The Orca Authors
 // SPDX-License-Identifier: Apache-2.0
 
+import { schemas } from '@runorca/dogwood';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { and, desc, eq, isNull, or, sql, type SQL } from 'drizzle-orm';
 import { z } from 'zod';
-import { listGuardrailTypes, type Phase, type Scope } from '@orca/guardrails';
+import {
+  assertGuardrailReaderCapabilities,
+  compileGuardrailRule,
+  type GuardrailRule,
+  listGuardrailTypes,
+  type Phase,
+  type Scope,
+} from '@orca/guardrails';
+import {
+  guardrailRolloutError,
+  isMonthlyBudget,
+  type GuardrailRouteOptions,
+} from '../domain/guardrail-rollout.js';
+import { composeWorkspaceBundle } from '../domain/workspace-guardrail-bundle.js';
+import { requireWorkspaceScopes } from '../auth/workspace-scope.js';
 import type { DbClient } from '../persistence/postgres/client.js';
 import { agents, guardrails, workspaces } from '../persistence/postgres/schema.js';
 import { newId } from '../domain/versioning.js';
@@ -12,8 +27,10 @@ import { buildClaudeErrorResponse, type ClaudeErrorType } from '../contracts/com
 import {
   GUARDRAILS_API_PREFIX,
   GuardrailCreate,
+  GuardrailRuleWire,
   GuardrailScope,
   GuardrailUpdate,
+  WorkspaceBundleQuery,
   resolveGuardrailAuthoring,
   ruleToStorage,
   ruleToWire,
@@ -56,7 +73,44 @@ export type GuardrailRow = typeof guardrails.$inferSelect;
  * invisible, and it is why every read here spans two ownership predicates while
  * every write spans one.
  */
-export function registerGuardrailsRoutes(app: FastifyInstance, db: DbClient): void {
+export function registerGuardrailsRoutes(
+  app: FastifyInstance,
+  db: DbClient,
+  options: GuardrailRouteOptions = {},
+): void {
+  const clock = options.now ?? (() => new Date());
+  app.get(`${GUARDRAILS_API_PREFIX}/policyschemas/dogwood`, async (req, reply) => {
+    if (!requireWorkspaceScopes(req, reply, 'guardrails:read')) return;
+    return reply.send(schemas());
+  });
+  app.get(`${GUARDRAILS_API_PREFIX}/effectiveguardrails`, async (req, reply) => {
+    if (!requireWorkspaceScopes(req, reply, 'guardrails:read')) return;
+    const parsed = WorkspaceBundleQuery.safeParse(req.query);
+    if (!parsed.success) return badRequest(reply, req, zodMessage(parsed.error));
+    try {
+      const bundle = await composeWorkspaceBundle({
+        db,
+        workspaceId: req.auth!.workspaceId,
+        now: clock,
+        ...(parsed.data.rule_kinds ? { ruleKinds: parsed.data.rule_kinds.split(',') } : {}),
+        rollout: options,
+      });
+      if (!bundle) return notFound(reply, req);
+      assertGuardrailReaderCapabilities(
+        bundle.guardrails,
+        parsed.data.guardrail_capabilities?.split(',') ?? [],
+      );
+      return sendWorkspaceGuardrailBundle(req, reply, bundle);
+    } catch (error) {
+      return fail(
+        reply,
+        req,
+        503,
+        'api_error',
+        error instanceof Error ? error.message : 'guardrail composition unavailable',
+      );
+    }
+  });
   app.post(`${GUARDRAILS_API_PREFIX}/guardrails`, async (req, reply) => {
     const auth = req.auth!;
     const parsed = GuardrailCreate.safeParse(req.body);
@@ -67,6 +121,8 @@ export function registerGuardrailsRoutes(app: FastifyInstance, db: DbClient): vo
 
     const rule = ruleToStorage(body.rule);
     const scope = body.scope ?? 'workspace';
+    const rolloutError = guardrailRolloutError({ rule, mode: body.mode ?? 'enforce' }, options);
+    if (rolloutError) return badRequest(reply, req, rolloutError);
     const authored = resolveGuardrailAuthoring({ rule, scope, phases: body.phases });
     if (!authored.ok) return badRequest(reply, req, authoringMessage(authored.errors));
 
@@ -74,7 +130,7 @@ export function registerGuardrailsRoutes(app: FastifyInstance, db: DbClient): vo
     if (!metadata.ok) return badRequest(reply, req, metadata.error!);
 
     const organizationId = await loadOrganizationId(db, auth.workspaceId);
-    const now = new Date();
+    const now = clock();
     const row = {
       id: newId('grd'),
       organizationId,
@@ -82,6 +138,7 @@ export function registerGuardrailsRoutes(app: FastifyInstance, db: DbClient): vo
       name: body.name,
       description: body.description ?? null,
       enabled: body.enabled ?? true,
+      mode: body.mode ?? 'enforce',
       phases: authored.value.phases,
       scope,
       rule: authored.value.rule,
@@ -155,7 +212,13 @@ export function registerGuardrailsRoutes(app: FastifyInstance, db: DbClient): vo
   app.get(`${GUARDRAILS_API_PREFIX}/guardrailtypes`, async (_req, reply) => {
     // Served verbatim: the schema a client validates against is the one the
     // server enforces, because they are the same object.
-    return reply.send({ data: listGuardrailTypes() });
+    return reply.send({
+      data: listGuardrailTypes().filter(
+        (entry) =>
+          options.monthlyBudgetsEnabled ||
+          !isMonthlyBudget({ kind: 'builtin', builtin: entry.name }),
+      ),
+    });
   });
 
   app.get(`${GUARDRAILS_API_PREFIX}/guardrails/:id`, async (req, reply) => {
@@ -181,6 +244,18 @@ export function registerGuardrailsRoutes(app: FastifyInstance, db: DbClient): vo
     // is a policy change the author has to make on purpose.
     const rule = body.rule ? ruleToStorage(body.rule) : storedRule(existing);
     const phases = body.phases ?? storedPhases(existing);
+    const rolloutError = guardrailRolloutError({ rule, mode: body.mode ?? existing.mode }, options);
+    if (
+      rolloutError &&
+      !(
+        body.enabled === false &&
+        body.mode === undefined &&
+        body.rule === undefined &&
+        body.scope === undefined &&
+        body.phases === undefined
+      )
+    )
+      return badRequest(reply, req, rolloutError);
     const scope = body.scope ?? storedScope(existing);
     const authored = resolveGuardrailAuthoring({ rule, scope, phases });
     if (!authored.ok) return badRequest(reply, req, authoringMessage(authored.errors));
@@ -195,12 +270,13 @@ export function registerGuardrailsRoutes(app: FastifyInstance, db: DbClient): vo
       metadata = toJsonMetadata(patched);
     }
 
-    const now = new Date();
+    const now = clock();
     const next = {
       ...existing,
       name: body.name ?? existing.name,
       description: body.description !== undefined ? body.description : existing.description,
       enabled: body.enabled ?? existing.enabled,
+      mode: body.mode ?? existing.mode,
       phases: authored.value.phases,
       scope,
       rule: authored.value.rule,
@@ -213,6 +289,7 @@ export function registerGuardrailsRoutes(app: FastifyInstance, db: DbClient): vo
         name: next.name,
         description: next.description,
         enabled: next.enabled,
+        mode: next.mode,
         phases: next.phases,
         scope: next.scope,
         rule: next.rule,
@@ -235,7 +312,7 @@ export function registerGuardrailsRoutes(app: FastifyInstance, db: DbClient): vo
     if (!existing) return notFound(reply, req);
     if (existing.scope === 'organization') return organizationTierForbidden(reply, req);
 
-    const archivedAt = existing.archivedAt ?? new Date();
+    const archivedAt = existing.archivedAt ?? clock();
     await db
       .update(guardrails)
       .set({ archivedAt, updatedAt: archivedAt })
@@ -288,7 +365,7 @@ export function registerGuardrailsRoutes(app: FastifyInstance, db: DbClient): vo
 
       await tx
         .update(guardrails)
-        .set({ deletedAt: new Date() })
+        .set({ deletedAt: clock() })
         .where(
           and(
             isNull(guardrails.deletedAt),
@@ -371,7 +448,8 @@ export function storedPhases(row: { phases: unknown }): Phase[] {
 }
 
 export function storedRule(row: { rule: unknown }) {
-  return ruleToStorage(ruleToWire(row.rule));
+  const wire = GuardrailRuleWire.parse(ruleToWire(row.rule));
+  return ruleToStorage(wire);
 }
 
 /**
@@ -394,6 +472,7 @@ export function guardrailToWire(row: {
   name: string;
   description: string | null;
   enabled: boolean;
+  mode?: 'enforce' | 'observe';
   phases: unknown;
   scope: string;
   rule: unknown;
@@ -408,9 +487,18 @@ export function guardrailToWire(row: {
     name: row.name,
     description: row.description ?? '',
     enabled: row.enabled,
+    mode: row.mode ?? 'enforce',
     phases: storedPhases(row),
     scope: row.scope,
     rule: ruleToWire(row.rule),
+    ...((row.rule as { kind?: string })?.kind === 'dogwood'
+      ? {
+          warnings: (() => {
+            const compiled = compileGuardrailRule(row.rule as GuardrailRule, row.scope as Scope);
+            return compiled.ok ? [...(compiled.warnings ?? [])] : [];
+          })(),
+        }
+      : {}),
     metadata: normalizeStoredMetadata(row.metadata),
     archived_at: row.archivedAt?.toISOString() ?? null,
     created_at: row.createdAt.toISOString(),
@@ -468,4 +556,29 @@ function notFound(reply: FastifyReply, req: FastifyRequest) {
 
 function organizationTierForbidden(reply: FastifyReply, req: FastifyRequest) {
   return fail(reply, req, 403, 'permission_error', ORGANIZATION_TIER_MESSAGE);
+}
+
+/** Called only after authentication and current composition, including on 304. */
+export function sendWorkspaceGuardrailBundle(
+  req: FastifyRequest,
+  reply: FastifyReply,
+  bundle: NonNullable<Awaited<ReturnType<typeof composeWorkspaceBundle>>>,
+) {
+  const etag = `"${bundle.bundle_id}"`;
+  reply
+    .header('cache-control', 'no-store')
+    .header('etag', etag)
+    .header('Orca-Guardrail-Issued-At', bundle.issued_at)
+    .header('Orca-Guardrail-Expires-At', bundle.expires_at)
+    .header('Orca-Guardrail-Generation', String(bundle.generation));
+  const match = req.headers['if-none-match'];
+  if (
+    typeof match === 'string' &&
+    match
+      .split(',')
+      .some((item) => item.trim() === etag || item.trim() === `W/${etag}` || item.trim() === '*')
+  ) {
+    return reply.code(304).send();
+  }
+  return reply.send(bundle);
 }

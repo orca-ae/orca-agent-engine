@@ -141,6 +141,38 @@ Each item is proposed as an OIP pull request; the design is reviewed there befor
   per-attempt reporting and proven Files-to-execution mapping for the requested tool surface.
   The native-provider local test matrix remains independent test infrastructure.
 
+- **Observe mode, monthly budgets and workspace-bundle rollout.** Trigger: the first reviewed
+  deployment enabling these default-off gates. Qualify immutable Engine/Gateway release pins,
+  reader capabilities, authenticated workload exchange, deployment clock-error bounds and
+  suspend/resume behavior, price-profile coverage, consumer images, rollout/rollback and
+  downstream operator/developer acceptance. Observe/monthly gates do not activate conditional
+  pricing. Gateway-owned monthly admission requires monthly/workspace counter support in its
+  companion runtime. Cross-stack monthly budgets require every participating enforcement point
+  to report usage to one authoritative accounting service.
+- **Dogwood policy deployment qualification.** Trigger: the first reviewed temporal-policy
+  deployment. Qualify released immutable Engine/Gateway/core artifacts, real workload and
+  provider execution through ask/approval, every consumer image, Linux native clock builds,
+  suspend/resume and interval-error bounds, retention/capacity and workspace-state contention,
+  rollout/rollback, and operator/developer acceptance over day/week workloads. Local protocol
+  fixtures and artifact-integrity checks do not establish deployed qualification.
+  - Native `Agent`/`Task` orchestration requires an approved vocabulary/schema extension and
+    qualified SDK flow. The current nine logical effect tools and manifest-backed MCP actions
+    retain their existing boundary.
+  - Immediate revocation after ownership takeover and guarantees about physical SDK tool-start
+    time require stricter release fencing. Trigger: a deployment needing those guarantees.
+    An already committed call can still produce effects within its finite deadline after a
+    new owner has recorded it as interrupted; external operation deduplication remains a
+    separate requirement for callers that must prevent duplicate business effects.
+  - Dogwood enforcement in Codex, Pi and DSH SDKs requires stateful per-tool hooks. Colocated
+    builtin tools require a per-call sandbox policy hook; self-hosted sidecar sessions require
+    session-runner `tool_call` enforcement. Trigger each path when a deployment needs it.
+  - Cross-stack/device history requires an identity mapping when one policy must count actions
+    from managed sessions and developer machines together.
+  - Ask at the Gateway requires MCP clients supporting elicitation. Builtin tool-result fields,
+    information providers and Skill-load gates require a policy that consumes those facts.
+  - Retained-history previews require an operator asking to inspect verdicts before observe
+    mode. Windows longer than 24 hours require upstream support.
+
 ## Ideas
 
 Ideas are not commitments, and an idea doesn't need an OIP until someone picks it up. To discuss one,

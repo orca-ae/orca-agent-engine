@@ -1,6 +1,8 @@
 // Copyright The Orca Authors
 // SPDX-License-Identifier: Apache-2.0
 
+import { prunePolicyEvents } from './domain/policy-events.js';
+
 import { Pool } from 'pg';
 import { and, eq, isNull } from 'drizzle-orm';
 import { environments } from './persistence/postgres/schema.js';
@@ -224,7 +226,15 @@ const minter = new SessionJwtMinter({
 // gets full snapshot delivery (model/provider/system/egress). The scoped session
 // JWT is minted in-process via the same `minter` the mint-jwt route uses (no HTTP
 // round-trip).
+const guardrailOptions = {
+  observeEnabled: config.guardrailsObserveEnabled,
+  dogwoodEnabled: config.guardrailsDogwoodEnabled,
+  gatewayDogwoodEnabled: config.aiGatewayDogwoodEnabled,
+  monthlyBudgetsEnabled: config.guardrailsMonthlyBudgetsEnabled,
+};
+
 const agentSnapshotProvider = new AgentSnapshotResolver({
+  guardrails: guardrailOptions,
   loader: buildSnapshotRecordLoader(db),
   minter,
   ...(config.sessionJwtLlmPolicy ? { llmPolicy: config.sessionJwtLlmPolicy } : {}),
@@ -364,6 +374,7 @@ const appOptions: BuildAppOptions = {
   secretStore,
   environmentClaimTtlMs: config.environmentClaimTtlMs,
   gatewayRegistryUsageEnabled: config.gatewayRegistryUsageEnabled,
+  guardrails: guardrailOptions,
   dshApprovedProfiles: config.dshApprovedProfiles,
   tunnelAuthProvider: runnerTunnelAuth.authProvider,
   ...(runnerTunnelAuth.allowedTunnelTokens !== undefined
@@ -400,6 +411,7 @@ const internalAuthVerifier = buildConfiguredInternalAuthVerifier({
 const publicApp = buildPublicApp(appOptions);
 const internalApp = buildInternalApp(appOptions, internalAuthVerifier);
 const adminApp = buildAdminApp({
+  guardrails: guardrailOptions,
   conditionalPricingEnabled: config.conditionalPricingEnabled,
   db,
   oidc: {
@@ -589,6 +601,13 @@ const skillBundleDeletionReconcileTimer = setInterval(
 );
 skillBundleDeletionReconcileTimer.unref();
 
+const policyEventPruneTimer = setInterval(() => {
+  void prunePolicyEvents(db, () => new Date()).catch((error) =>
+    console.error('registry: policy event prune failed', error),
+  );
+}, 60_000);
+policyEventPruneTimer.unref();
+
 // Model prices. The seed catalog is loaded first so a deployment with no egress
 // prices correctly from boot; the refresher then layers upstream rows on top
 // when a URL is configured. No URL is a supported configuration, not an error.
@@ -630,6 +649,7 @@ const shutdown = async (): Promise<void> => {
   if (triggerPlannerTimer) clearInterval(triggerPlannerTimer);
   if (triggerDispatcherTimer) clearInterval(triggerDispatcherTimer);
   clearInterval(skillBundleDeletionReconcileTimer);
+  clearInterval(policyEventPruneTimer);
   await agentObservabilityMaintenance.stop();
   modelPriceRefresher?.stop();
   conditionalPriceRefresher.stop();

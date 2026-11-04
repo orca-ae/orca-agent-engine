@@ -53,7 +53,9 @@ const GROUP_VERSIONS: readonly GroupVersion[] = [
     version: 'v1',
     resources: [
       { name: 'guardrails', namespaced: true, kind: 'Guardrail' },
+      { name: 'effectiveguardrails', namespaced: true, kind: 'GuardrailBundle' },
       { name: 'guardrailtypes', namespaced: false, kind: 'GuardrailType' },
+      { name: 'policyschemas', namespaced: false, kind: 'PolicySchema' },
     ],
   },
   {

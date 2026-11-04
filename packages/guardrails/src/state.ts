@@ -45,6 +45,12 @@ export const SHARED_USAGE_KEYS = Object.freeze({
   dailyCostUsd: 'daily_cost_usd',
   /** Whether that rolling window contains usage Registry could not price. */
   dailyCostUnpriced: 'daily_cost_unpriced',
+  /** Per-principal UTC month, in subject_window. */
+  monthlyCostUsd: 'monthly_cost_usd',
+  monthlyCostUnpriced: 'monthly_cost_unpriced',
+  /** Shared workspace UTC month, in workspace_window. */
+  workspaceMonthlyCostUsd: 'workspace_monthly_cost_usd',
+  workspaceMonthlyCostUnpriced: 'workspace_monthly_cost_unpriced',
   /** Accumulated session spend, so a malformed per-event cost cannot fall below it. */
   sessionCostUsd: 'session_cost_usd',
   /** Session token consumption, for deployments with no price data. */
@@ -186,6 +192,7 @@ export class InMemoryGuardrailStateStore implements GuardrailStateStore {
       turn: {},
       session: {},
       subject_window: {},
+      workspace_window: {},
     };
     for (const scope of STATE_SCOPES) {
       const seeded = seed[scope];
@@ -213,4 +220,49 @@ export class InMemoryGuardrailStateStore implements GuardrailStateStore {
   resetTurn(): void {
     this.#scopes.turn = {};
   }
+}
+
+/** Scope of a Registry-owned usage fact on a flattened acknowledgment. */
+export function sharedUsageStateScope(key: string): StateScope {
+  if (
+    key === SHARED_USAGE_KEYS.workspaceMonthlyCostUsd ||
+    key === SHARED_USAGE_KEYS.workspaceMonthlyCostUnpriced
+  )
+    return 'workspace_window';
+  if (
+    (
+      [
+        SHARED_USAGE_KEYS.dailyCostUsd,
+        SHARED_USAGE_KEYS.dailyCostUnpriced,
+        SHARED_USAGE_KEYS.monthlyCostUsd,
+        SHARED_USAGE_KEYS.monthlyCostUnpriced,
+      ] as readonly string[]
+    ).includes(key)
+  )
+    return 'subject_window';
+  return 'session';
+}
+
+/** Replace complete period snapshots, clearing approvals from a previous UTC period. */
+export function applyGuardrailUsageAcknowledgment(
+  store: GuardrailStateStore,
+  state: Readonly<Record<string, unknown>>,
+): void {
+  for (const scope of ['subject_window', 'workspace_window'] as const) {
+    const value = state[scope];
+    if (value !== null && typeof value === 'object' && !Array.isArray(value))
+      store.replace(scope, value as Record<string, unknown>);
+  }
+  store.apply(
+    Object.entries(state)
+      .filter(
+        ([key]) => key !== 'subject_window' && key !== 'workspace_window' && key !== 'month_window',
+      )
+      .map(([key, value]) => ({
+        scope: sharedUsageStateScope(key),
+        key,
+        action: 'set' as const,
+        value,
+      })),
+  );
 }

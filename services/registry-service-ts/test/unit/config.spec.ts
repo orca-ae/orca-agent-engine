@@ -818,3 +818,39 @@ describe('Kafka transcript schema configuration', () => {
     );
   });
 });
+
+describe('loadConfig — guardrail rollout', () => {
+  it('keeps observe and monthly budgets off and opens them independently', () => {
+    expect(loadConfig({})).toMatchObject({
+      guardrailsObserveEnabled: false,
+      guardrailsMonthlyBudgetsEnabled: false,
+    });
+    expect(loadConfig({ GUARDRAILS_OBSERVE_ENABLED: 'true' })).toMatchObject({
+      guardrailsObserveEnabled: true,
+      guardrailsMonthlyBudgetsEnabled: false,
+    });
+    expect(loadConfig({ GUARDRAILS_MONTHLY_BUDGETS_ENABLED: 'true' })).toMatchObject({
+      guardrailsObserveEnabled: false,
+      guardrailsMonthlyBudgetsEnabled: true,
+    });
+    for (const key of ['GUARDRAILS_OBSERVE_ENABLED', 'GUARDRAILS_MONTHLY_BUDGETS_ENABLED'])
+      expect(() => loadConfig({ [key]: 'invalid' })).toThrow(key);
+  });
+});
+
+describe('Dogwood rollout qualification', () => {
+  it('keeps authoring and Gateway eligibility independent and off by default', () => {
+    expect(loadConfig({})).toMatchObject({
+      guardrailsDogwoodEnabled: false,
+      aiGatewayDogwoodEnabled: false,
+    });
+    expect(loadConfig({ GUARDRAILS_DOGWOOD_ENABLED: 'true' })).toMatchObject({
+      guardrailsDogwoodEnabled: true,
+      aiGatewayDogwoodEnabled: false,
+    });
+    expect(loadConfig({ AI_GATEWAY_DOGWOOD_ENABLED: 'true' })).toMatchObject({
+      guardrailsDogwoodEnabled: false,
+      aiGatewayDogwoodEnabled: true,
+    });
+  });
+});

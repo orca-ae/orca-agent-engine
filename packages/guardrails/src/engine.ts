@@ -13,6 +13,7 @@ import {
   type GuardrailEvaluationError,
   type GuardrailEvent,
   type GuardrailOutcome,
+  type ObservedGuardrailVerdict,
   type StateScope,
   type StateUpdate,
   type Tier,
@@ -84,6 +85,8 @@ export interface EngineOptions {
    * for this tool. Guardrails compose on top of it; they cannot undo it.
    */
   seed?: Verdict;
+  /** Precomputed actual Dogwood result; integrations own its asynchronous history transaction. */
+  dogwood?: (guardrail: Guardrail, event: GuardrailEvent) => GuardrailOutcome;
   /** Evaluate and report intent without producing anything to persist. */
   readOnly?: boolean;
 }
@@ -132,13 +135,22 @@ export function evaluateGuardrails(
   let persistable: StateUpdate[] = [];
   let deniedBy: string | undefined;
   const errors: GuardrailEvaluationError[] = [];
+  const observed: ObservedGuardrailVerdict[] = [];
+  let terminalDeny = false;
 
   for (const prep of ordered) {
+    const observe = prep.guardrail.mode === 'observe';
+    // Keep collecting observation evidence after an enforced deny without
+    // evaluating any further enforced rule or making its writes persistable.
+    if (terminalDeny && !observe) continue;
     const outcome = evaluateOne(prep, event, opts, errors);
-    if (!outcome) continue;
+    if (!outcome) {
+      if (observe)
+        observed.push({ guardrailId: prep.guardrail.id, mode: 'observe', verdict: 'allow' });
+      continue;
+    }
 
     const resolved = resolveVerdict(outcome.verdict, event);
-    if (outcome.reason && resolved !== 'allow') reasons.push(outcome.reason);
 
     // Namespaced on the way out, so the keys a caller persists are the keys a
     // later read view resolves. See `stateNamespace`.
@@ -146,13 +158,30 @@ export function evaluateGuardrails(
       ...u,
       key: stateNamespace(prep) + u.key,
     }));
+    if (observe) {
+      observed.push({
+        guardrailId: prep.guardrail.id,
+        mode: 'observe',
+        verdict: resolved,
+        ...(outcome.reason ? { reason: outcome.reason } : {}),
+      });
+      // An observed ask is never a human approval. All other observed updates
+      // describe work that is allowed to proceed under the enforced fold.
+      if (resolved !== 'ask') {
+        intended.push(...updates);
+        persistable.push(...updates);
+      }
+      continue;
+    }
+    if (outcome.reason && resolved !== 'allow') reasons.push(outcome.reason);
     intended.push(...updates);
 
     if (resolved === 'deny') {
       verdict = 'deny';
       deniedBy = prep.guardrail.id;
       // Writes from guardrails that already allowed stand; this one's do not.
-      break;
+      terminalDeny = true;
+      continue;
     }
 
     verdict = maxVerdict(verdict, resolved);
@@ -181,6 +210,7 @@ export function evaluateGuardrails(
     ...(deniedBy !== undefined ? { deniedBy } : {}),
     intendedStateUpdates: intended,
     errors,
+    ...(observed.length > 0 ? { observed } : {}),
   };
 }
 
@@ -252,11 +282,16 @@ function evaluateOne(
       guardrail,
     };
 
+    if (guardrail.rule.kind === 'dogwood') {
+      if (!opts.dogwood) throw new Error('Dogwood requires a qualified enforcer');
+      return opts.dogwood(guardrail, event);
+    }
     if (guardrail.rule.kind === 'expression') {
       if (!opts.expression) throw new Error('no expression evaluator configured');
       return opts.expression(guardrail.rule, ctx);
     }
 
+    if (guardrail.rule.kind !== 'builtin') throw new Error('unknown guardrail rule kind');
     const evaluator = opts.builtins.get(guardrail.rule.builtin);
     if (!evaluator) throw new Error(`unknown guardrail type: ${guardrail.rule.builtin}`);
     return evaluator(ctx);
@@ -269,7 +304,7 @@ function evaluateOne(
     const failedClosed = failsClosed(event.phase);
     errors.push({
       guardrailId: guardrail.id,
-      failedClosed,
+      failedClosed: failedClosed && guardrail.mode !== 'observe',
       message: error instanceof Error ? error.message : String(error),
     });
     return failedClosed

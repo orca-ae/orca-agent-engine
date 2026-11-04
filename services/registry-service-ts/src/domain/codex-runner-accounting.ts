@@ -1,6 +1,7 @@
 // Copyright The Orca Authors
 // SPDX-License-Identifier: Apache-2.0
 
+import { guardrailDecisionPayload } from '@orca/agent-event-contract';
 import { createHash } from 'node:crypto';
 import { and, eq, isNull, ne } from 'drizzle-orm';
 import {
@@ -27,11 +28,13 @@ import { saveRunnerHarnessState } from './harness-state.js';
 import {
   applyCounterStateUpdate,
   applySessionStateUpdate,
-  loadGuardrailSubjectWindowState,
   loadGuardrailTurnSubject,
   parseUsageDelta,
   persistUsage,
   utcDateWindow,
+  utcMonthWindow,
+  WORKSPACE_BUDGET_SUBJECT,
+  loadGuardrailBudgetState,
   type DbTransaction,
   type UsageDelta,
 } from './usage-accounting.js';
@@ -63,6 +66,7 @@ export interface RunnerAccountingContext {
   sessionId: string;
   runnerId: string;
   isCurrent(): boolean;
+  recordGuardrailDecision?(payload: Record<string, unknown>): Promise<void>;
 }
 
 export function codexUsageEventId(
@@ -123,11 +127,17 @@ export function compileCodexRequestGuardrails(
         id: g.id,
         name: g.name,
         enabled: true,
+        ...(g.mode ? { mode: g.mode } : {}),
         scope,
         phases: g.phases as PreparedGuardrail['guardrail']['phases'],
         rule:
           rule.kind === 'builtin' &&
-          ['cost_budget', 'user_daily_cost_budget'].includes(rule.builtin)
+          [
+            'cost_budget',
+            'user_daily_cost_budget',
+            'user_monthly_cost_budget',
+            'workspace_monthly_cost_budget',
+          ].includes(rule.builtin)
             ? {
                 ...rule,
                 params: {
@@ -252,6 +262,7 @@ export class CodexRunnerAccounting implements RunnerTurnAccounting {
       failed: false,
     };
     this.active = active;
+    let observed: Record<string, unknown> | undefined;
     try {
       await this.locked(async (tx) => {
         const db = tx as unknown as DbClient;
@@ -309,13 +320,19 @@ export class CodexRunnerAccounting implements RunnerTurnAccounting {
         if (!subject) throw new Error('Authenticated turn subject is unavailable');
         active.subject = subject;
         const now = this.now();
-        const daily = await loadGuardrailSubjectWindowState(
+        const budgets = await loadGuardrailBudgetState(
           db,
           c.workspaceId,
           subject,
-          utcDateWindow(now),
+          now,
+          guards.some(
+            (g) =>
+              g.stateScope === 'workspace_window' ||
+              (g.guardrail.rule.kind === 'builtin' &&
+                g.guardrail.rule.builtin === 'user_monthly_cost_budget'),
+          ),
         );
-        const store = new InMemoryGuardrailStateStore({ session: state, subject_window: daily });
+        const store = new InMemoryGuardrailStateStore({ session: state, ...budgets });
         const payload = JSON.parse(Buffer.from(event.payload).toString('utf8')) as {
           content?: unknown;
           text?: unknown;
@@ -336,6 +353,7 @@ export class CodexRunnerAccounting implements RunnerTurnAccounting {
           { phase: 'request', sessionId: c.sessionId, modelId: active.model, userText },
           { builtins: BUILTIN_EVALUATORS, expression: evaluateGuardrailExpression, store },
         );
+        observed = guardrailDecisionPayload({ phase: 'request', decision });
         if (decision.verdict !== 'allow')
           throw new RunnerRequestDenied(decision.reasons.join('; ') || 'Request denied by policy.');
         for (const update of decision.stateUpdates) {
@@ -347,13 +365,21 @@ export class CodexRunnerAccounting implements RunnerTurnAccounting {
               { ...update, scope: 'session' },
               now,
             );
-          else if (update.scope === 'subject_window')
+          else if (update.scope === 'subject_window' || update.scope === 'workspace_window')
             await applyCounterStateUpdate(
               tx,
               c.workspaceId,
-              subject,
-              utcDateWindow(now),
-              { ...update, scope: 'subject_window' },
+              update.scope === 'workspace_window' ? WORKSPACE_BUDGET_SUBJECT : subject,
+              update.scope === 'workspace_window' ||
+                guards.some(
+                  (g) =>
+                    g.guardrail.rule.kind === 'builtin' &&
+                    g.guardrail.rule.builtin === 'user_monthly_cost_budget' &&
+                    update.key.startsWith(`g:${g.guardrail.id}:`),
+                )
+                ? utcMonthWindow(now)
+                : utcDateWindow(now),
+              { ...update, scope: update.scope },
               now,
             );
         }
@@ -379,6 +405,8 @@ export class CodexRunnerAccounting implements RunnerTurnAccounting {
         'guardrail_usage_unavailable',
         { cause: error },
       );
+    } finally {
+      if (observed) await c.recordGuardrailDecision?.(observed);
     }
   }
 

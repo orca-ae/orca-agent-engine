@@ -1,6 +1,7 @@
 // Copyright The Orca Authors
 // SPDX-License-Identifier: Apache-2.0
 
+import { readResponseHeaderMetadata } from './openapi-headers.js';
 import { generateOpenApi } from '@ts-rest/open-api';
 import type { AppRoute } from '@ts-rest/core';
 import { publicContract } from './index.js';
@@ -63,6 +64,14 @@ function applyRouteOverrides(operation: Operation, route: AppRoute): Operation {
     result.responses = responses;
   }
 
+  const responseHeaders = readResponseHeaderMetadata(route.metadata);
+  if (responseHeaders) {
+    const responses = { ...(result.responses as Record<string, unknown> | undefined) };
+    for (const [status, headers] of Object.entries(responseHeaders)) {
+      responses[status] = { ...(responses[status] as Record<string, unknown>), headers };
+    }
+    result.responses = responses;
+  }
   return result;
 }
 

@@ -163,3 +163,27 @@ describe('evaluateRequestPhase', () => {
     expect(decision.verdict).toBe('allow');
   });
 });
+
+describe('observe mode', () => {
+  it('preserves the snapshot mode through request evaluation', () => {
+    const guards = prepareRunnerGuardrails(
+      snapshot([
+        {
+          id: 'grd_observe',
+          name: 'Observe',
+          mode: 'observe',
+          tier: 'workspace',
+          phases: ['request'],
+          stateful: false,
+          rule: { kind: 'expression', expression: 'false', onFalse: 'deny' },
+        },
+      ]),
+    );
+    const result = evaluateRequestPhase(guards.prepared, guards.store, {
+      phase: 'request',
+      sessionId: 'ses_one',
+    });
+    expect(result.verdict).toBe('allow');
+    expect(result.observed?.[0]).toMatchObject({ guardrailId: 'grd_observe', verdict: 'deny' });
+  });
+});

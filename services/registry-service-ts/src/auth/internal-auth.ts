@@ -242,7 +242,22 @@ interface InternalRouteCapabilityRule {
 const INTERNAL_ROUTE_CAPABILITY_RULES: readonly InternalRouteCapabilityRule[] = [
   {
     callers: ['ai-gateway'],
-    matches: (path, method) => method === 'GET' && path === '/internal/v1/guardrails/effective',
+    matches: (path, method) =>
+      method === 'POST' &&
+      /^\/internal\/v1\/workspaces\/[^/]+\/sessions\/[^/]+\/policy-warnings$/.test(path),
+  },
+  {
+    callers: ['harness', 'ai-gateway'],
+    matches: (path, method) =>
+      ['GET', 'POST'].includes(method) &&
+      /^\/internal\/v1\/workspaces\/[^/]+\/sessions\/[^/]+\/policy-events$/.test(path),
+  },
+  {
+    callers: ['ai-gateway'],
+    matches: (path, method) =>
+      method === 'GET' &&
+      (path === '/internal/v1/guardrails/effective' ||
+        /^\/internal\/v1\/workspaces\/[^/]+\/guardrails\/effective$/.test(path)),
   },
   {
     // Both workloads need these route capabilities, but usage still has exactly

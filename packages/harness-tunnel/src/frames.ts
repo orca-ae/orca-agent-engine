@@ -51,6 +51,7 @@ export type BodyEncoding = 'utf-8' | 'base64';
 
 /** Runner's first frame on a fresh tunnel. */
 export interface HelloFrame {
+  guardrailCapabilities?: string[];
   kind: FrameKind.Hello;
   /** Runner's semver string, e.g. `"0.1.2"`. */
   runnerVersion: string;
@@ -206,6 +207,9 @@ export function encodeFrame(frame: Frame): string {
         frame_protocol_version: frame.frameProtocolVersion,
         harnesses: [...(frame.harnesses ?? [])],
         envs: [...(frame.envs ?? [])],
+        ...(frame.guardrailCapabilities
+          ? { guardrail_capabilities: [...frame.guardrailCapabilities] }
+          : {}),
         resume_cursors: { ...(frame.resumeCursors ?? {}) },
       });
     case FrameKind.Request:
@@ -356,6 +360,9 @@ function decodeHello(msg: FrameObject): HelloFrame {
     frameProtocolVersion: requiredInt(msg, 'frame_protocol_version'),
     harnesses: optionalStrList(msg, 'harnesses'),
     envs: optionalStrList(msg, 'envs'),
+    ...(msg['guardrail_capabilities'] !== undefined
+      ? { guardrailCapabilities: optionalStrList(msg, 'guardrail_capabilities') }
+      : {}),
     resumeCursors: optionalStrMap(msg, 'resume_cursors'),
   };
 }

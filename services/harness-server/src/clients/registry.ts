@@ -1,6 +1,9 @@
 // Copyright The Orca Authors
 // SPDX-License-Identifier: Apache-2.0
 
+import { randomUUID } from 'node:crypto';
+import { DogwoodConflict, type DogwoodTransport } from '../harness/dogwood.js';
+import type { PolicyAppendBody, PolicyAppendResponse, PolicyReadBody } from '@orca/guardrails';
 import type { HarnessTurnRequest, HarnessTurnSnapshot } from '@orca/harness-catalog';
 import { parseDshProfileDescriptor, type DshProfileDescriptor } from '@orca/harness-catalog';
 /**
@@ -15,7 +18,7 @@ import { parseDshProfileDescriptor, type DshProfileDescriptor } from '@orca/harn
  */
 
 import type { MemoryRecord, MemoryVersionRecord } from '@orca/memory-store';
-import type { StateUpdate } from '@orca/guardrails';
+import { GUARDRAIL_READER_CAPABILITIES, type StateUpdate } from '@orca/guardrails';
 import type { Packages } from '../sandbox/sandbox-runtime.js';
 import type { InternalServiceTokenProvider } from '../auth/internal-service-token.js';
 import type { ModelEffort, ModelSpeed } from '../harness/agent-harness.js';
@@ -133,6 +136,8 @@ export interface SessionRecord {
   guardrail_usage_state?: Record<string, unknown>;
   /** Authoritative per-principal UTC-window counters returned by Registry. */
   guardrail_subject_window_state?: Record<string, unknown>;
+  guardrail_workspace_window_state?: Record<string, unknown>;
+  guardrail_month_window?: string;
   /**
    * Present in prepared-execution responses and checked against the event's
    * workspace before any runner work begins.
@@ -196,6 +201,7 @@ export interface EnvironmentRecord {
  * descriptors; Harness never flattens or re-resolves those bindings.
  */
 export interface PreparedExecutionV2 {
+  dogwood?: { enforcer: 'harness' | 'ai-gateway'; epoch: string; bundle_id: string };
   schema_version: 2;
   archived_thread_subpaths?: string[];
   workspace_id: string;
@@ -209,6 +215,8 @@ export interface PreparedExecutionV2 {
   guardrails?: PreparedGuardrailRecord[];
   /** Session-scoped guardrail counters, restored at every preparation. */
   guardrail_state?: Record<string, unknown>;
+  guardrail_workspace_window_state?: Record<string, unknown>;
+  guardrail_month_window?: string;
 }
 
 /**
@@ -217,13 +225,14 @@ export interface PreparedExecutionV2 {
  * file's records already do.
  */
 export interface PreparedGuardrailRecord {
+  mode?: 'enforce' | 'observe';
   id: string;
   name: string;
   tier: 'session' | 'agent' | 'workspace' | 'organization';
   phases: string[];
   rule: unknown;
   stateful: boolean;
-  state_scope?: 'turn' | 'session' | 'subject_window';
+  state_scope?: 'turn' | 'session' | 'subject_window' | 'workspace_window';
   subagent_id?: string;
 }
 
@@ -261,16 +270,55 @@ export class RegistryClient {
     return body.owner;
   }
 
+  private readonly policyOwner = randomUUID();
+
+  dogwoodTransport(scope: { workspaceId: string; sessionId: string }): DogwoodTransport {
+    return {
+      prepare: async (turnEventId) => {
+        const prepared = await this.prepareExecution({ ...scope, turnEventId });
+        return prepared?.dogwood?.enforcer === 'harness' ? prepared.dogwood : null;
+      },
+      read: async (history) => {
+        const response = await this.request(
+          `${this.sessionBase(scope)}/policy-events?history=${history}`,
+          { redirect: 'error', cache: 'no-store', signal: AbortSignal.timeout(10_000) },
+        );
+        if (!response.ok) throw new Error(`Dogwood read failed ${response.status}`);
+        return (await response.json()) as PolicyReadBody;
+      },
+      append: async (body: PolicyAppendBody) => {
+        const response = await this.request(`${this.sessionBase(scope)}/policy-events`, {
+          method: 'POST',
+          redirect: 'error',
+          signal: AbortSignal.timeout(10_000),
+          headers: { 'content-type': 'application/json', 'cache-control': 'no-store' },
+          body: JSON.stringify(body),
+        });
+        if (response.status === 409) throw new DogwoodConflict(await response.text());
+        if (!response.ok)
+          throw new Error(`Dogwood append failed ${response.status}: ${await response.text()}`);
+        return (await response.json()) as PolicyAppendResponse;
+      },
+    };
+  }
+
   async prepareExecution(input: {
     workspaceId: string;
     sessionId: string;
     signal?: AbortSignal;
+    turnEventId?: string;
+    inspectPolicy?: boolean;
     capabilities?: string[];
   }): Promise<PreparedExecutionV2 | null> {
     const res = await this.request(`${this.sessionBase(input)}/executions:prepare`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(input.capabilities ? { capabilities: input.capabilities } : {}),
+      body: JSON.stringify({
+        ...(input.capabilities ? { capabilities: input.capabilities } : {}),
+        guardrail_capabilities: GUARDRAIL_READER_CAPABILITIES,
+        ...(!input.inspectPolicy ? { policy_owner: this.policyOwner } : {}),
+        ...(input.turnEventId ? { turn_event_id: input.turnEventId } : {}),
+      }),
       ...(input.signal ? { signal: input.signal } : {}),
     });
     if (res.status === 404) return null;
@@ -314,6 +362,7 @@ export class RegistryClient {
         usage_writer: usageWriter ?? 'harness',
         resources: wire.resources,
       },
+      ...(wire.dogwood ? { dogwood: wire.dogwood } : {}),
       primary_agent: wire.primary_agent,
       subagents: wire.subagents,
       environment: wire.environment,
@@ -458,18 +507,33 @@ export class RegistryClient {
         `refreshGuardrailSubjectWindowInternal ${input.sessionId} failed: ${res.status} ${await res.text().catch(() => '')}`,
       );
     }
-    const body = (await res.json()) as { guardrail_subject_window_state?: unknown };
-    return isRecord(body.guardrail_subject_window_state) ? body.guardrail_subject_window_state : {};
+    const body = (await res.json()) as {
+      guardrail_subject_window_state?: unknown;
+      guardrail_workspace_window_state?: unknown;
+      guardrail_month_window?: unknown;
+    };
+    return {
+      ...(typeof body.guardrail_month_window === 'string'
+        ? { month_window: body.guardrail_month_window }
+        : {}),
+      subject_window: isRecord(body.guardrail_subject_window_state)
+        ? body.guardrail_subject_window_state
+        : {},
+      ...(isRecord(body.guardrail_workspace_window_state)
+        ? { workspace_window: body.guardrail_workspace_window_state }
+        : {}),
+    };
   }
 
   async applyGuardrailStateInternal(input: {
     workspaceId: string;
     sessionId: string;
     updates: readonly (Omit<StateUpdate, 'scope'> & {
-      scope: 'session' | 'subject_window';
+      scope: 'session' | 'subject_window' | 'workspace_window';
     })[];
     subject?: string;
     window?: string;
+    turnEventId?: string;
     signal?: AbortSignal;
   }): Promise<number> {
     const res = await this.request(`${this.sessionBase(input)}/guardrail-state`, {
@@ -477,6 +541,7 @@ export class RegistryClient {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         updates: input.updates,
+        ...(input.turnEventId ? { turn_event_id: input.turnEventId } : {}),
         ...(input.subject ? { subject: input.subject } : {}),
         ...(input.window ? { window: input.window } : {}),
       }),

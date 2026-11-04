@@ -34,6 +34,16 @@ async function app(verifier: InternalAuthVerifier) {
   server.post('/internal/v1/workspaces/:workspaceId/sessions/:sessionId/usage', async () => ({
     ok: true,
   }));
+  for (const method of ['GET', 'POST'] as const)
+    server.route({
+      method,
+      url: '/internal/v1/workspaces/:workspaceId/sessions/:sessionId/policy-events',
+      handler: async () => ({ ok: true }),
+    });
+  server.post(
+    '/internal/v1/workspaces/:workspaceId/sessions/:sessionId/policy-warnings',
+    async () => ({ ok: true }),
+  );
   server.post(
     '/internal/v1/workspaces/:workspaceId/sessions/:sessionId/vault-credentials/:id/resolve',
     async () => ({ ok: true }),
@@ -171,6 +181,28 @@ describe('internal Kubernetes ServiceAccount auth', () => {
         '/internal/v1/workspaces/ws_a/sessions/ses_a/agent-observability/context/resolve';
       const exporterSecretPath =
         '/internal/v1/workspaces/ws_a/sessions/ses_a/agent-observability/secret/resolve';
+      for (const token of ['harness', 'gateway', 'exporter']) {
+        const headers = { authorization: `Bearer ${token}` };
+        for (const method of ['GET', 'POST'] as const)
+          expect(
+            (
+              await server.inject({
+                method,
+                url: '/internal/v1/workspaces/ws_a/sessions/ses_a/policy-events',
+                headers,
+              })
+            ).statusCode,
+          ).toBe(token === 'exporter' ? 403 : 200);
+        expect(
+          (
+            await server.inject({
+              method: 'POST',
+              url: '/internal/v1/workspaces/ws_a/sessions/ses_a/policy-warnings',
+              headers,
+            })
+          ).statusCode,
+        ).toBe(token === 'gateway' ? 200 : 403);
+      }
       expect(
         (
           await server.inject({

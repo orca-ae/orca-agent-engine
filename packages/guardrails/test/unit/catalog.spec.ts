@@ -36,6 +36,8 @@ const EXPECTED_NAMES = [
   'token_budget',
   'tool_permission_policy',
   'user_daily_cost_budget',
+  'user_monthly_cost_budget',
+  'workspace_monthly_cost_budget',
   'worktree_guard',
 ];
 

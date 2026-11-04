@@ -26,7 +26,8 @@
     "ws": "^8.18.0",
     "zod": "^4.0.0",
     "@orca/sdk-harness": "workspace:*",
-    "@orca/pi-harness": "workspace:*"
+    "@orca/pi-harness": "workspace:*",
+    "@orca/agent-event-contract": "workspace:*"
   },
   "devDependencies": {
     "@orca/harness-catalog": "workspace:*",

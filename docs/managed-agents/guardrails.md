@@ -2,8 +2,8 @@
 
 A **Guardrail** is a declarative rule that evaluates an agent action in context
 and returns one of three verdicts: **allow**, **ask**, or **deny**. Guardrails
-compose across four scopes, may carry state across a session, and can only ever
-tighten what an agent is permitted to do.
+compose across four scopes and may carry state across a session. Enforcing rules
+can only tighten what an agent is permitted to do; observers record evidence separately.
 
 This document defines the model, the `policy.runorca.ai/v1` API group that
 manages them, and where they are enforced. Pricing for the cost guardrails is
@@ -70,6 +70,30 @@ permission policy seeding the fold.
 | `deny`  | the action is blocked and the agent is told why                                     |
 
 A guardrail that has no opinion abstains, which is equivalent to `allow`.
+
+### Mode and rollout
+
+The resource and both authoring listeners accept `mode: enforce | observe`, defaulting to
+`enforce`. An observer is evaluated at the same applicable points and stays outside the enforced
+fold. Its non-approval state updates persist only when the enforced action proceeds; an observed
+ask never arms an approval. The separate harness, colocated tool-list construction, Registry
+request policies and session-runner emit `session.guardrail_decision` for non-allow observer
+outcomes. Tool-list evidence names the tools the rule would remove. The default Claude list and
+stream omit this Orca-only event; `orca-beta` exposes it.
+
+`GUARDRAILS_OBSERVE_ENABLED` and `GUARDRAILS_MONTHLY_BUDGETS_ENABLED` both default to `false`.
+Their Helm settings are `registry.guardrails.observeEnabled` and
+`registry.guardrails.monthlyBudgetsEnabled`. Closed gates refuse incompatible authoring and
+preparation; they do not reinterpret or silently omit stored rules. Disabling or archiving a rule
+remains available for rollback. Monthly types are absent from the catalog while their gate is closed.
+Legacy prepared rules retain their wire shape while the gates are closed.
+
+Readers declare `guardrails.observe.v1` and `guardrails.monthly_budgets.v1` capabilities when they
+consume the corresponding rules. Internal preparation accepts `guardrail_capabilities`; bundle
+queries use its comma-separated form. Runner hello frames advertise the same capabilities. Registry
+checks delivery on connection and before subsequent turn snapshots, including warm runners, and
+refuses incompatible readers. The monthly Gateway capability declares parsing and explicit
+unsupported-rule handling, not Gateway-owned monthly counters.
 
 ### Phases
 
@@ -265,11 +289,12 @@ and buy a call past the cap. `token_budget` does the same with `total_tokens`.
 
 ### Scopes
 
-| Scope            | Storage                                                                                                  | Lifetime                      |
-| ---------------- | -------------------------------------------------------------------------------------------------------- | ----------------------------- |
-| `turn`           | in memory, never persisted                                                                               | cleared at each turn boundary |
-| `session`        | `guardrail_state`                                                                                        | the session                   |
-| `subject_window` | `guardrail_counters`, keyed by workspace, principal, and window (see [`data-model.md`](./data-model.md)) | the window                    |
+| Scope              | Storage                                                                                                  | Lifetime                      |
+| ------------------ | -------------------------------------------------------------------------------------------------------- | ----------------------------- |
+| `turn`             | in memory, never persisted                                                                               | cleared at each turn boundary |
+| `session`          | `guardrail_state`                                                                                        | the session                   |
+| `workspace_window` | `guardrail_counters`, keyed by workspace, reserved subject `*`, and UTC month                            | the UTC month                 |
+| `subject_window`   | `guardrail_counters`, keyed by workspace, principal, and window (see [`data-model.md`](./data-model.md)) | the window                    |
 
 `subject_window` exists for budgets that span sessions — a per-principal daily
 cap. The subject is the authenticated user when one is present and the API key
@@ -553,11 +578,13 @@ containment, not just an access list. That is why it also fires on `tool_result`
 
 ### Cost budgets
 
-| Builtin                  | Phases             | Stateful                       | Purpose                                                                                                         |
-| ------------------------ | ------------------ | ------------------------------ | --------------------------------------------------------------------------------------------------------------- |
-| `cost_budget`            | request, tool_call | session                        | cap session spend in USD                                                                                        |
-| `user_daily_cost_budget` | request, tool_call | subject_window                 | cap a principal's spend per UTC day                                                                             |
-| `subagent_cost_budget`   | request, tool_call | session, per subagent identity | cap spend attributed to one acting subagent identity; managed Claude dispatches of the same Agent share the cap |
+| Builtin                         | Phases             | Stateful                       | Purpose                                                                                                         |
+| ------------------------------- | ------------------ | ------------------------------ | --------------------------------------------------------------------------------------------------------------- |
+| `cost_budget`                   | request, tool_call | session                        | cap session spend in USD                                                                                        |
+| `user_monthly_cost_budget`      | request, tool_call | subject_window                 | cap a principal's spend per UTC month                                                                           |
+| `workspace_monthly_cost_budget` | request, tool_call | workspace_window               | cap workspace spend per UTC month                                                                               |
+| `user_daily_cost_budget`        | request, tool_call | subject_window                 | cap a principal's spend per UTC day                                                                             |
+| `subagent_cost_budget`          | request, tool_call | session, per subagent identity | cap spend attributed to one acting subagent identity; managed Claude dispatches of the same Agent share the cap |
 
 `user_daily_cost_budget` is valid at **workspace and organization scope only** —
 a cross-session per-principal cap is an authority-tier control. The catalog
@@ -843,3 +870,43 @@ with a stateless positive control. See [`pricing.md`](./pricing.md#verification)
 for the accounting evidence and [`local-stack.md`](./local-stack.md#running-e2e-tests)
 for the commands. The real-Claude budget smoke checks the next request boundary
 in separate mode and, when enabled, colocated mode; it requires provider access.
+
+## Workspace bundles and monthly snapshots
+
+`GET /apis/policy.runorca.ai/v1/effectiveguardrails` requires `guardrails:read` (or full workspace
+access). Its internal counterpart is
+`GET /internal/v1/workspaces/:workspaceId/guardrails/effective`, available to the authenticated
+Gateway workload. Both compose active workspace and organization rules, include compiler-derived
+state metadata and normalized mode, and carry no state. `rule_kinds` defaults to
+`builtin,expression`; `omitted_rules` counts eligible rows of other kinds.
+
+The `registry-<sha256>` content identity binds tenant scope and canonical policy content. Row/key
+order and lease renewal do not change it; a mode edit does. The quoted `ETag` supports
+`If-None-Match`. Every authenticated 200 or 304 is composed and checked again, sets
+`Cache-Control: no-store`, and issues `Orca-Guardrail-Issued-At`, `Orca-Guardrail-Expires-At` and
+`Orca-Guardrail-Generation` headers. Generation is issue time in milliseconds and expiry is one
+hour later. A 304 has no body. Readers validate the entire origin exchange and bind cached content
+to organization, workspace, credentials and selected rule kinds. They anchor expiry at monotonic
+request start, subtract a qualified clock-error bound, and treat equality as expired; receipt time,
+wall-clock changes and HTTP cache replay cannot extend a lease. Unknown clock bounds fail closed.
+
+The two monthly types use the cost-budget parameters and workspace/organization scopes. They read
+only their own persisted monthly balance and unpriced flag, independently of event cost. Usage
+accounting adds principal daily, principal monthly and workspace monthly counters inside the same
+immutable-pricing-receipt transaction. A replay adds nothing; later priced usage does not clear an
+unpriced flag. UTC `YYYY-MM` windows isolate periods and workspace subject `*` is server-owned.
+
+Preparation restores workspace state. At each turn boundary and usage acknowledgment, complete
+subject/workspace snapshots replace their previous period, clearing old approvals. The internal
+refresh/usage responses carry `guardrail_workspace_window_state` and the server-derived
+`guardrail_month_window` when monthly publication is enabled. State flushes carry the period they
+evaluated; Registry refuses an expired monthly period. Spend keys enter only through usage
+accounting. Private approval updates carry the authenticated turn event, letting Registry resolve
+the principal and correct day/month; clients cannot select the workspace subject.
+
+## Dogwood temporal policies
+
+The `dogwood` rule kind uses the pinned shared Rust/WASM core, Registry policy-event
+authorization transactions and a selected Harness or Gateway enforcer. Its default-off
+gates, authoring schema, history, approval and first-dispatch semantics are described in
+[Dogwood guardrails](dogwood.md).

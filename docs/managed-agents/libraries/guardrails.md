@@ -18,8 +18,9 @@ library itself reaches neither a database nor a network.
   type-checks an expression, and reports whether the rule is stateful and which
   state keys it reads. A rule that cannot compile is rejected at authoring time,
   so a rule can never fail for the first time while an agent is running.
-- Registry integration serves the catalog verbatim as `guardrailtypes`, so the schema a
-  client validates against is the schema the server enforces.
+- The catalog includes daily principal, monthly principal and monthly workspace cost
+  budgets. Monthly evaluators read only their own persisted scope and unpriced flag;
+  the event's cost is not a monthly balance. Registry controls catalog publication.
 - Harness integration calls `evaluateGuardrails(guardrails, event, opts)` and receives a
   verdict, the reasons that produced it, the state updates to apply, and any
   evaluation errors the engine folded into the verdict. The engine never writes
@@ -39,9 +40,14 @@ library itself reaches neither a database nor a network.
   emitted updates — evaluators handle bare keys and independent rules cannot
   read or overwrite each other's bookkeeping. Keys the runtime writes stay bare
   and are shared: the usage vocabulary in `SHARED_USAGE_KEYS`.
-- `readOnly` evaluation returns the updates a run *would* have applied without
+- `readOnly` evaluation returns the updates a run _would_ have applied without
   reporting them for persistence, which is how a rule is tested against live
   state without arming it.
+- `mode` defaults to `enforce`. An `observe` rule contributes a separate observed
+  verdict and cannot change the enforced fold. Its non-approval updates persist
+  only when the enforced action proceeds; an observed ask never arms an approval.
+  Observers after an enforced deny still run, while later enforcing rules retain
+  their short-circuit behavior.
 
 ## No I/O
 
@@ -63,7 +69,7 @@ enforces it.
 ## Verdicts compose as a lattice
 
 `allow < ask < deny`, combined by maximum. Every composition in the library —
-across guardrails, across tiers, and between a guardrail and the seeding
+across enforcing guardrails, across tiers, and between a guardrail and the seeding
 permission policy — is that one operation. Monotonicity is therefore a property
 of the type, not a rule each call site must remember: nothing in the library can
 express loosening a verdict.
@@ -72,6 +78,13 @@ express loosening a verdict.
 
 Pricing types and cost arithmetic live in `@orca/harness-catalog` alongside the
 model catalog they belong to, not here — see [`../pricing.md`](../pricing.md).
-This package does not depend on it: the cost guardrails read an already-computed
-`total_cost_usd` off the event, so pricing is the caller's to resolve, upstream
-of evaluation.
+This package does not depend on it: callers supply accepted costs and authoritative state.
+Monthly balances are separate persisted counters, not the current event cost.
+`applyGuardrailUsageAcknowledgment` replaces complete period snapshots and classifies all shared
+balances/unpriced flags without moving them into another scope.
+
+Dogwood rules validate through the actual pinned `@runorca/dogwood` core. The library
+exports bounded worker evaluation, the Registry JSON protocol types and shared-core event
+aggregation; storage, clocks, ownership and approval authorization remain with integrations.
+An ordinary synchronous fold requires an explicit Dogwood evaluator and refuses to treat
+an unknown rule kind as a builtin. See [Dogwood](../dogwood.md).

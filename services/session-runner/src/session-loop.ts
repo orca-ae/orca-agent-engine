@@ -1,6 +1,7 @@
 // Copyright The Orca Authors
 // SPDX-License-Identifier: Apache-2.0
 
+import { guardrailDecisionPayload, SessionEventKind } from '@orca/agent-event-contract';
 import { PendingCustomToolResults } from './pending-custom-tool-results.js';
 import { createHash } from 'node:crypto';
 import type { CustomToolResult } from './custom-tools.js';
@@ -372,6 +373,7 @@ export class SessionLoop {
    * snapshot (newest-wins), so an edited rule takes effect when the owner pod
    * re-delivers rather than living for the session's lifetime.
    */
+  private guardrailDecisionEvents: AgentEvent[] = [];
   private guardrails: PreparedRunnerGuardrails | undefined;
   private eventsIterator: AsyncIterator<AgentEvent> | undefined;
   /**
@@ -1327,6 +1329,12 @@ export class SessionLoop {
       sessionId,
       ...(userText !== undefined ? { userText } : {}),
     });
+    const observed = guardrailDecisionPayload({ phase: 'request', decision });
+    if (observed)
+      this.guardrailDecisionEvents.push({
+        kind: SessionEventKind.guardrailDecision,
+        payload: observed,
+      });
     if (decision.verdict === 'allow') return undefined;
     const reason =
       decision.reasons.length > 0
@@ -1353,6 +1361,7 @@ export class SessionLoop {
     const requestDenial = skipped
       ? 'Turn interrupted before model submission'
       : this.evaluateRequestGuardrails(sessionId, userEvent);
+    for (const event of this.guardrailDecisionEvents.splice(0)) yield encodeAgentEventLine(event);
     if (requestDenial !== undefined) {
       const frozen = await this.resources.freezeNativeTurn({
         version: 1,
@@ -1551,6 +1560,7 @@ export class SessionLoop {
     // through to that handling with nothing streamed. The turn ends denied,
     // through exactly the machinery a submit rejection already uses.
     const requestDenial = this.evaluateRequestGuardrails(sessionId, userEvent);
+    for (const event of this.guardrailDecisionEvents.splice(0)) yield encodeAgentEventLine(event);
     if (requestDenial !== undefined) {
       submitFailure = requestDenial;
     }

@@ -1,0 +1,159 @@
+{
+  "core": {
+    "name": "orca-dogwood",
+    "version": "0.1.0",
+    "rust": "1.94.0",
+    "source_commit": "df6624b5226fde0fd2f0e49af01f5513be1bd067",
+    "source_tree_sha256": "38801882abe58891da82644b0b67e65d640e3715cc8f1d17381e66552ad5e49d",
+    "sources": [
+      {
+        "path": "API.md",
+        "sha256": "4eca9c80e007e35dd7deb630f5da0a97dbbea3b58fcd57832247445bda811983"
+      },
+      {
+        "path": "Cargo.lock",
+        "sha256": "37dcddcfab8d749dea5e90b5397930566fb4c0b92be52dfd33da8dde53582ab2"
+      },
+      {
+        "path": "Cargo.toml",
+        "sha256": "248ad1b6651c10147b997727297b37b1751c10ec8484c8c021a66cf41d682601"
+      },
+      {
+        "path": "clock-helper/Cargo.toml",
+        "sha256": "32190ce226d596f3dda3809aaeeab601845f363ea76178ae87bedb5a274df80d"
+      },
+      {
+        "path": "clock-helper/src/main.rs",
+        "sha256": "21e9b1aa33a01f36a56eba6c35b3fd6a5c2528b5dce781b9c09c14cb74d0d37a"
+      },
+      {
+        "path": "docs/upstream-rust194.diff",
+        "sha256": "9ebe3444677f4e86e62167faea6679835a639a76e56c0efd6a29f4739953ad50"
+      },
+      {
+        "path": "package/index.cjs",
+        "sha256": "9ad59afbafd28f55f8158d0ed8ffbaa81ead4ee1fe7fb8164717835cb53fa03a"
+      },
+      {
+        "path": "package/index.d.ts",
+        "sha256": "5791a97799431da012aa5bc60f897036dbb2ff3cb168fb4b6dc5d411fce3e818"
+      },
+      {
+        "path": "package/package.json",
+        "sha256": "1d64c957ae706eb5983bd33316acd1864f2a38b6d5b0304ad27f38f700ef1cd4"
+      },
+      {
+        "path": "schemas/orca-principal.dwschema",
+        "sha256": "68a2340e086a3ffe47a50c06578eb4ca364b40cb409ded03255c01b8a7451732"
+      },
+      {
+        "path": "schemas/orca-session.dwschema",
+        "sha256": "827f4ce90780b45dc98a68622c9fbe8ef2fd57433235dc9ee06b45b1c6fe372e"
+      },
+      {
+        "path": "schemas/orca.cedarschema",
+        "sha256": "38e47df747eb1cadbcfb8f30dd794f0c9d374aeaca5e38902afe35d6d8130ca1"
+      },
+      {
+        "path": "scripts/build.sh",
+        "sha256": "b6f95362f01cd2cda9be9bba5bada682b05bef3d35295222dd88118726e1b7ce"
+      },
+      {
+        "path": "scripts/clock-contract.cjs",
+        "sha256": "5231fc02703ff727b284cac4c1092c678d8470a1c5810d8ba00058e2f127a463"
+      },
+      {
+        "path": "scripts/corpus.cjs",
+        "sha256": "e44600bac47c5ac2daad51c30e73440b66e49f7e8ebf459c690774eb9f325616"
+      },
+      {
+        "path": "scripts/equivalence.cjs",
+        "sha256": "e21ee088155472992583b354740f2aec0750f8762676e0509573ecc936d2952f"
+      },
+      {
+        "path": "scripts/stage.mjs",
+        "sha256": "2ddcd8ee696fafd1d308a57fe3d39c75a18d9c44748aebe7bf1929def67e9623"
+      },
+      {
+        "path": "scripts/verify-upstream.py",
+        "sha256": "b006d55716cbcf48de5a5ac7dbfa857749da3c560f5f435c1025afa05773c72e"
+      },
+      {
+        "path": "src/bin/orca-dogwood-json.rs",
+        "sha256": "e3e75b52ab97a09dca02e936ebaea3fab569a65549d1b1b7171d2a6994cb5922"
+      },
+      {
+        "path": "src/compile.rs",
+        "sha256": "d21160daebc85c31926db0209ba1032998c84593ad8fe69e3ae4ed011d1af43c"
+      },
+      {
+        "path": "src/conformance.rs",
+        "sha256": "430a53ff10f4a618338de7f0210ca0441ca59f209a75576e06b8c1fb3f7abc6e"
+      },
+      {
+        "path": "src/event.rs",
+        "sha256": "37207bf371ff911c322935bcddd09a41f899b85e81639cf5e8ecb43c583c2645"
+      },
+      {
+        "path": "src/lib.rs",
+        "sha256": "7c3e7f2a36f4fb001d012c122088ff7dbf42a241e2e530dc6ac53ba2e51153f0"
+      },
+      {
+        "path": "src/merge.rs",
+        "sha256": "52e719cacbd1f248f5a8d2660e4b3103ad9ecd7082317a53cb6d22486642c790"
+      },
+      {
+        "path": "src/schema.rs",
+        "sha256": "b33ebefca68888ffa15379f63dc0223f14db31d9280bebc1de87e5554a8ae49c"
+      },
+      {
+        "path": "src/temporal.rs",
+        "sha256": "7d5cc1d298d895fc08696bde8c27725f57588f475fe5777e1139158deecbd282"
+      },
+      {
+        "path": "src/types.rs",
+        "sha256": "af9f8d7a6188b2cdd4eedee88b615ae203bc780a39809cdd47f5cc75129c1dfc"
+      },
+      {
+        "path": "tests/contract.rs",
+        "sha256": "e5d3286337bfedaf332a46947513d2fb0761275c1631e44919e0cbb27f2ca39e"
+      },
+      {
+        "path": "tests/merge.rs",
+        "sha256": "55104736db3289cfbedbb46ef9f9cbdf0c6f3b00a0cd995d763bc46f538659c6"
+      },
+      {
+        "path": "UPSTREAM.json",
+        "sha256": "4ac6ff870f533de900d8b53f5ad5a2bfbae73af93715eaeb91c2e3a14bdc2609"
+      }
+    ]
+  },
+  "upstream": {
+    "name": "dogwood-language",
+    "version": "1.1.0",
+    "repository": "https://github.com/dogwood-policy/dogwood",
+    "commit": "4ec5e2c01b44ff3882a231ae5d315b330b38fa25",
+    "crate_sha256": "d806f46dea4d0261710b2fad54679ad4a57be81049e91cbfa7cf638ea2749790",
+    "compatibility_patch": "docs/upstream-rust194.diff",
+    "compatibility_patch_sha256": "9ebe3444677f4e86e62167faea6679835a639a76e56c0efd6a29f4739953ad50",
+    "adaptation": "Desugar only three if-let match guards in informalization; parser, lowering, evaluator and upstream temporal corpus unchanged."
+  },
+  "vendor_tree_sha256": "a32fb9b0af482759f7194bb74b41954925a66a18bfd769853c34bcc0fc428356",
+  "wasm_sha256": "5dd80d3cfcd17443ddaeacca902aa80657a2f01d201ca79f7279178ed0cc33e5",
+  "clock_helpers": {
+    "darwin-arm64": {
+      "path": "bin/darwin-arm64/orca-dogwood-clock",
+      "sha256": "e94e3c556ec65825aec223f08b8163d6668bad66428805a8d00f0d55653410ec"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "dist/runorca-dogwood-0.1.0.tgz",
+      "sha256": "81bda1a0a05ad2edcc964a80c3607ffa9e617431b734fe419629eff64ea8dfad"
+    },
+    {
+      "path": "dist/orca-dogwood-source-0.1.0.tgz",
+      "sha256": "855e047801b3be3e812b6bd7a691217f40ab6f3b118e0952992ee6cd09fc65d3"
+    }
+  ]
+}

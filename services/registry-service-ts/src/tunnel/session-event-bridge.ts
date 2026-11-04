@@ -100,6 +100,7 @@
 // events of its own), so neither contends with the single-writer turn loop. A single
 // shared `AbortController` cancels all three loops and any in-flight turn on {@link stop}.
 
+import { assertGuardrailReaderCapabilities } from '@orca/guardrails';
 import { eventSourceTurnId } from './event-source-turn.js';
 import {
   TunnelTransport,
@@ -135,6 +136,7 @@ import {
   type RunnerAccountingContext,
 } from '../domain/codex-runner-accounting.js';
 import { sessionErrorPayload, sessionIdlePayload } from '@orca/agent-event-contract';
+import { runnerPolicyOwner } from './policy-owner.js';
 import { pinRunnerGeneration } from './runner-generation.js';
 
 /**
@@ -1924,9 +1926,20 @@ export class SessionEventBridgeManager {
     }
     let snapshot: AgentSnapshot | null;
     try {
-      snapshot = await provider.resolve(bound.sessionId);
+      snapshot = await provider.resolve(bound.sessionId, {
+        policyOwner: runnerPolicyOwner(registry, runnerId),
+      });
+      if (snapshot)
+        assertGuardrailReaderCapabilities(
+          snapshot.guardrails ?? [],
+          registry.get(runnerId)?.hello.guardrailCapabilities ?? [],
+        );
     } catch (err) {
-      if (managed) throw err;
+      if (
+        managed ||
+        (err instanceof Error && err.message.startsWith('guardrail reader must declare'))
+      )
+        throw err;
       this.logger?.error?.(
         { err, runnerId, sessionId: bound.sessionId },
         'snapshot delivery failed before bridge start (continuing to start bridge)',
@@ -1998,7 +2011,17 @@ export class SessionEventBridgeManager {
       const managed = resources ? await resources.deliver() : undefined;
       if (resources) await this.deliverSkills(runnerId, bound, registry, true);
       if (!isCurrent()) throw new Error('runner generation retired');
-      let snapshot = await provider.resolve(bound.sessionId);
+      let snapshot = await provider.resolve(bound.sessionId, {
+        policyOwner: runnerPolicyOwner(registry, runnerId),
+        ...(['user.message', 'user.define_outcome'].includes(event.kind)
+          ? { turnEventId: event.id }
+          : {}),
+      });
+      if (snapshot)
+        assertGuardrailReaderCapabilities(
+          snapshot.guardrails ?? [],
+          registry.get(runnerId)?.hello.guardrailCapabilities ?? [],
+        );
       if (snapshot === null) {
         throw new Error('guardrail snapshot no longer resolves for the bound session');
       }
@@ -2287,11 +2310,25 @@ function isClientUserEvent(event: Event): boolean {
  * re-driven. Parent-agent events only here — the catch-up read is scoped to the
  * parent subpath, matching the turns the bridge drives.
  */
+function isDogwoodPreparationWarning(event: Event): boolean {
+  if (event.kind !== 'session.warning') return false;
+  try {
+    const payload = JSON.parse(Buffer.from(event.payload).toString('utf8')) as {
+      warning?: { type?: unknown };
+    };
+    return payload.warning?.type === 'dogwood_manifest_drift';
+  } catch {
+    return false;
+  }
+}
+
 function isAgentEvent(event: Event): boolean {
   // Preparation receipts can follow a queued user message before the model
   // starts. They must not make catch-up treat that message as answered.
   return (
     event.producedBy === AGENT_EVENT_PRODUCED_BY &&
+    event.kind !== 'session.guardrail_decision' &&
+    !isDogwoodPreparationWarning(event) &&
     event.kind !== 'session.resource_mounted' &&
     event.kind !== 'session.output_indexed'
   );

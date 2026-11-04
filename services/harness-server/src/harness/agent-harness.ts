@@ -77,13 +77,14 @@ export interface RemoteMcpToolsetPolicy {
 }
 
 export interface SessionGuardrail {
+  mode?: 'enforce' | 'observe';
   id: string;
   name: string;
   tier: 'session' | 'agent' | 'workspace' | 'organization';
   phases: string[];
   rule: unknown;
   stateful: boolean;
-  stateScope?: 'turn' | 'session' | 'subject_window';
+  stateScope?: 'turn' | 'session' | 'subject_window' | 'workspace_window';
   subagentId?: string;
 }
 
@@ -107,6 +108,8 @@ export interface SessionStartInput {
   guardrails?: SessionGuardrail[];
   /** Restored guardrail counters, so a respawn cannot reset a cap. */
   guardrailState?: Record<string, unknown>;
+  guardrailWorkspaceWindowState?: Record<string, unknown>;
+  guardrailMonthWindow?: string;
   agentSnapshot: {
     dsh_profile?: DshProfileDescriptor;
     name?: string;

@@ -1,11 +1,14 @@
 // Copyright The Orca Authors
 // SPDX-License-Identifier: Apache-2.0
 
+import { responseHeaderMetadata } from './openapi-headers.js';
 import { initContract } from '@ts-rest/core';
 import { z } from 'zod';
 import {
   MAX_EXPRESSION_LENGTH,
   PHASES,
+  GUARDRAIL_MODES,
+  STATE_SCOPES,
   SCOPES,
   compileGuardrailRule,
   getGuardrailType,
@@ -30,6 +33,7 @@ export const GUARDRAILS_API_PREFIX = '/apis/policy.runorca.ai/v1';
 
 export const GuardrailPhase = z.enum(PHASES);
 export const GuardrailScope = z.enum(SCOPES);
+export const GuardrailMode = z.enum(GUARDRAIL_MODES);
 
 /** The scopes a workspace principal may write. `organization` is not one. */
 export const WORKSPACE_WRITABLE_SCOPES: readonly z.infer<typeof GuardrailScope>[] = [
@@ -56,9 +60,36 @@ const ExpressionRuleWire = z
   })
   .strict();
 
+const McpManifest = z
+  .object({
+    server: z.string().min(1),
+    url: z.string().url(),
+    tools: z.array(z.record(z.string(), z.unknown())).max(1000),
+  })
+  .strict();
+const DogwoodRuleWire = z
+  .object({
+    kind: z.literal('dogwood'),
+    policy: z.string().min(1).max(65536),
+    applies_to: z.enum(['all_tools', 'mcp_tools']).optional(),
+    history: z.enum(['session', 'principal']).optional(),
+    mcp_manifests: z.array(McpManifest).max(64).optional(),
+  })
+  .strict();
+const StoredDogwoodRule = z
+  .object({
+    kind: z.literal('dogwood'),
+    policy: z.string(),
+    appliesTo: z.enum(['all_tools', 'mcp_tools']).optional(),
+    history: z.enum(['session', 'principal']).optional(),
+    mcpManifests: z.array(McpManifest).optional(),
+  })
+  .strict();
+
 export const GuardrailRuleWire = z.discriminatedUnion('kind', [
   BuiltinRuleWire,
   ExpressionRuleWire,
+  DogwoodRuleWire,
 ]);
 
 export type GuardrailRuleWireValue = z.infer<typeof GuardrailRuleWire>;
@@ -88,6 +119,7 @@ const StoredExpressionRule = z
 export const StoredGuardrailRule = z.discriminatedUnion('kind', [
   StoredBuiltinRule,
   StoredExpressionRule,
+  StoredDogwoodRule,
 ]);
 
 export const Guardrail = z.object({
@@ -96,9 +128,18 @@ export const Guardrail = z.object({
   name: z.string().min(1).max(200),
   description: z.string(),
   enabled: z.boolean(),
+  mode: GuardrailMode,
   phases: z.array(GuardrailPhase).min(1),
   scope: GuardrailScope,
-  rule: GuardrailRuleWire,
+  rule: z.union([
+    GuardrailRuleWire,
+    z
+      .object({
+        kind: z.string().refine((kind) => !['builtin', 'expression', 'dogwood'].includes(kind)),
+      })
+      .passthrough(),
+  ]),
+  warnings: z.array(z.string()).optional(),
   metadata: Metadata,
   archived_at: isoTimestamp.nullable(),
   created_at: isoTimestamp,
@@ -110,6 +151,7 @@ export const GuardrailCreate = z
     name: z.string().min(1).max(200),
     description: z.string().max(1024).nullable().optional(),
     enabled: z.boolean().optional(),
+    mode: GuardrailMode.optional(),
     // Omitted means "wherever this rule fires", which only a builtin can
     // answer; see `resolveGuardrailAuthoring`.
     phases: z.array(GuardrailPhase).min(1).optional(),
@@ -127,6 +169,7 @@ export const GuardrailUpdate = z
     name: z.string().min(1).max(200).optional(),
     description: z.string().max(1024).nullable().optional(),
     enabled: z.boolean().optional(),
+    mode: GuardrailMode.optional(),
     phases: z.array(GuardrailPhase).min(1).optional(),
     scope: GuardrailScope.optional(),
     rule: GuardrailRuleWire.optional(),
@@ -146,12 +189,107 @@ export const GuardrailType = z.object({
   description: z.string(),
   phases: z.array(GuardrailPhase),
   stateful: z.boolean(),
-  stateScope: z.enum(['turn', 'session', 'subject_window']).optional(),
+  stateScope: z.enum(STATE_SCOPES).optional(),
   verdicts: z.array(z.enum(['ask', 'deny'])),
   paramsSchema: z.record(z.string(), z.unknown()),
 });
 
+export const PreparedGuardrailWire = z
+  .object({
+    id: idString('grd'),
+    name: z.string().min(1),
+    tier: z.enum(['session', 'agent', 'workspace', 'organization']),
+    phases: z.array(z.string().min(1)),
+    rule: z.unknown(),
+    stateful: z.boolean(),
+    mode: GuardrailMode.optional(),
+    state_scope: z.enum(STATE_SCOPES).optional(),
+    subagent_id: z.string().min(1).optional(),
+  })
+  .strict();
+
+export const WorkspaceGuardrailBundle = z
+  .object({
+    schema: z.literal('1'),
+    bundle_id: z.string().min(1),
+    generation: z.number().int().nonnegative(),
+    scope: z.object({ org_id: z.string().min(1), workspace_id: z.string().min(1) }),
+    runtime_config_revision: z.string().min(1),
+    issued_at: isoTimestamp,
+    expires_at: isoTimestamp,
+    seed_verdict: z.literal('allow'),
+    guardrails: z.array(PreparedGuardrailWire.extend({ mode: GuardrailMode })),
+    omitted_rules: z.number().int().nonnegative(),
+  })
+  .strict();
+
+export const WorkspaceBundleQuery = z
+  .object({
+    rule_kinds: z.string().min(1).max(200).optional(),
+    guardrail_capabilities: z.string().min(1).max(512).optional(),
+  })
+  .strict();
+
+export const GuardrailLeaseResponseHeaders = {
+  ETag: {
+    description: 'Quoted policy content identity, independent of lease renewal.',
+    required: true,
+    schema: { type: 'string', pattern: '^"registry-[a-f0-9]{64}"$' },
+  },
+  'Cache-Control': {
+    description: 'Origin exchanges are never renewed by an HTTP cache.',
+    required: true,
+    schema: { type: 'string', enum: ['no-store'] },
+  },
+  'Orca-Guardrail-Issued-At': {
+    description: 'Registry UTC lease issue time.',
+    required: true,
+    schema: { type: 'string', format: 'date-time' },
+  },
+  'Orca-Guardrail-Expires-At': {
+    description: 'Exclusive expiry, exactly one hour after issue.',
+    required: true,
+    schema: { type: 'string', format: 'date-time' },
+  },
+  'Orca-Guardrail-Generation': {
+    description: 'Issue time as integer epoch milliseconds.',
+    required: true,
+    schema: { type: 'string', pattern: '^[0-9]+$' },
+  },
+};
+
 export const guardrailsContract = c.router({
+  dogwoodSchema: {
+    method: 'GET',
+    path: `${GUARDRAILS_API_PREFIX}/policyschemas/dogwood`,
+    responses: {
+      200: z.object({
+        base_schema: z.string(),
+        event_schemas: z.object({ session: z.string(), principal: z.string() }),
+        language_version: z.string(),
+        core_version: z.string(),
+        limits: z.record(z.string(), z.unknown()),
+      }),
+      403: ClaudeErrorResponse,
+    },
+  },
+  effective: {
+    metadata: responseHeaderMetadata({
+      200: GuardrailLeaseResponseHeaders,
+      304: GuardrailLeaseResponseHeaders,
+    }),
+    method: 'GET',
+    path: `${GUARDRAILS_API_PREFIX}/effectiveguardrails`,
+    query: WorkspaceBundleQuery,
+    headers: z.object({ 'if-none-match': z.string().optional() }).passthrough(),
+    responses: {
+      200: WorkspaceGuardrailBundle,
+      304: c.noBody(),
+      400: ClaudeErrorResponse,
+      403: ClaudeErrorResponse,
+      503: ClaudeErrorResponse,
+    },
+  },
   create: {
     method: 'POST',
     path: `${GUARDRAILS_API_PREFIX}/guardrails`,
@@ -216,6 +354,14 @@ export const guardrailsContract = c.router({
 
 /** Rewrite an authored rule into the shape the engine evaluates. */
 export function ruleToStorage(rule: GuardrailRuleWireValue): GuardrailRule {
+  if (rule.kind === 'dogwood')
+    return {
+      kind: 'dogwood',
+      policy: rule.policy,
+      ...(rule.applies_to ? { appliesTo: rule.applies_to } : {}),
+      ...(rule.history ? { history: rule.history } : {}),
+      ...(rule.mcp_manifests ? { mcpManifests: rule.mcp_manifests } : {}),
+    };
   if (rule.kind === 'expression') {
     return {
       kind: 'expression',
@@ -236,8 +382,26 @@ export function ruleToStorage(rule: GuardrailRuleWireValue): GuardrailRule {
  * row that does not match the stored shape is a bug we want to hear about, not
  * one we want to serve half-translated.
  */
-export function ruleToWire(stored: unknown): GuardrailRuleWireValue {
+export function ruleToWire(
+  stored: unknown,
+): GuardrailRuleWireValue | ({ kind: string } & Record<string, unknown>) {
+  if (
+    stored &&
+    typeof stored === 'object' &&
+    'kind' in stored &&
+    typeof stored.kind === 'string' &&
+    !['builtin', 'expression', 'dogwood'].includes(stored.kind)
+  )
+    return stored as { kind: string } & Record<string, unknown>;
   const rule = StoredGuardrailRule.parse(stored);
+  if (rule.kind === 'dogwood')
+    return {
+      kind: 'dogwood',
+      policy: rule.policy,
+      ...(rule.appliesTo ? { applies_to: rule.appliesTo } : {}),
+      ...(rule.history ? { history: rule.history } : {}),
+      ...(rule.mcpManifests ? { mcp_manifests: rule.mcpManifests } : {}),
+    };
   if (rule.kind === 'expression') {
     return {
       kind: 'expression',
@@ -308,7 +472,10 @@ export function resolveGuardrailAuthoring(input: {
     };
   }
 
-  const phases = resolvePhases(input.phases, type?.phases);
+  const phases = resolvePhases(
+    input.phases,
+    rule.kind === 'dogwood' ? ['tool_call', 'tool_result'] : type?.phases,
+  );
   if ('error' in phases) return { ok: false, errors: [phases.error] };
 
   if (rule.kind === 'expression' && rule.onFalse === 'ask') {

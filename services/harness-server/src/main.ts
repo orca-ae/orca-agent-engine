@@ -359,6 +359,9 @@ const dispatcherOpts: DispatcherOptions = {
   ...(config.openaiBaseURL ? { openaiBaseURL: config.openaiBaseURL } : {}),
   anthropicApiKey: config.anthropicApiKey,
   modelDefault: config.anthropicModelDefault,
+  ...(config.dogwoodDispatchClockErrorBoundMs !== undefined
+    ? { dogwoodDispatchClockErrorBoundMs: config.dogwoodDispatchClockErrorBoundMs }
+    : {}),
   registry,
   gatewayMcpUrl: config.gatewayMcpUrl,
   gatewayLlmUrl: config.gatewayLlmUrl,

@@ -28,6 +28,8 @@
 // bridge. Delivery owns no sockets and no DB, so it is fully unit-testable
 // in-process against a fake runner (a ws peer speaking the tunnel protocol).
 
+import { runnerPolicyOwner } from './policy-owner.js';
+import { assertGuardrailReaderCapabilities } from '@orca/guardrails';
 import { ConnectError, type TunnelResponse, TunnelTransport } from '@orca/harness-tunnel';
 import { createHash, randomUUID } from 'node:crypto';
 import { decodeJwt } from 'jose';
@@ -68,7 +70,10 @@ export interface SnapshotDeliveryLogger {
  * snapshot was expected but could not be built (a missing skill_version, etc.).
  */
 export interface SnapshotProvider {
-  resolve(sessionId: string): Promise<AgentSnapshot | null>;
+  resolve(
+    sessionId: string,
+    context?: { policyOwner?: string; turnEventId?: string },
+  ): Promise<AgentSnapshot | null>;
 }
 
 /** Options for {@link SessionSnapshotDelivery}. */
@@ -321,7 +326,16 @@ export class SessionSnapshotDelivery {
    *   - 2xx ack drained → `{ skipped: false, delivered: true }`.
    */
   async deliver(): Promise<SnapshotDeliveryOutcome> {
-    const snapshot = await this.provider.resolve(this.sessionId);
+    const snapshot = this.registry.get(this.runnerId)
+      ? await this.provider.resolve(this.sessionId, {
+          policyOwner: runnerPolicyOwner(this.registry, this.runnerId),
+        })
+      : await this.provider.resolve(this.sessionId);
+    if (snapshot)
+      assertGuardrailReaderCapabilities(
+        snapshot.guardrails ?? [],
+        this.registry.get(this.runnerId)?.hello.guardrailCapabilities ?? [],
+      );
     if (snapshot === null) {
       this.logger?.info?.(
         { sessionId: this.sessionId, runnerId: this.runnerId },

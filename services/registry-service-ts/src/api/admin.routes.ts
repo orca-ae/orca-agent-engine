@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { and, asc, desc, eq, gt, isNotNull, isNull, lt, lte, ne, or, sql } from 'drizzle-orm';
+import { guardrailRolloutError, type GuardrailRouteOptions } from '../domain/guardrail-rollout.js';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { SEED_PRICE_PROVIDER } from '@orca/harness-catalog';
 import type { TranscriptStore } from '@orca/transcript-store';
@@ -154,6 +155,7 @@ export function registerAdminRoutes(
   store: TranscriptStore,
   secretStore?: SecretStore,
   conditionalPricingEnabled = false,
+  guardrailOptions: GuardrailRouteOptions = {},
 ): void {
   app.get('/v1/organizations/me', async (req, reply) => {
     const principal = req.adminAuth!;
@@ -756,7 +758,7 @@ export function registerAdminRoutes(
     return apiKeyWire(updated);
   });
 
-  registerAdminGuardrailRoutes(app, db);
+  registerAdminGuardrailRoutes(app, db, guardrailOptions);
   registerAdminModelPriceRoutes(app, db);
   registerAdminModelPriceRuleSetRoutes(app, db, writeAudit, conditionalPricingEnabled);
 }
@@ -1022,7 +1024,12 @@ async function findOperatorPrice(
  * the workspace plane uses, so a guardrail cannot be authored here that would
  * fail to evaluate there.
  */
-export function registerAdminGuardrailRoutes(app: FastifyInstance, db: DbClient): void {
+export function registerAdminGuardrailRoutes(
+  app: FastifyInstance,
+  db: DbClient,
+  options: GuardrailRouteOptions = {},
+): void {
+  const clock = options.now ?? (() => new Date());
   app.post('/v1/organizations/guardrails', async (req, reply) => {
     if (!requireAdminScope(req, reply, 'guardrails:write')) return;
     const parsed = GuardrailCreate.safeParse(req.body);
@@ -1038,6 +1045,8 @@ export function registerAdminGuardrailRoutes(app: FastifyInstance, db: DbClient)
     }
 
     const rule = ruleToStorage(body.rule);
+    const rolloutError = guardrailRolloutError({ rule, mode: body.mode ?? 'enforce' }, options);
+    if (rolloutError) return reply.code(400).send({ error: rolloutError });
     // The guard above admits nothing else on this listener.
     const authored = resolveGuardrailAuthoring({
       rule,
@@ -1048,7 +1057,7 @@ export function registerAdminGuardrailRoutes(app: FastifyInstance, db: DbClient)
     const metadata = parseMetadata(body.metadata);
     if (!metadata.ok) return reply.code(400).send({ error: metadata.error });
 
-    const now = new Date();
+    const now = clock();
     const row = {
       id: newId('grd'),
       organizationId: req.adminAuth!.organizationId,
@@ -1058,6 +1067,7 @@ export function registerAdminGuardrailRoutes(app: FastifyInstance, db: DbClient)
       name: body.name,
       description: body.description ?? null,
       enabled: body.enabled ?? true,
+      mode: body.mode ?? 'enforce',
       phases: authored.value.phases,
       scope: 'organization',
       rule: authored.value.rule,
@@ -1127,6 +1137,18 @@ export function registerAdminGuardrailRoutes(app: FastifyInstance, db: DbClient)
 
     const rule = body.rule ? ruleToStorage(body.rule) : storedRule(existing);
     const phases = body.phases ?? storedPhases(existing);
+    const rolloutError = guardrailRolloutError({ rule, mode: body.mode ?? existing.mode }, options);
+    if (
+      rolloutError &&
+      !(
+        body.enabled === false &&
+        body.mode === undefined &&
+        body.rule === undefined &&
+        body.scope === undefined &&
+        body.phases === undefined
+      )
+    )
+      return reply.code(400).send({ error: rolloutError });
     // Re-tiering is refused above, so the scope cannot have moved.
     const authored = resolveGuardrailAuthoring({ rule, scope: 'organization', phases });
     if (!authored.ok) return reply.code(400).send({ error: authoringMessage(authored.errors) });
@@ -1141,12 +1163,13 @@ export function registerAdminGuardrailRoutes(app: FastifyInstance, db: DbClient)
       metadata = toJsonMetadata(patched);
     }
 
-    const now = new Date();
+    const now = clock();
     const next = {
       ...existing,
       name: body.name ?? existing.name,
       description: body.description !== undefined ? body.description : existing.description,
       enabled: body.enabled ?? existing.enabled,
+      mode: body.mode ?? existing.mode,
       phases: authored.value.phases,
       rule: authored.value.rule,
       metadata,
@@ -1159,6 +1182,7 @@ export function registerAdminGuardrailRoutes(app: FastifyInstance, db: DbClient)
           name: next.name,
           description: next.description,
           enabled: next.enabled,
+          mode: next.mode,
           phases: next.phases,
           rule: next.rule,
           metadata: next.metadata,
@@ -1210,7 +1234,7 @@ export function registerAdminGuardrailRoutes(app: FastifyInstance, db: DbClient)
 
       await tx
         .update(guardrails)
-        .set({ deletedAt: new Date() })
+        .set({ deletedAt: clock() })
         .where(
           and(
             isNull(guardrails.deletedAt),

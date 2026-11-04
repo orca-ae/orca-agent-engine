@@ -62,11 +62,7 @@ export function supportsAsk(phase: Phase): boolean {
  * refused is *asking* for such a phase explicitly, which can only produce a
  * guardrail that silently does nothing.
  */
-const ENFORCED_PHASES: ReadonlySet<Phase> = new Set<Phase>([
-  'request',
-  'tool_call',
-  'tool_result',
-]);
+const ENFORCED_PHASES: ReadonlySet<Phase> = new Set<Phase>(['request', 'tool_call', 'tool_result']);
 
 export function isEnforced(phase: Phase): boolean {
   return ENFORCED_PHASES.has(phase);
@@ -85,6 +81,9 @@ export const SCOPES = ['organization', 'workspace', 'explicit'] as const;
 
 export type Scope = (typeof SCOPES)[number];
 
+export const GUARDRAIL_MODES = ['enforce', 'observe'] as const;
+export type GuardrailMode = (typeof GUARDRAIL_MODES)[number];
+
 export interface BuiltinRule {
   kind: 'builtin';
   builtin: string;
@@ -99,12 +98,22 @@ export interface ExpressionRule {
   reason?: string;
 }
 
-export type GuardrailRule = BuiltinRule | ExpressionRule;
+export interface DogwoodRule {
+  kind: 'dogwood';
+  policy: string;
+  appliesTo?: 'all_tools' | 'mcp_tools';
+  history?: 'session' | 'principal';
+  mcpManifests?: { server: string; url: string; tools: Record<string, unknown>[] }[];
+}
+
+export type GuardrailRule = BuiltinRule | ExpressionRule | DogwoodRule;
 
 export interface Guardrail {
   id: string;
   name: string;
   enabled: boolean;
+  /** Missing means enforce for records without an explicit mode. */
+  mode?: GuardrailMode;
   phases: readonly Phase[];
   scope: Scope;
   rule: GuardrailRule;
@@ -197,6 +206,15 @@ export interface Decision {
    * only here. Reporting is the caller's to do; the engine stays pure.
    */
   errors: readonly GuardrailEvaluationError[];
+  /** Evaluated outside the enforcement fold; absent on the legacy path. */
+  observed?: readonly ObservedGuardrailVerdict[];
+}
+
+export interface ObservedGuardrailVerdict {
+  guardrailId: string;
+  mode: 'observe';
+  verdict: Verdict;
+  reason?: string;
 }
 
 /** One guardrail that could not be evaluated, and what the engine did about it. */
@@ -205,7 +223,7 @@ export interface GuardrailEvaluationError {
   /**
    * True when the phase failed closed and this became a deny; false when it
    * failed open and was swallowed to an abstain — the silent case worth alerting
-   * on.
+   * on. An observe-only error also remains outside the enforcement fold.
    */
   failedClosed: boolean;
   message: string;
@@ -215,7 +233,7 @@ export const STATE_ACTIONS = ['set', 'increment', 'delete', 'append'] as const;
 
 export type StateAction = (typeof STATE_ACTIONS)[number];
 
-export const STATE_SCOPES = ['turn', 'session', 'subject_window'] as const;
+export const STATE_SCOPES = ['turn', 'session', 'subject_window', 'workspace_window'] as const;
 
 export type StateScope = (typeof STATE_SCOPES)[number];
 

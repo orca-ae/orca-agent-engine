@@ -41,7 +41,8 @@
     "zod": "^4.0.0",
     "@orca/sdk-harness": "workspace:*",
     "@orca/pi-harness": "workspace:*",
-    "@orca/dsh-harness": "workspace:*"
+    "@orca/dsh-harness": "workspace:*",
+    "@runorca/dogwood": "file:../../vendor/dogwood/runorca-dogwood-0.1.0-df6624b.tgz"
   },
   "devDependencies": {
     "@orca/observability-exporter": "workspace:*",

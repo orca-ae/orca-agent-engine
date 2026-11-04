@@ -95,7 +95,7 @@ jobs:
       # comment. `helm template` needs the binary; the suite needs no cluster.
       - uses: azure/setup-helm@v4
       - run: pnpm test:chart:render
-      - run: node --test .github/scripts/*.test.mjs scripts/render-pi-gateway-config.test.mjs scripts/check-license-headers.test.mjs
+      - run: node --test .github/scripts/*.test.mjs scripts/render-pi-gateway-config.test.mjs scripts/check-license-headers.test.mjs scripts/dogwood-artifacts.test.mjs
       - run: node packages/pi-harness/scripts/generate-catalog.mjs --check
       - name: Install Local sandbox probe prerequisites
         run: |

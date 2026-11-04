@@ -120,7 +120,12 @@ describe('Layer A: guardrail control plane (live registry, two listeners)', () =
     const resources = await apiCall(cfg, '/apis/policy.runorca.ai/v1');
     expect(resources.status, resources.text).toBe(200);
     const listed = resources.json<{ resources: Array<{ name: string; kind: string }> }>();
-    expect(listed.resources.map((r) => r.name).sort()).toEqual(['guardrails', 'guardrailtypes']);
+    expect(listed.resources.map((r) => r.name).sort()).toEqual([
+      'effectiveguardrails',
+      'guardrails',
+      'guardrailtypes',
+      'policyschemas',
+    ]);
 
     const invented = await apiCall(cfg, '/apis/nosuch.runorca.ai/v1');
     expect(invented.status).toBe(404);
@@ -129,7 +134,9 @@ describe('Layer A: guardrail control plane (live registry, two listeners)', () =
   it('serves the builtin catalog the harness enforces against', async () => {
     const res = await apiCall(cfg, GUARDRAIL_TYPES);
     expect(res.status, res.text).toBe(200);
-    const body = res.json<{ data: Array<{ name: string; phases: string[]; internal?: boolean }> }>();
+    const body = res.json<{
+      data: Array<{ name: string; phases: string[]; internal?: boolean }>;
+    }>();
     const names = body.data.map((entry) => entry.name);
     expect(names).toContain('block_tools');
     expect(names).toContain('cost_budget');

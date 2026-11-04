@@ -225,6 +225,10 @@ export interface ServiceConfig {
   priceRefreshProvider: string;
   priceRefreshIntervalMs: number;
   conditionalPricingEnabled: boolean;
+  guardrailsObserveEnabled: boolean;
+  guardrailsDogwoodEnabled: boolean;
+  aiGatewayDogwoodEnabled: boolean;
+  guardrailsMonthlyBudgetsEnabled: boolean;
   priceSources: PriceSourceConfig[];
 }
 
@@ -804,6 +808,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServiceConfig 
     priceRefreshProvider: parsePriceRefreshProvider(env),
     priceRefreshIntervalMs: parsePriceRefreshIntervalMs(env),
     conditionalPricingEnabled: parseBooleanEnv(env, 'CONDITIONAL_PRICING_ENABLED'),
+    guardrailsObserveEnabled: parseBooleanEnv(env, 'GUARDRAILS_OBSERVE_ENABLED'),
+    guardrailsDogwoodEnabled: parseBooleanEnv(env, 'GUARDRAILS_DOGWOOD_ENABLED'),
+    aiGatewayDogwoodEnabled: parseBooleanEnv(env, 'AI_GATEWAY_DOGWOOD_ENABLED'),
+    guardrailsMonthlyBudgetsEnabled: parseBooleanEnv(env, 'GUARDRAILS_MONTHLY_BUDGETS_ENABLED'),
     priceSources: parsePriceSources(
       optionalEnv(env, 'PRICE_SOURCES_JSON'),
       optionalEnv(env, 'PRICE_REFRESH_URL'),

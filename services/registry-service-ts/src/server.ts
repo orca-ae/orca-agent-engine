@@ -1,6 +1,7 @@
 // Copyright The Orca Authors
 // SPDX-License-Identifier: Apache-2.0
 
+import { httpEventToProto } from './domain/events.js';
 import { CodexRunnerAccounting } from './domain/codex-runner-accounting.js';
 import type { DshApprovedProfiles } from './domain/dsh-profile.js';
 import { saveRunnerHarnessState } from './domain/harness-state.js';
@@ -164,6 +165,7 @@ export interface SseConfig {
 }
 
 export interface BuildAppOptions {
+  guardrails?: import('./domain/guardrail-rollout.js').GuardrailRouteOptions;
   dshApprovedProfiles?: DshApprovedProfiles;
   db: DbClient;
   /** Disable to restore the per-item Session/Thread/Trigger and Agent list readers. */
@@ -482,6 +484,7 @@ export function buildApp(
 }
 
 export interface BuildAdminAppOptions {
+  guardrails?: import('./domain/guardrail-rollout.js').GuardrailRouteOptions;
   conditionalPricingEnabled?: boolean;
   db: DbClient;
   oidc: OidcConfig;
@@ -581,7 +584,14 @@ export function buildAdminApp(opts: BuildAdminAppOptions): FastifyInstance {
   });
   app.get('/healthz', async () => ({ status: 'ok', service: SERVICE_NAME }));
   app.get('/readyz', async () => ({ status: 'ready', service: SERVICE_NAME }));
-  registerAdminRoutes(app, opts.db, opts.store, opts.secretStore, opts.conditionalPricingEnabled);
+  registerAdminRoutes(
+    app,
+    opts.db,
+    opts.store,
+    opts.secretStore,
+    opts.conditionalPricingEnabled,
+    opts.guardrails,
+  );
   registerPlatformRoutes(app, opts.db);
   return app;
 }
@@ -814,7 +824,26 @@ function buildSurfaceApp(
     // table. A no-op for a runner bound to no session (cloud / not distributed
     // here), so it is safe to wire for every runner tunnel.
     const sessionEventBridges = new SessionEventBridgeManager({
-      accountingFactory: (context) => new CodexRunnerAccounting(opts.db, context),
+      accountingFactory: (context) =>
+        new CodexRunnerAccounting(
+          opts.db,
+          {
+            ...context,
+            recordGuardrailDecision: async (payload) => {
+              await opts.store.append(context.workspaceId, context.sessionId, [
+                httpEventToProto({
+                  workspaceId: context.workspaceId,
+                  sessionId: context.sessionId,
+                  producedBy: 'harness',
+                  idempotencyKey: '',
+                  input: { type: 'session.guardrail_decision', ...payload },
+                  ...(opts.guardrails?.now ? { now: opts.guardrails.now } : {}),
+                }),
+              ]);
+            },
+          },
+          opts.guardrails?.now,
+        ),
       logger: app.log,
       ownsSession: async (workspaceId, sessionId) =>
         (await loadSessionExecutionOwner(opts.db, workspaceId, sessionId)) === 'registry',
@@ -901,7 +930,7 @@ function buildSurfaceApp(
     // public listener beside core, and discoverable through the same `/apis`
     // document that advertises them. Organization-tier guardrails and every price
     // write are refused here and served on the admin listener instead.
-    registerGuardrailsRoutes(app, opts.db);
+    registerGuardrailsRoutes(app, opts.db, opts.guardrails);
     registerModelPricesRoutes(
       app,
       createPostgresModelPriceStore(opts.db),
@@ -1195,6 +1224,23 @@ function buildSurfaceApp(
       opts.sessionJwtLlmPolicy,
       opts.fetchImpl,
       {
+        recordPolicyWarning: async (workspaceId, sessionId, eventId, message) => {
+          await opts.store.append(workspaceId, sessionId, [
+            httpEventToProto({
+              workspaceId,
+              sessionId,
+              producedBy: 'harness',
+              idempotencyKey: eventId,
+              input: {
+                id: eventId,
+                type: 'session.warning',
+                warning: { type: 'dogwood_manifest_drift', message },
+              },
+              ...(opts.guardrails?.now ? { now: opts.guardrails.now } : {}),
+            }),
+          ]);
+        },
+        ...(opts.guardrails ? { guardrails: opts.guardrails } : {}),
         ...(opts.dshApprovedProfiles ? { dshApprovedProfiles: opts.dshApprovedProfiles } : {}),
         ...(opts.llmJwtTtlSecs !== undefined ? { llmJwtTtlSecs: opts.llmJwtTtlSecs } : {}),
         ...(opts.environmentClaimTtlMs !== undefined

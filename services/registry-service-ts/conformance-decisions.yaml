@@ -150,12 +150,12 @@ decisions:
   # rule goes dead the moment that group stops being served.
   - id: extension-policy-group
     match: { class: extension, path: '/apis/policy.runorca.ai/v1*' }
-    covers: 8
+    covers: 10
     decision: keep
     reference: docs/managed-agents/guardrails.md
     rationale: >-
       The Guardrails control plane: guardrail CRUD, the read-only type catalog,
-      and the group's own `APIResourceList`. Anthropic publishes no guardrail
+      effective workspace policy bundles with renewable origin leases, the Dogwood base/event schema resource, and the group's own `APIResourceList`. Anthropic publishes no guardrail
       surface — a tool-level `permission_policy` is as far as their model goes,
       and it stays Claude-shaped and unchanged. These operations live under a
       named group rather than on `/v1` precisely so that nothing here can be

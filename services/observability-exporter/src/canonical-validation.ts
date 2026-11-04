@@ -1,6 +1,7 @@
 // Copyright The Orca Authors
 // SPDX-License-Identifier: Apache-2.0
 
+import { parseGuardrailSpan, MAX_GUARDRAIL_DECISIONS_PER_TURN } from './guardrail-projection.js';
 import { isCanonicalSubpath, parseThreadMetadata } from './thread-projection.js';
 import { isBoundedAgentEventId } from './event-identity.js';
 import { deterministicChildSpanId, deterministicRootSpanId } from './ids.js';
@@ -14,6 +15,8 @@ import { MAX_PROJECTED_TOOLS_PER_TURN, parseCompletedToolSpan } from './tool-pro
 import {
   isProjectionSchema,
   isIoProjectionSchema,
+  GUARDRAIL_PROJECTED_TRACE_SCHEMA_VERSION,
+  GUARDRAIL_IO_PROJECTED_TRACE_SCHEMA_VERSION,
   TREE_PROJECTED_TRACE_SCHEMA_VERSION,
   TREE_IO_PROJECTED_TRACE_SCHEMA_VERSION,
   MAX_PROJECTED_MODEL_SUMMARIES_PER_TURN,
@@ -39,7 +42,8 @@ export function parseProjectedTrace(value: unknown): ProjectedTrace {
     value.spans.length >
       MAX_PROJECTED_MODEL_SUMMARIES_PER_TURN +
         MAX_PROJECTED_TOOLS_PER_TURN +
-        MAX_PROJECTED_EVALUATIONS_PER_TURN
+        MAX_PROJECTED_EVALUATIONS_PER_TURN +
+        MAX_GUARDRAIL_DECISIONS_PER_TURN
   ) {
     throw new Error('observability exporter outbox trace is invalid');
   }
@@ -92,7 +96,12 @@ export function parseProjectedTrace(value: unknown): ProjectedTrace {
     ) {
       throw new Error('observability exporter outbox trace is invalid');
     }
-    const span = type === 'tool' ? parseCompletedToolSpan(raw) : parseProjectedSpan(raw, type);
+    const span =
+      type === 'tool'
+        ? parseCompletedToolSpan(raw)
+        : type === 'guardrail_decision'
+          ? parseGuardrailSpan(raw)
+          : parseProjectedSpan(raw, type);
     if (span.io !== undefined) {
       const io = span.io;
       if (
@@ -126,9 +135,11 @@ export function parseProjectedTrace(value: unknown): ProjectedTrace {
       raw,
       isRecord(raw) && raw.observationType === 'tool'
         ? 'tool'
-        : isRecord(raw) && raw.observationType === 'outcome_evaluation'
-          ? 'outcome_evaluation'
-          : 'turn_model_summary',
+        : isRecord(raw) && raw.observationType === 'guardrail_decision'
+          ? 'guardrail_decision'
+          : isRecord(raw) && raw.observationType === 'outcome_evaluation'
+            ? 'outcome_evaluation'
+            : 'turn_model_summary',
     ),
   );
   if (ioBytes > MAX_CAPTURED_IO_BYTES_PER_TURN) {
@@ -137,6 +148,8 @@ export function parseProjectedTrace(value: unknown): ProjectedTrace {
   if (
     value.schemaVersion !== TREE_PROJECTED_TRACE_SCHEMA_VERSION &&
     value.schemaVersion !== TREE_IO_PROJECTED_TRACE_SCHEMA_VERSION &&
+    value.schemaVersion !== GUARDRAIL_PROJECTED_TRACE_SCHEMA_VERSION &&
+    value.schemaVersion !== GUARDRAIL_IO_PROJECTED_TRACE_SCHEMA_VERSION &&
     spans.some(
       (span) => span.subpath !== '' || Object.keys(parseThreadMetadata(span.metadata)).length > 0,
     )
@@ -145,6 +158,8 @@ export function parseProjectedTrace(value: unknown): ProjectedTrace {
   const traceId = value.traceId;
   if (
     spans.some((span) => span.parentSpanId !== root.spanId) ||
+    spans.filter((span) => span.observationType === 'guardrail_decision').length >
+      MAX_GUARDRAIL_DECISIONS_PER_TURN ||
     spans.filter((span) => span.observationType === 'tool').length > MAX_PROJECTED_TOOLS_PER_TURN ||
     spans.filter((span) => span.observationType === 'turn_model_summary').length >
       MAX_PROJECTED_MODEL_SUMMARIES_PER_TURN ||
@@ -153,9 +168,12 @@ export function parseProjectedTrace(value: unknown): ProjectedTrace {
     spans.some(
       (span) =>
         (span.observationType === 'tool' ||
+          span.observationType === 'guardrail_decision' ||
           span.observationType === 'outcome_evaluation' ||
           ((value.schemaVersion === TREE_PROJECTED_TRACE_SCHEMA_VERSION ||
-            value.schemaVersion === TREE_IO_PROJECTED_TRACE_SCHEMA_VERSION) &&
+            value.schemaVersion === TREE_IO_PROJECTED_TRACE_SCHEMA_VERSION ||
+            value.schemaVersion === GUARDRAIL_PROJECTED_TRACE_SCHEMA_VERSION ||
+            value.schemaVersion === GUARDRAIL_IO_PROJECTED_TRACE_SCHEMA_VERSION) &&
             span.observationType === 'turn_model_summary')) &&
         (span.spanId !==
           deterministicChildSpanId(

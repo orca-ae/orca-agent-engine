@@ -2,10 +2,20 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { describe, expect, it } from 'vitest';
+import { isAppRoute, type AppRoute, type AppRouter } from '@ts-rest/core';
 import { internalContract } from '../../src/contracts/internal.contract.js';
 
 const resolveContract = internalContract.resolveVaultCredential;
 const mintSessionJwtContract = internalContract.mintSessionJwt;
+
+function routeEntries(router: AppRouter, prefix = ''): Array<[string, AppRoute]> {
+  return Object.entries(router).flatMap(([name, entry]) => {
+    const key = prefix ? `${prefix}.${name}` : name;
+    return isAppRoute(entry)
+      ? [[key, entry] as [string, AppRoute]]
+      : routeEntries(entry as AppRouter, key);
+  });
+}
 
 describe('internal vault credential resolve contract', () => {
   it.each(['vcrd_contract', 'llm:anthropic'])(
@@ -140,11 +150,18 @@ describe('internal tenant route architecture', () => {
   const GATEWAY_SCOPE_QUERY_ROUTES = new Set<string>(['effectiveGuardrails']);
 
   it('keeps internal contract routes tenant scoped with explicit infra exceptions', () => {
-    const entries = Object.entries(internalContract) as Array<[string, { path: string }]>;
+    const entries = routeEntries(internalContract);
+    expect(entries.filter(([name]) => name.startsWith('policyEvents.'))).toHaveLength(3);
     expect(entries.length).toBeGreaterThan(0);
     let environmentScopedCount = 0;
     let gatewayQueryScopedCount = 0;
+    let workspaceScopedCount = 0;
     for (const [name, route] of entries) {
+      if (name === 'effectiveWorkspaceGuardrails') {
+        workspaceScopedCount += 1;
+        expect(route.path).toBe('/internal/v1/workspaces/:workspaceId/guardrails/effective');
+        continue;
+      }
       if (ENVIRONMENT_SCOPED_ROUTES.has(name)) {
         environmentScopedCount += 1;
         expect(route.path).toMatch(/^\/internal\/environments(\/|$)/);
@@ -162,6 +179,7 @@ describe('internal tenant route architecture', () => {
     // invariant back down without failing).
     expect(environmentScopedCount).toBe(ENVIRONMENT_SCOPED_ROUTES.size);
     expect(gatewayQueryScopedCount).toBe(GATEWAY_SCOPE_QUERY_ROUTES.size);
+    expect(workspaceScopedCount).toBe(1);
   });
 });
 

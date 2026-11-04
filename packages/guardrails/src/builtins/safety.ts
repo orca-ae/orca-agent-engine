@@ -63,7 +63,6 @@ export const readOnlyOs: BuiltinEvaluator = (ctx) => {
   return deny(reason ?? `${toolName(ctx)} can modify the filesystem; this agent is read-only.`);
 };
 
-
 export const blockSkills: BuiltinEvaluator = (ctx) => {
   // Glob patterns, matched case-insensitively, as the catalog advertises —
   // `deploy-*` must block `deploy-prod`, not only an exact `deploy-*` literal.
@@ -112,9 +111,14 @@ export const maxToolCallsPerSession: BuiltinEvaluator = (ctx) => {
   const limit = numberParam(ctx.params, 'limit', 100);
   const used = counter(ctx.state, TOOL_CALL_COUNTER);
   if (used >= limit) {
-    // No state update on the denied call. Advancing a counter for work that
-    // never happened would make the recorded total disagree with reality.
-    return deny(`This session has reached its limit of ${limit} tool calls.`);
+    return {
+      ...deny(`This session has reached its limit of ${limit} tool calls.`),
+      // An observed deny does not stop the action. Keep counting calls that
+      // proceed; the engine still withholds these writes if another rule blocks.
+      ...(ctx.guardrail.mode === 'observe'
+        ? { stateUpdates: [increment('session', TOOL_CALL_COUNTER)] }
+        : {}),
+    };
   }
   return allowWith([increment('session', TOOL_CALL_COUNTER)]);
 };
@@ -129,7 +133,12 @@ export const spawnBounds: BuiltinEvaluator = (ctx) => {
   const max = numberParam(ctx.params, 'max_dispatches_per_turn', 5);
   const used = counter(ctx.state, DISPATCH_COUNTER);
   if (used >= max) {
-    return deny(`This turn has already dispatched ${max} subagents.`);
+    return {
+      ...deny(`This turn has already dispatched ${max} subagents.`),
+      ...(ctx.guardrail.mode === 'observe'
+        ? { stateUpdates: [increment('turn', DISPATCH_COUNTER)] }
+        : {}),
+    };
   }
   // Turn scope: the cap is per turn, so the counter has to reset with it.
   return allowWith([increment('turn', DISPATCH_COUNTER)]);

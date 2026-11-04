@@ -13,6 +13,7 @@ RUN corepack enable && corepack prepare pnpm@9.15.9 --activate
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
 COPY patches ./patches
+COPY vendor/dogwood ./vendor/dogwood
 COPY packages/harness-catalog/package.json ./packages/harness-catalog/
 COPY packages/sandbox-runtime/package.json ./packages/sandbox-runtime/
 COPY packages/codex-harness/package.json ./packages/codex-harness/

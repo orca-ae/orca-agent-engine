@@ -3,7 +3,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import type { TranscriptStore } from '@orca/transcript-store';
-import type { RegistryClient, SessionRecord } from '../../src/clients/registry.js';
+import { RegistryClient, type SessionRecord } from '../../src/clients/registry.js';
 import type { ClaudeAgentSdkAdapter } from '../../src/harness/claude/session-adapter.js';
 import type { ClaudeHarnessOptions } from '../../src/harness/claude/index.js';
 import { Dispatcher } from '../../src/runner/dispatcher.js';
@@ -11,7 +11,8 @@ import type { CodexSdkHarnessOptions } from '../../src/harness/codex-sdk/index.j
 
 describe('Dispatcher Session LLM egress selection', () => {
   const build = (gatewayLlmUrl: string, llmEgressDefault: 'direct' | 'gateway' = 'direct') => {
-    const mintLlmGatewayJwt = vi.fn().mockResolvedValue({
+    const registry = new RegistryClient('http://registry.test', async () => 'internal-test-token');
+    const mintLlmGatewayJwt = vi.spyOn(registry, 'mintLlmGatewayJwt').mockResolvedValue({
       token: 'session-jwt',
       expiresAt: Math.floor(Date.now() / 1000) + 300,
     });
@@ -23,7 +24,7 @@ describe('Dispatcher Session LLM egress selection', () => {
       modelDefault: 'claude-test',
       gatewayLlmUrl,
       llmEgressDefault,
-      registry: { mintLlmGatewayJwt } as unknown as RegistryClient,
+      registry,
     });
     const optionsFor = (metadata?: Record<string, unknown>): ClaudeHarnessOptions => {
       const harness = dispatcher['buildClaudeHarness'](

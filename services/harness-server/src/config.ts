@@ -97,6 +97,7 @@ export interface ServiceConfig {
   anthropicApiKey: string;
   anthropicBaseURL: string | undefined;
   anthropicModelDefault: string;
+  dogwoodDispatchClockErrorBoundMs?: number;
   /** Mesh-internal registry base URL used for every Harness control-plane call. */
   registryInternalBaseUrl: string;
   /** Static internal token for non-Kubernetes deployments. */
@@ -590,6 +591,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServiceConfig 
     piProviderCredentials: readPiProviderCredentials(env),
     anthropicApiKey: env['ANTHROPIC_API_KEY'] ?? '',
     anthropicBaseURL: env['ANTHROPIC_BASE_URL'],
+    ...(env['DOGWOOD_DISPATCH_CLOCK_ERROR_BOUND_MS'] !== undefined
+      ? {
+          dogwoodDispatchClockErrorBoundMs: parseDogwoodClockBound(
+            env['DOGWOOD_DISPATCH_CLOCK_ERROR_BOUND_MS'],
+          ),
+        }
+      : {}),
     anthropicModelDefault: env['ANTHROPIC_MODEL_DEFAULT'] ?? 'claude-sonnet-4-5-20250929',
     registryInternalBaseUrl: env['REGISTRY_INTERNAL_BASE_URL'] ?? 'http://localhost:8081',
     internalServiceToken: optionalEnv(env, 'INTERNAL_SERVICE_TOKEN'),
@@ -749,4 +757,13 @@ function parseSessionIdleTimeout(raw: string | undefined): number {
     return 60_000;
   }
   return Math.floor(n);
+}
+
+function parseDogwoodClockBound(value: string): number {
+  const bound = Number(value);
+  if (value.trim() === '' || !Number.isFinite(bound) || bound < 0)
+    throw new Error(
+      'DOGWOOD_DISPATCH_CLOCK_ERROR_BOUND_MS must be a qualified nonnegative finite bound',
+    );
+  return bound;
 }

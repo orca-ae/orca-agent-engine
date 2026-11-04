@@ -241,6 +241,26 @@ export const userDailyCostBudget: BuiltinEvaluator = (ctx) =>
     isUnpriced(ctx) || flagged(ctx.state, SHARED_USAGE_KEYS.dailyCostUnpriced),
   );
 
+export const userMonthlyCostBudget: BuiltinEvaluator = (ctx) =>
+  budgetOutcome(
+    ctx,
+    counter(ctx.state, SHARED_USAGE_KEYS.monthlyCostUsd),
+    'subject_window',
+    "This month's spend",
+    false,
+    flagged(ctx.state, SHARED_USAGE_KEYS.monthlyCostUnpriced),
+  );
+
+export const workspaceMonthlyCostBudget: BuiltinEvaluator = (ctx) =>
+  budgetOutcome(
+    ctx,
+    counter(ctx.state, SHARED_USAGE_KEYS.workspaceMonthlyCostUsd),
+    'workspace_window',
+    "This workspace's spend this month",
+    false,
+    flagged(ctx.state, SHARED_USAGE_KEYS.workspaceMonthlyCostUnpriced),
+  );
+
 export const subagentCostBudget: BuiltinEvaluator = (ctx) => {
   // Only meaningful for a dispatched subagent; the coordinator's own spend is
   // the session budget's concern.

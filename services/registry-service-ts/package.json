@@ -61,7 +61,8 @@
     "prom-client": "^15.1.0",
     "uuid": "^11.0.0",
     "ws": "^8.18.0",
-    "zod": "^3.23.0"
+    "zod": "^3.23.0",
+    "@runorca/dogwood": "file:../../vendor/dogwood/runorca-dogwood-0.1.0-df6624b.tgz"
   },
   "devDependencies": {
     "@anthropic-ai/sdk": "0.113.0",

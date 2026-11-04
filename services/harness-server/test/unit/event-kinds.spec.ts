@@ -145,6 +145,7 @@ describe('event-kind vocabulary', () => {
       'session.status_rescheduled',
       'session.status_terminated',
       'session.error',
+      'session.guardrail_decision',
       'session.warning',
       'span.model_request_start',
       'span.model_request_end',

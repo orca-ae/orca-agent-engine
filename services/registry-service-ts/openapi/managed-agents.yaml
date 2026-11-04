@@ -158,6 +158,327 @@ paths:
                   - kind
                   - group_version
                   - resources
+  /apis/policy.runorca.ai/v1/effectiveguardrails:
+    get:
+      tags:
+        - guardrails
+        - orca-extension
+      parameters:
+        - name: if-none-match
+          in: header
+          schema:
+            type: string
+        - name: anthropic-beta
+          in: header
+          schema:
+            type: string
+            description: Accepted for Anthropic SDK compatibility and ignored. No value of this header changes request handling. Typed as a free-form string rather than an enum because this service recognises no specific beta value.
+        - name: rule_kinds
+          in: query
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 200
+        - name: guardrail_capabilities
+          in: query
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 512
+      operationId: guardrails.effective
+      responses:
+        '200':
+          description: '200'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  schema:
+                    type: string
+                    enum:
+                      - '1'
+                  bundle_id:
+                    type: string
+                    minLength: 1
+                  generation:
+                    type: integer
+                    minimum: 0
+                  scope:
+                    type: object
+                    properties:
+                      org_id:
+                        type: string
+                        minLength: 1
+                      workspace_id:
+                        type: string
+                        minLength: 1
+                    required:
+                      - org_id
+                      - workspace_id
+                  runtime_config_revision:
+                    type: string
+                    minLength: 1
+                  issued_at:
+                    type: string
+                    format: date-time
+                  expires_at:
+                    type: string
+                    format: date-time
+                  seed_verdict:
+                    type: string
+                    enum:
+                      - allow
+                  guardrails:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                          pattern: ^(?:grd)_[A-Za-z0-9_-]+$
+                        name:
+                          type: string
+                          minLength: 1
+                        tier:
+                          type: string
+                          enum:
+                            - session
+                            - agent
+                            - workspace
+                            - organization
+                        phases:
+                          type: array
+                          items:
+                            type: string
+                            minLength: 1
+                        rule: {}
+                        stateful:
+                          type: boolean
+                        mode:
+                          type: string
+                          enum:
+                            - enforce
+                            - observe
+                        state_scope:
+                          type: string
+                          enum:
+                            - turn
+                            - session
+                            - subject_window
+                            - workspace_window
+                        subagent_id:
+                          type: string
+                          minLength: 1
+                      required:
+                        - id
+                        - name
+                        - tier
+                        - phases
+                        - stateful
+                        - mode
+                      additionalProperties: false
+                  omitted_rules:
+                    type: integer
+                    minimum: 0
+                required:
+                  - schema
+                  - bundle_id
+                  - generation
+                  - scope
+                  - runtime_config_revision
+                  - issued_at
+                  - expires_at
+                  - seed_verdict
+                  - guardrails
+                  - omitted_rules
+                additionalProperties: false
+          headers:
+            ETag:
+              description: Quoted policy content identity, independent of lease renewal.
+              required: true
+              schema:
+                type: string
+                pattern: ^"registry-[a-f0-9]{64}"$
+            Cache-Control:
+              description: Origin exchanges are never renewed by an HTTP cache.
+              required: true
+              schema:
+                type: string
+                enum:
+                  - no-store
+            Orca-Guardrail-Issued-At:
+              description: Registry UTC lease issue time.
+              required: true
+              schema:
+                type: string
+                format: date-time
+            Orca-Guardrail-Expires-At:
+              description: Exclusive expiry, exactly one hour after issue.
+              required: true
+              schema:
+                type: string
+                format: date-time
+            Orca-Guardrail-Generation:
+              description: Issue time as integer epoch milliseconds.
+              required: true
+              schema:
+                type: string
+                pattern: ^[0-9]+$
+        '304':
+          description: '304'
+          headers:
+            ETag:
+              description: Quoted policy content identity, independent of lease renewal.
+              required: true
+              schema:
+                type: string
+                pattern: ^"registry-[a-f0-9]{64}"$
+            Cache-Control:
+              description: Origin exchanges are never renewed by an HTTP cache.
+              required: true
+              schema:
+                type: string
+                enum:
+                  - no-store
+            Orca-Guardrail-Issued-At:
+              description: Registry UTC lease issue time.
+              required: true
+              schema:
+                type: string
+                format: date-time
+            Orca-Guardrail-Expires-At:
+              description: Exclusive expiry, exactly one hour after issue.
+              required: true
+              schema:
+                type: string
+                format: date-time
+            Orca-Guardrail-Generation:
+              description: Issue time as integer epoch milliseconds.
+              required: true
+              schema:
+                type: string
+                pattern: ^[0-9]+$
+        '400':
+          description: '400'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  type:
+                    type: string
+                    enum:
+                      - error
+                  error:
+                    type: object
+                    properties:
+                      type:
+                        type: string
+                        enum:
+                          - invalid_request_error
+                          - authentication_error
+                          - billing_error
+                          - permission_error
+                          - not_found_error
+                          - conflict_error
+                          - request_too_large
+                          - rate_limit_error
+                          - timeout_error
+                          - overloaded_error
+                          - api_error
+                      message:
+                        type: string
+                    required:
+                      - type
+                      - message
+                  request_id:
+                    type: string
+                    nullable: true
+                required:
+                  - type
+                  - error
+                  - request_id
+        '403':
+          description: '403'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  type:
+                    type: string
+                    enum:
+                      - error
+                  error:
+                    type: object
+                    properties:
+                      type:
+                        type: string
+                        enum:
+                          - invalid_request_error
+                          - authentication_error
+                          - billing_error
+                          - permission_error
+                          - not_found_error
+                          - conflict_error
+                          - request_too_large
+                          - rate_limit_error
+                          - timeout_error
+                          - overloaded_error
+                          - api_error
+                      message:
+                        type: string
+                    required:
+                      - type
+                      - message
+                  request_id:
+                    type: string
+                    nullable: true
+                required:
+                  - type
+                  - error
+                  - request_id
+        '503':
+          description: '503'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  type:
+                    type: string
+                    enum:
+                      - error
+                  error:
+                    type: object
+                    properties:
+                      type:
+                        type: string
+                        enum:
+                          - invalid_request_error
+                          - authentication_error
+                          - billing_error
+                          - permission_error
+                          - not_found_error
+                          - conflict_error
+                          - request_too_large
+                          - rate_limit_error
+                          - timeout_error
+                          - overloaded_error
+                          - api_error
+                      message:
+                        type: string
+                    required:
+                      - type
+                      - message
+                  request_id:
+                    type: string
+                    nullable: true
+                required:
+                  - type
+                  - error
+                  - request_id
   /apis/policy.runorca.ai/v1/guardrails:
     post:
       tags:
@@ -191,6 +512,11 @@ paths:
                   nullable: true
                 enabled:
                   type: boolean
+                mode:
+                  type: string
+                  enum:
+                    - enforce
+                    - observe
                 phases:
                   type: array
                   items:
@@ -253,6 +579,53 @@ paths:
                         - expression
                         - on_false
                       additionalProperties: false
+                    - type: object
+                      properties:
+                        kind:
+                          type: string
+                          enum:
+                            - dogwood
+                        policy:
+                          type: string
+                          minLength: 1
+                          maxLength: 65536
+                        applies_to:
+                          type: string
+                          enum:
+                            - all_tools
+                            - mcp_tools
+                        history:
+                          type: string
+                          enum:
+                            - session
+                            - principal
+                        mcp_manifests:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              server:
+                                type: string
+                                minLength: 1
+                              url:
+                                type: string
+                                format: uri
+                              tools:
+                                type: array
+                                items:
+                                  type: object
+                                  additionalProperties: {}
+                                maxItems: 1000
+                            required:
+                              - server
+                              - url
+                              - tools
+                            additionalProperties: false
+                          maxItems: 64
+                      required:
+                        - kind
+                        - policy
+                      additionalProperties: false
                 metadata:
                   default: {}
                   type: object
@@ -287,6 +660,11 @@ paths:
                     type: string
                   enabled:
                     type: boolean
+                  mode:
+                    type: string
+                    enum:
+                      - enforce
+                      - observe
                   phases:
                     type: array
                     items:
@@ -306,49 +684,108 @@ paths:
                       - workspace
                       - explicit
                   rule:
-                    discriminator:
-                      propertyName: kind
                     oneOf:
-                      - type: object
-                        properties:
-                          kind:
-                            type: string
-                            enum:
+                      - discriminator:
+                          propertyName: kind
+                        oneOf:
+                          - type: object
+                            properties:
+                              kind:
+                                type: string
+                                enum:
+                                  - builtin
+                              builtin:
+                                type: string
+                                minLength: 1
+                                maxLength: 200
+                              params:
+                                type: object
+                                additionalProperties: {}
+                            required:
+                              - kind
                               - builtin
-                          builtin:
-                            type: string
-                            minLength: 1
-                            maxLength: 200
-                          params:
-                            type: object
-                            additionalProperties: {}
-                        required:
-                          - kind
-                          - builtin
-                        additionalProperties: false
+                            additionalProperties: false
+                          - type: object
+                            properties:
+                              kind:
+                                type: string
+                                enum:
+                                  - expression
+                              expression:
+                                type: string
+                                minLength: 1
+                                maxLength: 4096
+                              on_false:
+                                type: string
+                                enum:
+                                  - ask
+                                  - deny
+                              reason:
+                                type: string
+                                maxLength: 1024
+                            required:
+                              - kind
+                              - expression
+                              - on_false
+                            additionalProperties: false
+                          - type: object
+                            properties:
+                              kind:
+                                type: string
+                                enum:
+                                  - dogwood
+                              policy:
+                                type: string
+                                minLength: 1
+                                maxLength: 65536
+                              applies_to:
+                                type: string
+                                enum:
+                                  - all_tools
+                                  - mcp_tools
+                              history:
+                                type: string
+                                enum:
+                                  - session
+                                  - principal
+                              mcp_manifests:
+                                type: array
+                                items:
+                                  type: object
+                                  properties:
+                                    server:
+                                      type: string
+                                      minLength: 1
+                                    url:
+                                      type: string
+                                      format: uri
+                                    tools:
+                                      type: array
+                                      items:
+                                        type: object
+                                        additionalProperties: {}
+                                      maxItems: 1000
+                                  required:
+                                    - server
+                                    - url
+                                    - tools
+                                  additionalProperties: false
+                                maxItems: 64
+                            required:
+                              - kind
+                              - policy
+                            additionalProperties: false
                       - type: object
                         properties:
                           kind:
                             type: string
-                            enum:
-                              - expression
-                          expression:
-                            type: string
-                            minLength: 1
-                            maxLength: 4096
-                          on_false:
-                            type: string
-                            enum:
-                              - ask
-                              - deny
-                          reason:
-                            type: string
-                            maxLength: 1024
                         required:
                           - kind
-                          - expression
-                          - on_false
-                        additionalProperties: false
+                        additionalProperties: true
+                  warnings:
+                    type: array
+                    items:
+                      type: string
                   metadata:
                     default: {}
                     type: object
@@ -371,6 +808,7 @@ paths:
                   - name
                   - description
                   - enabled
+                  - mode
                   - phases
                   - scope
                   - rule
@@ -509,6 +947,11 @@ paths:
                           type: string
                         enabled:
                           type: boolean
+                        mode:
+                          type: string
+                          enum:
+                            - enforce
+                            - observe
                         phases:
                           type: array
                           items:
@@ -528,49 +971,108 @@ paths:
                             - workspace
                             - explicit
                         rule:
-                          discriminator:
-                            propertyName: kind
                           oneOf:
-                            - type: object
-                              properties:
-                                kind:
-                                  type: string
-                                  enum:
+                            - discriminator:
+                                propertyName: kind
+                              oneOf:
+                                - type: object
+                                  properties:
+                                    kind:
+                                      type: string
+                                      enum:
+                                        - builtin
+                                    builtin:
+                                      type: string
+                                      minLength: 1
+                                      maxLength: 200
+                                    params:
+                                      type: object
+                                      additionalProperties: {}
+                                  required:
+                                    - kind
                                     - builtin
-                                builtin:
-                                  type: string
-                                  minLength: 1
-                                  maxLength: 200
-                                params:
-                                  type: object
-                                  additionalProperties: {}
-                              required:
-                                - kind
-                                - builtin
-                              additionalProperties: false
+                                  additionalProperties: false
+                                - type: object
+                                  properties:
+                                    kind:
+                                      type: string
+                                      enum:
+                                        - expression
+                                    expression:
+                                      type: string
+                                      minLength: 1
+                                      maxLength: 4096
+                                    on_false:
+                                      type: string
+                                      enum:
+                                        - ask
+                                        - deny
+                                    reason:
+                                      type: string
+                                      maxLength: 1024
+                                  required:
+                                    - kind
+                                    - expression
+                                    - on_false
+                                  additionalProperties: false
+                                - type: object
+                                  properties:
+                                    kind:
+                                      type: string
+                                      enum:
+                                        - dogwood
+                                    policy:
+                                      type: string
+                                      minLength: 1
+                                      maxLength: 65536
+                                    applies_to:
+                                      type: string
+                                      enum:
+                                        - all_tools
+                                        - mcp_tools
+                                    history:
+                                      type: string
+                                      enum:
+                                        - session
+                                        - principal
+                                    mcp_manifests:
+                                      type: array
+                                      items:
+                                        type: object
+                                        properties:
+                                          server:
+                                            type: string
+                                            minLength: 1
+                                          url:
+                                            type: string
+                                            format: uri
+                                          tools:
+                                            type: array
+                                            items:
+                                              type: object
+                                              additionalProperties: {}
+                                            maxItems: 1000
+                                        required:
+                                          - server
+                                          - url
+                                          - tools
+                                        additionalProperties: false
+                                      maxItems: 64
+                                  required:
+                                    - kind
+                                    - policy
+                                  additionalProperties: false
                             - type: object
                               properties:
                                 kind:
                                   type: string
-                                  enum:
-                                    - expression
-                                expression:
-                                  type: string
-                                  minLength: 1
-                                  maxLength: 4096
-                                on_false:
-                                  type: string
-                                  enum:
-                                    - ask
-                                    - deny
-                                reason:
-                                  type: string
-                                  maxLength: 1024
                               required:
                                 - kind
-                                - expression
-                                - on_false
-                              additionalProperties: false
+                              additionalProperties: true
+                        warnings:
+                          type: array
+                          items:
+                            type: string
                         metadata:
                           default: {}
                           type: object
@@ -593,6 +1095,7 @@ paths:
                         - name
                         - description
                         - enabled
+                        - mode
                         - phases
                         - scope
                         - rule
@@ -686,6 +1189,11 @@ paths:
                     type: string
                   enabled:
                     type: boolean
+                  mode:
+                    type: string
+                    enum:
+                      - enforce
+                      - observe
                   phases:
                     type: array
                     items:
@@ -705,49 +1213,108 @@ paths:
                       - workspace
                       - explicit
                   rule:
-                    discriminator:
-                      propertyName: kind
                     oneOf:
-                      - type: object
-                        properties:
-                          kind:
-                            type: string
-                            enum:
+                      - discriminator:
+                          propertyName: kind
+                        oneOf:
+                          - type: object
+                            properties:
+                              kind:
+                                type: string
+                                enum:
+                                  - builtin
+                              builtin:
+                                type: string
+                                minLength: 1
+                                maxLength: 200
+                              params:
+                                type: object
+                                additionalProperties: {}
+                            required:
+                              - kind
                               - builtin
-                          builtin:
-                            type: string
-                            minLength: 1
-                            maxLength: 200
-                          params:
-                            type: object
-                            additionalProperties: {}
-                        required:
-                          - kind
-                          - builtin
-                        additionalProperties: false
+                            additionalProperties: false
+                          - type: object
+                            properties:
+                              kind:
+                                type: string
+                                enum:
+                                  - expression
+                              expression:
+                                type: string
+                                minLength: 1
+                                maxLength: 4096
+                              on_false:
+                                type: string
+                                enum:
+                                  - ask
+                                  - deny
+                              reason:
+                                type: string
+                                maxLength: 1024
+                            required:
+                              - kind
+                              - expression
+                              - on_false
+                            additionalProperties: false
+                          - type: object
+                            properties:
+                              kind:
+                                type: string
+                                enum:
+                                  - dogwood
+                              policy:
+                                type: string
+                                minLength: 1
+                                maxLength: 65536
+                              applies_to:
+                                type: string
+                                enum:
+                                  - all_tools
+                                  - mcp_tools
+                              history:
+                                type: string
+                                enum:
+                                  - session
+                                  - principal
+                              mcp_manifests:
+                                type: array
+                                items:
+                                  type: object
+                                  properties:
+                                    server:
+                                      type: string
+                                      minLength: 1
+                                    url:
+                                      type: string
+                                      format: uri
+                                    tools:
+                                      type: array
+                                      items:
+                                        type: object
+                                        additionalProperties: {}
+                                      maxItems: 1000
+                                  required:
+                                    - server
+                                    - url
+                                    - tools
+                                  additionalProperties: false
+                                maxItems: 64
+                            required:
+                              - kind
+                              - policy
+                            additionalProperties: false
                       - type: object
                         properties:
                           kind:
                             type: string
-                            enum:
-                              - expression
-                          expression:
-                            type: string
-                            minLength: 1
-                            maxLength: 4096
-                          on_false:
-                            type: string
-                            enum:
-                              - ask
-                              - deny
-                          reason:
-                            type: string
-                            maxLength: 1024
                         required:
                           - kind
-                          - expression
-                          - on_false
-                        additionalProperties: false
+                        additionalProperties: true
+                  warnings:
+                    type: array
+                    items:
+                      type: string
                   metadata:
                     default: {}
                     type: object
@@ -770,6 +1337,7 @@ paths:
                   - name
                   - description
                   - enabled
+                  - mode
                   - phases
                   - scope
                   - rule
@@ -854,6 +1422,11 @@ paths:
                   nullable: true
                 enabled:
                   type: boolean
+                mode:
+                  type: string
+                  enum:
+                    - enforce
+                    - observe
                 phases:
                   type: array
                   items:
@@ -916,6 +1489,53 @@ paths:
                         - expression
                         - on_false
                       additionalProperties: false
+                    - type: object
+                      properties:
+                        kind:
+                          type: string
+                          enum:
+                            - dogwood
+                        policy:
+                          type: string
+                          minLength: 1
+                          maxLength: 65536
+                        applies_to:
+                          type: string
+                          enum:
+                            - all_tools
+                            - mcp_tools
+                        history:
+                          type: string
+                          enum:
+                            - session
+                            - principal
+                        mcp_manifests:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              server:
+                                type: string
+                                minLength: 1
+                              url:
+                                type: string
+                                format: uri
+                              tools:
+                                type: array
+                                items:
+                                  type: object
+                                  additionalProperties: {}
+                                maxItems: 1000
+                            required:
+                              - server
+                              - url
+                              - tools
+                            additionalProperties: false
+                          maxItems: 64
+                      required:
+                        - kind
+                        - policy
+                      additionalProperties: false
                 metadata:
                   type: object
                   additionalProperties:
@@ -947,6 +1567,11 @@ paths:
                     type: string
                   enabled:
                     type: boolean
+                  mode:
+                    type: string
+                    enum:
+                      - enforce
+                      - observe
                   phases:
                     type: array
                     items:
@@ -966,49 +1591,108 @@ paths:
                       - workspace
                       - explicit
                   rule:
-                    discriminator:
-                      propertyName: kind
                     oneOf:
-                      - type: object
-                        properties:
-                          kind:
-                            type: string
-                            enum:
+                      - discriminator:
+                          propertyName: kind
+                        oneOf:
+                          - type: object
+                            properties:
+                              kind:
+                                type: string
+                                enum:
+                                  - builtin
+                              builtin:
+                                type: string
+                                minLength: 1
+                                maxLength: 200
+                              params:
+                                type: object
+                                additionalProperties: {}
+                            required:
+                              - kind
                               - builtin
-                          builtin:
-                            type: string
-                            minLength: 1
-                            maxLength: 200
-                          params:
-                            type: object
-                            additionalProperties: {}
-                        required:
-                          - kind
-                          - builtin
-                        additionalProperties: false
+                            additionalProperties: false
+                          - type: object
+                            properties:
+                              kind:
+                                type: string
+                                enum:
+                                  - expression
+                              expression:
+                                type: string
+                                minLength: 1
+                                maxLength: 4096
+                              on_false:
+                                type: string
+                                enum:
+                                  - ask
+                                  - deny
+                              reason:
+                                type: string
+                                maxLength: 1024
+                            required:
+                              - kind
+                              - expression
+                              - on_false
+                            additionalProperties: false
+                          - type: object
+                            properties:
+                              kind:
+                                type: string
+                                enum:
+                                  - dogwood
+                              policy:
+                                type: string
+                                minLength: 1
+                                maxLength: 65536
+                              applies_to:
+                                type: string
+                                enum:
+                                  - all_tools
+                                  - mcp_tools
+                              history:
+                                type: string
+                                enum:
+                                  - session
+                                  - principal
+                              mcp_manifests:
+                                type: array
+                                items:
+                                  type: object
+                                  properties:
+                                    server:
+                                      type: string
+                                      minLength: 1
+                                    url:
+                                      type: string
+                                      format: uri
+                                    tools:
+                                      type: array
+                                      items:
+                                        type: object
+                                        additionalProperties: {}
+                                      maxItems: 1000
+                                  required:
+                                    - server
+                                    - url
+                                    - tools
+                                  additionalProperties: false
+                                maxItems: 64
+                            required:
+                              - kind
+                              - policy
+                            additionalProperties: false
                       - type: object
                         properties:
                           kind:
                             type: string
-                            enum:
-                              - expression
-                          expression:
-                            type: string
-                            minLength: 1
-                            maxLength: 4096
-                          on_false:
-                            type: string
-                            enum:
-                              - ask
-                              - deny
-                          reason:
-                            type: string
-                            maxLength: 1024
                         required:
                           - kind
-                          - expression
-                          - on_false
-                        additionalProperties: false
+                        additionalProperties: true
+                  warnings:
+                    type: array
+                    items:
+                      type: string
                   metadata:
                     default: {}
                     type: object
@@ -1031,6 +1715,7 @@ paths:
                   - name
                   - description
                   - enabled
+                  - mode
                   - phases
                   - scope
                   - rule
@@ -1357,6 +2042,11 @@ paths:
                     type: string
                   enabled:
                     type: boolean
+                  mode:
+                    type: string
+                    enum:
+                      - enforce
+                      - observe
                   phases:
                     type: array
                     items:
@@ -1376,49 +2066,108 @@ paths:
                       - workspace
                       - explicit
                   rule:
-                    discriminator:
-                      propertyName: kind
                     oneOf:
-                      - type: object
-                        properties:
-                          kind:
-                            type: string
-                            enum:
+                      - discriminator:
+                          propertyName: kind
+                        oneOf:
+                          - type: object
+                            properties:
+                              kind:
+                                type: string
+                                enum:
+                                  - builtin
+                              builtin:
+                                type: string
+                                minLength: 1
+                                maxLength: 200
+                              params:
+                                type: object
+                                additionalProperties: {}
+                            required:
+                              - kind
                               - builtin
-                          builtin:
-                            type: string
-                            minLength: 1
-                            maxLength: 200
-                          params:
-                            type: object
-                            additionalProperties: {}
-                        required:
-                          - kind
-                          - builtin
-                        additionalProperties: false
+                            additionalProperties: false
+                          - type: object
+                            properties:
+                              kind:
+                                type: string
+                                enum:
+                                  - expression
+                              expression:
+                                type: string
+                                minLength: 1
+                                maxLength: 4096
+                              on_false:
+                                type: string
+                                enum:
+                                  - ask
+                                  - deny
+                              reason:
+                                type: string
+                                maxLength: 1024
+                            required:
+                              - kind
+                              - expression
+                              - on_false
+                            additionalProperties: false
+                          - type: object
+                            properties:
+                              kind:
+                                type: string
+                                enum:
+                                  - dogwood
+                              policy:
+                                type: string
+                                minLength: 1
+                                maxLength: 65536
+                              applies_to:
+                                type: string
+                                enum:
+                                  - all_tools
+                                  - mcp_tools
+                              history:
+                                type: string
+                                enum:
+                                  - session
+                                  - principal
+                              mcp_manifests:
+                                type: array
+                                items:
+                                  type: object
+                                  properties:
+                                    server:
+                                      type: string
+                                      minLength: 1
+                                    url:
+                                      type: string
+                                      format: uri
+                                    tools:
+                                      type: array
+                                      items:
+                                        type: object
+                                        additionalProperties: {}
+                                      maxItems: 1000
+                                  required:
+                                    - server
+                                    - url
+                                    - tools
+                                  additionalProperties: false
+                                maxItems: 64
+                            required:
+                              - kind
+                              - policy
+                            additionalProperties: false
                       - type: object
                         properties:
                           kind:
                             type: string
-                            enum:
-                              - expression
-                          expression:
-                            type: string
-                            minLength: 1
-                            maxLength: 4096
-                          on_false:
-                            type: string
-                            enum:
-                              - ask
-                              - deny
-                          reason:
-                            type: string
-                            maxLength: 1024
                         required:
                           - kind
-                          - expression
-                          - on_false
-                        additionalProperties: false
+                        additionalProperties: true
+                  warnings:
+                    type: array
+                    items:
+                      type: string
                   metadata:
                     default: {}
                     type: object
@@ -1441,6 +2190,7 @@ paths:
                   - name
                   - description
                   - enabled
+                  - mode
                   - phases
                   - scope
                   - rule
@@ -1577,6 +2327,7 @@ paths:
                             - turn
                             - session
                             - subject_window
+                            - workspace_window
                         verdicts:
                           type: array
                           items:
@@ -1597,6 +2348,91 @@ paths:
                         - paramsSchema
                 required:
                   - data
+  /apis/policy.runorca.ai/v1/policyschemas/dogwood:
+    get:
+      tags:
+        - guardrails
+        - orca-extension
+      parameters:
+        - name: anthropic-beta
+          in: header
+          schema:
+            type: string
+            description: Accepted for Anthropic SDK compatibility and ignored. No value of this header changes request handling. Typed as a free-form string rather than an enum because this service recognises no specific beta value.
+      operationId: guardrails.dogwoodSchema
+      responses:
+        '200':
+          description: '200'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  base_schema:
+                    type: string
+                  event_schemas:
+                    type: object
+                    properties:
+                      session:
+                        type: string
+                      principal:
+                        type: string
+                    required:
+                      - session
+                      - principal
+                  language_version:
+                    type: string
+                  core_version:
+                    type: string
+                  limits:
+                    type: object
+                    additionalProperties: {}
+                required:
+                  - base_schema
+                  - event_schemas
+                  - language_version
+                  - core_version
+                  - limits
+        '403':
+          description: '403'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  type:
+                    type: string
+                    enum:
+                      - error
+                  error:
+                    type: object
+                    properties:
+                      type:
+                        type: string
+                        enum:
+                          - invalid_request_error
+                          - authentication_error
+                          - billing_error
+                          - permission_error
+                          - not_found_error
+                          - conflict_error
+                          - request_too_large
+                          - rate_limit_error
+                          - timeout_error
+                          - overloaded_error
+                          - api_error
+                      message:
+                        type: string
+                    required:
+                      - type
+                      - message
+                  request_id:
+                    type: string
+                    nullable: true
+                required:
+                  - type
+                  - error
+                  - request_id
   /apis/pricing.runorca.ai/v1:
     get:
       summary: Resources served by the pricing.runorca.ai/v1 group.

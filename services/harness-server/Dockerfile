@@ -2,6 +2,18 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # build context: repo root.  Used as: docker build -f services/harness-server/Dockerfile .
+FROM node:22-slim AS dogwood-source
+COPY vendor/dogwood /vendor/dogwood
+COPY scripts/verify-dogwood-artifacts.mjs /verify-dogwood-artifacts.mjs
+RUN node /verify-dogwood-artifacts.mjs /vendor/dogwood && \
+    mkdir /core && tar -xzf /vendor/dogwood/orca-dogwood-source-0.1.0.tgz -C /core
+
+FROM rust:1.94.0-slim-bookworm AS dogwood-clock
+WORKDIR /core
+COPY --from=dogwood-source /core /core
+RUN cargo build --locked --release -p orca-dogwood-clock && \
+    sha256sum target/release/orca-dogwood-clock > /clock.sha256
+
 FROM node:22-slim AS build
 WORKDIR /app
 # Build the patched Pulsar binding against the pinned static C++ client.
@@ -13,6 +25,7 @@ RUN npm install -g pnpm@9.15.9
 # Copy workspace manifests for dependency installation layer caching
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json .npmrc ./
 COPY patches ./patches
+COPY vendor/dogwood ./vendor/dogwood
 COPY packages/codex-harness/package.json ./packages/codex-harness/
 COPY packages/sdk-harness/package.json ./packages/sdk-harness/
 COPY packages/pi-harness/package.json ./packages/pi-harness/
@@ -83,6 +96,11 @@ RUN pnpm -F @orca/harness-catalog build && \
 # Produce a self-contained deploy directory with all node_modules resolved
 # (no broken workspace symlinks in the runtime image)
 RUN pnpm deploy --filter @orca/harness-server --prod /deploy
+COPY --from=dogwood-clock /core/target/release/orca-dogwood-clock /tmp/orca-dogwood-clock
+COPY --from=dogwood-clock /clock.sha256 /tmp/clock.sha256
+COPY --from=dogwood-source /vendor/dogwood/provenance.json /tmp/dogwood-provenance.json
+COPY scripts/install-dogwood-clock.mjs scripts/verify-dogwood-artifacts.mjs /tmp/
+RUN node /tmp/install-dogwood-clock.mjs /deploy /tmp/orca-dogwood-clock /tmp/clock.sha256 /tmp/dogwood-provenance.json
 
 FROM node:22-slim AS runtime
 WORKDIR /app

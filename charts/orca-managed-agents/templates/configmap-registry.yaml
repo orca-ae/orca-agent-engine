@@ -8,6 +8,10 @@ metadata:
     {{- include "orca-managed-agents.labels" . | nindent 4 }}
 data:
   NODE_ENV: production
+  GUARDRAILS_DOGWOOD_ENABLED: {{ .Values.guardrails.dogwood.enabled | quote }}
+  AI_GATEWAY_DOGWOOD_ENABLED: {{ .Values.aiGateway.registryGuardrails.dogwood | quote }}
+  GUARDRAILS_OBSERVE_ENABLED: {{ .Values.registry.guardrails.observeEnabled | quote }}
+  GUARDRAILS_MONTHLY_BUDGETS_ENABLED: {{ .Values.registry.guardrails.monthlyBudgetsEnabled | quote }}
   CONDITIONAL_PRICING_ENABLED: {{ .Values.registry.pricing.conditionalEnabled | quote }}
   {{- if .Values.registry.pricing.sources }}
   PRICE_SOURCES_JSON: {{ .Values.registry.pricing.sources | toJson | quote }}

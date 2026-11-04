@@ -11,6 +11,7 @@ export function effectiveGuardrailBundle(input: {
     session: { id: string; runtime_revision: number };
     guardrails: PreparedExecutionV2['guardrails'];
     guardrail_state: Record<string, unknown>;
+    guardrail_workspace_window_state?: Record<string, unknown>;
   };
   organizationId: string;
   issuedAt: Date;
@@ -24,7 +25,7 @@ export function effectiveGuardrailBundle(input: {
   expires_at: string;
   seed_verdict: 'allow';
   guardrails: PreparedExecutionV2['guardrails'];
-  guardrail_state: { session: Record<string, unknown> };
+  guardrail_state: { session: Record<string, unknown>; workspace_window?: Record<string, unknown> };
 } {
   const { prepared, organizationId, issuedAt } = input;
   const revision = String(prepared.session.runtime_revision);
@@ -36,7 +37,7 @@ export function effectiveGuardrailBundle(input: {
   const canonicalGuardrails = [...prepared.guardrails].sort((left, right) => {
     const leftKey = `${left.tier}\0${left.id}\0${left.subagent_id ?? ''}`;
     const rightKey = `${right.tier}\0${right.id}\0${right.subagent_id ?? ''}`;
-    return leftKey.localeCompare(rightKey);
+    return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
   });
   const digest = createHash('sha256')
     .update(JSON.stringify({ scope, revision, guardrails: canonicalGuardrails }))
@@ -53,6 +54,11 @@ export function effectiveGuardrailBundle(input: {
     expires_at: new Date(issuedAt.getTime() + 60 * 60 * 1000).toISOString(),
     seed_verdict: 'allow',
     guardrails: prepared.guardrails,
-    guardrail_state: { session: prepared.guardrail_state },
+    guardrail_state: {
+      session: prepared.guardrail_state,
+      ...(prepared.guardrail_workspace_window_state
+        ? { workspace_window: prepared.guardrail_workspace_window_state }
+        : {}),
+    },
   };
 }
