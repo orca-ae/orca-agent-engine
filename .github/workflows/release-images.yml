@@ -227,7 +227,7 @@ jobs:
           outputs: ${{ needs.release-metadata.outputs.publish == 'true' && 'type=image,push-by-digest=true,name-canonical=true,push=true' || '' }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=release-${{ matrix.image }}-${{ matrix.platform.pair }}
-          cache-to: type=gha,mode=max,scope=release-${{ matrix.image }}-${{ matrix.platform.pair }}
+          cache-to: type=gha,mode=max,ignore-error=true,scope=release-${{ matrix.image }}-${{ matrix.platform.pair }}
           provenance: ${{ needs.release-metadata.outputs.publish == 'true' }}
           sbom: ${{ needs.release-metadata.outputs.publish == 'true' }}
 
