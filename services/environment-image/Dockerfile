@@ -30,6 +30,7 @@ RUN npm install -g pnpm@9.15.9
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json .npmrc ./
 COPY patches ./patches
 COPY vendor/dogwood ./vendor/dogwood
+COPY packages/agent-event-contract/package.json ./packages/agent-event-contract/
 COPY packages/codex-harness/package.json ./packages/codex-harness/
 COPY packages/sdk-harness/package.json ./packages/sdk-harness/
 COPY packages/pi-harness/package.json ./packages/pi-harness/
@@ -48,6 +49,8 @@ RUN pnpm install --frozen-lockfile \
 
 # Build the workspace library deps (harness-tunnel: both; sandbox-runtime +
 # transcript-store-types: session-runner) before the two binaries.
+COPY packages/agent-event-contract/tsconfig.json ./packages/agent-event-contract/
+COPY packages/agent-event-contract/src ./packages/agent-event-contract/src
 COPY packages/codex-harness/tsconfig.json ./packages/codex-harness/
 COPY packages/codex-harness/src ./packages/codex-harness/src
 COPY packages/sdk-harness/tsconfig.json ./packages/sdk-harness/
@@ -67,7 +70,8 @@ COPY packages/sandbox-runtime/tsconfig.json ./packages/sandbox-runtime/
 COPY packages/sandbox-runtime/src ./packages/sandbox-runtime/src
 COPY packages/transcript-store-types/tsconfig.json ./packages/transcript-store-types/
 COPY packages/transcript-store-types/src ./packages/transcript-store-types/src
-RUN pnpm -F @orca/harness-catalog build && \
+RUN pnpm -F @orca/agent-event-contract build && \
+    pnpm -F @orca/harness-catalog build && \
     pnpm -F @orca/sdk-harness build && \
     pnpm -F @orca/dsh-harness build && \
     pnpm -F @orca/pi-harness build && \
