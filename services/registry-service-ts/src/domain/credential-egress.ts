@@ -78,7 +78,7 @@ export interface GatewayEgressInput {
   gatewayLlmUrl?: string;
   /** Scoped session JWT (`aud='ai-gateway'`) the rewritten MCP servers carry. */
   sessionJwt: string;
-  /** Scoped LLM-proxy JWT (`aud='llm-proxy'`), when an LLM gateway is configured. */
+  /** LLM JWT: scoped Session audience for native Pi/SDKs; legacy CLI `llm-proxy` otherwise. */
   llmJwt?: string;
   /** The agent's MCP servers (logical name + original URL) to rewrite. */
   mcpServers: AgentMcpServer[];

@@ -1430,7 +1430,7 @@ export class SessionLoop {
         } else if (event.kind === 'orca.native_usage_set') {
           if (
             sawSet ||
-            !['completed', 'aborted', 'failed'].includes(String(payload.outcome)) ||
+            !['completed', 'aborted', 'error', 'failed'].includes(String(payload.outcome)) ||
             payload.turn_id !== turnId ||
             !Array.isArray(payload.expected_reports) ||
             payload.expected_reports.length !== expected.size ||

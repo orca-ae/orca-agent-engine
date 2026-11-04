@@ -200,7 +200,7 @@ describe('session JWT mint (integration)', () => {
     }
   });
 
-  it.each(['pi_sdk', 'dsh_sdk'] as const)(
+  it.each(['pi', 'pi_sdk', 'dsh_sdk'] as const)(
     'pins %s native route and model grants to the effective persisted provider',
     async (harness) => {
       const { db } = await getTestDb();
@@ -263,7 +263,9 @@ describe('session JWT mint (integration)', () => {
           .where(and(eq(sessions.workspaceId, ws), eq(sessions.id, sessionId)));
         const denied = await mint();
         expect(denied.status).toBe(403);
-        expect(await denied.text()).toContain('llm-pi-deepseek-openai-completions');
+        expect(await denied.text()).toContain(
+          harness === 'pi' ? 'Anthropic Messages' : 'llm-pi-deepseek-openai-completions',
+        );
       } finally {
         await piApp.close();
       }

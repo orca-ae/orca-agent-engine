@@ -14,6 +14,7 @@ import {
   createRunnerSandboxRuntime,
   resourceManifestDigest,
   NATIVE_USAGE_SOURCE,
+  nativeCompletionIsComplete,
   type NativeCompletion,
   type ResourceManifest,
   type SandboxHandle,
@@ -297,6 +298,54 @@ it.each([
   });
   expect(f.controller.readyForTurn).toBe(false);
 });
+
+it.each([true, false])(
+  'seals Pi error settlement while preserving report completeness (%s)',
+  async (complete) => {
+    const report = {
+      id: 'report_1',
+      provider: 'anthropic',
+      semantics: 'delta',
+      complete,
+      ...(complete
+        ? {
+            model: 'actual-model',
+            usage: {
+              input_tokens: 3,
+              output_tokens: 2,
+              cache_read_input_tokens: 0,
+              cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 0 },
+            },
+          }
+        : {}),
+    };
+    const f = await loopFixture([
+      { kind: 'orca.native_usage_started', payload: { turn_id: 'evt_turn', id: report.id } },
+      { kind: 'orca.native_usage', payload: { turn_id: 'evt_turn', report } },
+      {
+        kind: 'orca.native_usage_set',
+        payload: { turn_id: 'evt_turn', outcome: 'error', expected_reports: [report.id] },
+      },
+      { kind: 'agent.turn_completed', payload: {} },
+    ]);
+    for await (const _line of f.loop.runTurn(
+      'ses_fixture',
+      encode({ type: 'user.message', native_turn_id: 'evt_turn' }),
+      new AbortController().signal,
+    )) {
+      /* drain */
+    }
+    expect(f.controller.pendingCheckpoint!.completion).toMatchObject({
+      outcome: 'failed',
+      report_set_sealed: true,
+      expected_reports: [report.id],
+      reports: [report],
+    });
+    expect(f.controller.pendingCheckpoint!.completion!.error).toBeUndefined();
+    expect(nativeCompletionIsComplete(f.controller.pendingCheckpoint!.completion!)).toBe(complete);
+    expect(f.controller.readyForTurn).toBe(false);
+  },
+);
 
 it('keeps model submission failures explicit even when provider reports normal settlement', async () => {
   const f = await loopFixture(

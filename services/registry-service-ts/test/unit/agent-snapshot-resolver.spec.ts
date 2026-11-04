@@ -208,6 +208,7 @@ describe('AgentSnapshotResolver (gateway egress)', () => {
   };
 
   it.each([
+    ['pi', 'anthropic', 'claude-sonnet-4-6', 'llm-pi-anthropic-anthropic-messages'],
     ['codex_sdk', 'openai', 'gpt-5.4', 'llm-responses'],
     ['pi_sdk', 'openai', 'gpt-5.4', 'llm-pi-openai-openai-responses'],
     ['pi_sdk', 'anthropic', 'claude-sonnet-4-6', 'llm-pi-anthropic-anthropic-messages'],
@@ -300,6 +301,116 @@ describe('AgentSnapshotResolver (gateway egress)', () => {
           llmPolicy: { routes: ['llm-responses'], models: ['not-allowed-*'] },
         }).resolve(SESSION_ID),
       ).rejects.toThrow('SESSION_JWT_LLM');
+    },
+  );
+
+  it.each([undefined, 120, 1800])(
+    'uses native Pi scoped claims with configured TTL %s',
+    async (ttl) => {
+      const minter = new SessionJwtMinter({
+        privateKeyPem: privateKey,
+        issuer: 'orca-registry',
+        audience: 'configured-gateway',
+        ttlSecs: 300,
+      });
+      const loader = new FakeRecordLoader({
+        ...loaderData,
+        session: {
+          ...loaderData.session,
+          agentOverrides: { model: { provider: 'anthropic', id: 'claude-sonnet-4-6' } },
+        },
+        agent: {
+          ...loaderData.agent,
+          metadata: { harness: 'pi', mode: 'colocated' },
+          skills: [],
+        },
+      });
+      const policy = {
+        routes: ['llm-pi-anthropic-anthropic-messages'],
+        models: ['claude-sonnet-4-6'],
+      };
+      const options = {
+        loader,
+        minter,
+        gatewayMcpUrl: 'https://gateway.example/v1/mcp',
+        gatewayLlmUrl: 'https://gateway.example/v1/llm',
+        ...(ttl === undefined ? {} : { llmJwtTtlSecs: ttl }),
+      };
+      const snapshot = await new AgentSnapshotResolver({ ...options, llmPolicy: policy }).resolve(
+        SESSION_ID,
+      );
+      if (snapshot?.egress.mode !== 'gateway') throw new Error('expected gateway');
+      const claims = await minter.verify(snapshot.egress.gateway.llm_jwt!);
+      expect(claims).toMatchObject({
+        audience: 'configured-gateway',
+        workspaceId: WORKSPACE_ID,
+        sessionId: SESSION_ID,
+        agentId: 'agt_1',
+        llmRoutes: policy.routes,
+        llmModels: ['claude-sonnet-4-6'],
+        mcpServerNames: [],
+        vaultIds: [],
+        credentialIds: [],
+      });
+      const decoded = decodeJwt(snapshot.egress.gateway.llm_jwt!);
+      expect(decoded.exp! - decoded.iat!).toBe(Math.max(ttl ?? 0, 660));
+      const mcp = await minter.verify(snapshot.egress.gateway.session_jwt);
+      expect(mcp.llmRoutes).toEqual([]);
+      expect(mcp.llmModels).toEqual([]);
+      for (const llmPolicy of [undefined, { ...policy, routes: [] }, { ...policy, models: [] }]) {
+        await expect(
+          new AgentSnapshotResolver({ ...options, ...(llmPolicy ? { llmPolicy } : {}) }).resolve(
+            SESSION_ID,
+          ),
+        ).rejects.toThrow('SESSION_JWT_LLM');
+      }
+    },
+  );
+
+  it('rejects an unqualified native Pi Gateway provider even when deployment grants it', async () => {
+    const resolver = new AgentSnapshotResolver({
+      loader: new FakeRecordLoader({
+        ...loaderData,
+        agent: {
+          ...loaderData.agent,
+          metadata: { harness: 'pi', mode: 'colocated' },
+          model: { provider: 'openai', id: 'gpt-5.4' },
+          skills: [],
+        },
+      }),
+      minter: makeMinter(),
+      gatewayMcpUrl: 'https://gateway.example/v1/mcp',
+      gatewayLlmUrl: 'https://gateway.example/v1/llm',
+      llmPolicy: { routes: ['llm-pi-openai-openai-responses'], models: ['gpt-*'] },
+    });
+    await expect(resolver.resolve(SESSION_ID)).rejects.toThrow('Anthropic Messages');
+  });
+
+  it.each(['claude_code', 'codex', 'cursor', 'custom'])(
+    'preserves legacy dual-audience credentials for %s',
+    async (harness) => {
+      const minter = makeMinter();
+      const snapshot = await new AgentSnapshotResolver({
+        loader: new FakeRecordLoader({
+          ...loaderData,
+          agent: { ...loaderData.agent, metadata: { harness, mode: 'colocated' } },
+        }),
+        minter,
+        gatewayMcpUrl: 'https://gateway.example/v1/mcp',
+        gatewayLlmUrl: 'https://gateway.example/v1/llm',
+        llmPolicy: { routes: ['unrelated-route'], models: ['unrelated-model'] },
+      }).resolve(SESSION_ID);
+      if (snapshot?.egress.mode !== 'gateway') throw new Error('expected gateway');
+      const llm = await minter.verify(snapshot.egress.gateway.llm_jwt!, {
+        expectedAudience: LLM_PROXY_AUDIENCE,
+      });
+      expect(llm.llmRoutes).toEqual([]);
+      expect(llm.llmModels).toEqual([]);
+      const decoded = decodeJwt(snapshot.egress.gateway.llm_jwt!);
+      expect(decoded.exp! - decoded.iat!).toBe(DEFAULT_LLM_PROXY_JWT_TTL_SECS);
+      await expect(minter.verify(snapshot.egress.gateway.session_jwt)).resolves.toMatchObject({
+        audience: 'ai-gateway',
+      });
     },
   );
 

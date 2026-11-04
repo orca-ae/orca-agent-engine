@@ -705,13 +705,15 @@ export class PiCliHarness implements AgentHarness {
     }
     const model = effectiveModel(input.agentSnapshot.model_id, this.opts.modelDefault);
     const models = model !== undefined ? [{ id: model }] : [];
+    const nativeGateway = this.opts.baseURL !== undefined;
     const config = {
       providers: {
         orca: {
-          baseUrl: baseURL,
+          baseUrl: nativeGateway ? new URL('/v1/proxy/anthropic', baseURL).href : baseURL,
           api: 'anthropic-messages',
           apiKey,
-          authHeader: this.opts.baseURL !== undefined,
+          authHeader: nativeGateway,
+          ...(nativeGateway ? { headers: { 'X-Orca-Session-Id': input.sessionId } } : {}),
           models,
         },
       },
