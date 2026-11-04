@@ -1065,6 +1065,11 @@ export const internalContract = c.router({
         expires_at: z.number(),
       }),
       404: z.object({ error: z.string() }),
+      409: z.object({
+        error: z.literal('invalid_runtime_binding'),
+        resource_type: z.string().optional(),
+        resource_id: z.string().optional(),
+      }),
     },
   },
   /**

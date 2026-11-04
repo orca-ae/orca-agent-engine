@@ -196,7 +196,7 @@ export interface ServiceConfig {
    * set alongside {@link aiGatewayMcpUrl}, the gateway egress config carries an
    * LLM-proxy base URL + a scoped JWT so the runner reaches the LLM through the
    * gateway without holding a provider key: `aud='llm-proxy'`, except that a
-   * `codex_sdk` or `pi_sdk` session gets the session JWT audience with
+   * `pi`, `codex_sdk`, `pi_sdk` or `dsh_sdk` session gets the session JWT audience with
    * `llm_routes`/`llm_models` claims. Optional.
    */
   aiGatewayLlmUrl?: string;
@@ -209,6 +209,7 @@ export interface ServiceConfig {
    * when unset; a non-positive value falls back to that default in the resolver.
    * The internal SDK ai-gateway mint path also uses this setting: `codex_sdk`,
    * `pi_sdk` and `dsh_sdk` tokens live for this value or 660s, whichever is longer.
+   * Native `pi` uses the same bounded-turn lifetime in snapshots and internal minting.
    * The harness requires its effective turn deadline plus 30s remaining; refresh
    * occurs between turns, not mid-turn. Other ai-gateway tokens are unaffected.
    */

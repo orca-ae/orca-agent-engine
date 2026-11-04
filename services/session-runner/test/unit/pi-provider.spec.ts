@@ -175,6 +175,57 @@ describe('pi provider — headless pi over RPC (fake CLI)', () => {
     await sandbox.destroy();
   });
 
+  it.each([undefined, 'https://gateway.example/legacy/llm'])(
+    'renders and refreshes native Pi model credentials for %s',
+    async (baseURL) => {
+      const sandbox = await new InMemorySandboxRuntime().acquire({});
+      const child = scriptedNativeCliWithDeath();
+      const launch = vi.fn(() => child.cli);
+      const harness = new PiCliHarness(
+        fakeHarnessOptions(sandbox, {
+          apiKey: 'first-credential',
+          ...(baseURL ? { baseURL } : {}),
+          launch,
+        }),
+      );
+      try {
+        const starting = harness.start({
+          workspaceId: 'ws_1',
+          sessionId: 'ses_pi',
+          agentSnapshot: {},
+          sandboxResources: {
+            revision: 'a'.repeat(64),
+            executionId: 'exec_1',
+            placementId: 'placement_1',
+            policy: buildSandboxWritePolicy([]),
+          },
+        });
+        await new Promise((resolve) => setImmediate(resolve));
+        child.say(JSON.stringify({ type: 'orca.native_ready', version: 1 }));
+        await waitFor(() => child.frames.length === 1);
+        child.say(JSON.stringify({ type: 'response', id: 'orca_native_ready', success: true }));
+        await starting;
+        const readConfig = () =>
+          JSON.parse(readFileSync(join(rootDirOf(sandbox), '.pi-agent-home/models.json'), 'utf8'))
+            .providers.orca;
+        expect(readConfig()).toMatchObject({
+          baseUrl: baseURL
+            ? 'https://gateway.example/v1/proxy/anthropic'
+            : 'https://api.anthropic.com',
+          apiKey: 'first-credential',
+          authHeader: !!baseURL,
+          ...(baseURL ? { headers: { 'X-Orca-Session-Id': 'ses_pi' } } : {}),
+        });
+        await harness.refreshCredentials('second-credential');
+        expect(readConfig()).toMatchObject({ apiKey: 'second-credential' });
+        expect(launch).toHaveBeenCalledTimes(1);
+      } finally {
+        await harness.stop('replica.shutting_down');
+        await sandbox.destroy();
+      }
+    },
+  );
+
   it.each(['always_allow', 'always_deny', 'always_ask'] as const)(
     'uses Orca permission names for Native File tools (%s)',
     async (policy) => {

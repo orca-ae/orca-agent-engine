@@ -51,6 +51,7 @@ import {
   dshLlmRoute,
   piLlmRoute,
   validateHarnessModel,
+  type ResolvedHarness,
 } from '@orca/harness-catalog';
 import {
   normalizeMemoryRelativePath,
@@ -63,6 +64,7 @@ import type { DbClient } from '../persistence/postgres/client.js';
 import {
   loadSessionExecutionOwner,
   loadSessionHarnessBinding,
+  SessionHarnessBindingError,
 } from '../domain/session-harness-binding.js';
 import {
   HarnessStateWriteError,
@@ -1875,9 +1877,9 @@ export function registerInternalRoutes(
     const guardrailIds = [
       ...new Set([...guardrailIdsFromOverrides(session.agentOverrides), ...snapshotGuardrailIds]),
     ];
-    const includeGuardrailClaims = minter.audienceFor(mintOpts) === 'ai-gateway';
-    const includeLlmClaims =
-      sessionJwtLlmPolicy !== undefined && minter.audienceFor(mintOpts) === 'ai-gateway';
+    const gatewayAudience = mcpBinding.harnessType === 'pi' ? minter.audienceFor() : 'ai-gateway';
+    const includeGuardrailClaims = minter.audienceFor(mintOpts) === gatewayAudience;
+    const includeLlmClaims = sessionJwtLlmPolicy !== undefined && includeGuardrailClaims;
     if (
       includeGuardrailClaims &&
       !sessionJwtLlmPolicy &&
@@ -1885,23 +1887,42 @@ export function registerInternalRoutes(
     )
       return reply.code(403).send({ error: 'dsh_sdk requires scoped LLM policy' });
     let llmRoutes = sessionJwtLlmPolicy?.routes;
-    let dshModels: string[] | undefined;
+    let boundModels: string[] | undefined;
     if (includeLlmClaims) {
-      const selection = await loadSessionHarnessBinding(
-        db,
-        workspaceId,
-        session.agentId,
-        session.agentVersion,
-      );
-      // The SDK keeps one bearer throughout its bounded turn, including client
+      let selection: ResolvedHarness;
+      try {
+        selection = await loadSessionHarnessBinding(
+          db,
+          workspaceId,
+          session.agentId,
+          session.agentVersion,
+        );
+      } catch (error) {
+        if (error instanceof SessionHarnessBindingError)
+          return reply.code(409).send({ error: 'invalid_runtime_binding' });
+        throw error;
+      }
+      // Native Pi and SDKs keep one bearer throughout a bounded turn, including client
       // waits. Only the persisted harness and trusted operator configuration
       // determine its lifetime; the request body cannot extend credentials.
-      const sdkTtlSecs = sdkGatewayJwtTtlSecs(selection.harness, options.llmJwtTtlSecs);
+      const sdkTtlSecs = sdkGatewayJwtTtlSecs(
+        selection.harness === 'pi' ? 'pi_sdk' : selection.harness,
+        options.llmJwtTtlSecs,
+      );
       if (sdkTtlSecs !== undefined) mintOpts.ttlSecs = sdkTtlSecs;
-      if (selection.harness === 'pi_sdk' || selection.harness === 'dsh_sdk') {
+      if (
+        selection.harness === 'pi' ||
+        selection.harness === 'pi_sdk' ||
+        selection.harness === 'dsh_sdk'
+      ) {
         const override = (session.agentOverrides as { model?: unknown } | null)?.model;
         const model = PreparedAgentModelSchema.safeParse(override ?? mcpBinding.snapshot.model);
         if (!model.success) return reply.code(409).send({ error: 'invalid_runtime_binding' });
+        if (selection.harness === 'pi' && model.data.provider !== 'anthropic')
+          return reply
+            .code(403)
+            .send({ error: 'Native Pi Gateway requires an Anthropic Messages model' });
+        if (selection.harness === 'pi') boundModels = [model.data.id];
         if (
           selection.harness === 'dsh_sdk' &&
           validateHarnessModel({ harness: 'dsh_sdk' }, model.data)
@@ -1918,7 +1939,7 @@ export function registerInternalRoutes(
               error:
                 'dsh_sdk requires ' + route + ' and its model in SESSION_JWT_LLM_ROUTES/MODELS',
             });
-          dshModels = grants.llm_models;
+          boundModels = grants.llm_models;
         }
         if (!sessionJwtLlmPolicy.routes.includes(route))
           return reply
@@ -1932,7 +1953,7 @@ export function registerInternalRoutes(
       try {
         llmModels = intersectLlmModels(
           sessionJwtLlmPolicy.models,
-          dshModels ??
+          boundModels ??
             (await loadEffectiveSessionAgentModels({
               db,
               workspaceId,
@@ -2444,9 +2465,9 @@ async function intersectEffectiveMcpServerNames(
   workspaceId: string,
   session: ActiveRuntimeSession,
   requested: unknown,
-): Promise<{ names: string[]; snapshot: PreparedAgentSnapshot } | null> {
+): Promise<{ names: string[]; snapshot: PreparedAgentSnapshot; harnessType: string } | null> {
   const rows = await db
-    .select({ snapshot: agentVersions.snapshot })
+    .select({ snapshot: agentVersions.snapshot, harnessType: agents.harnessType })
     .from(agentVersions)
     .innerJoin(
       agents,
@@ -2465,7 +2486,9 @@ async function intersectEffectiveMcpServerNames(
       ),
     )
     .limit(1);
-  const parsed = PreparedAgentSnapshotSchema.safeParse(rows[0]?.snapshot);
+  const row = rows[0];
+  if (!row) return null;
+  const parsed = PreparedAgentSnapshotSchema.safeParse(row.snapshot);
   if (!parsed.success) return null;
 
   const effective = mcpServerNames(
@@ -2479,6 +2502,7 @@ async function intersectEffectiveMcpServerNames(
   return {
     names: [...new Set(requestedNames)].filter((name) => allowed.has(name)),
     snapshot: parsed.data,
+    harnessType: row.harnessType,
   };
 }
 

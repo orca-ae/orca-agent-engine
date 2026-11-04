@@ -63,7 +63,7 @@ import {
 export const DEFAULT_BASIC_USERNAME = 'x-access-token';
 
 /**
- * Audience claim on the LLM-proxy JWT. Distinct from the MCP/session JWT's
+ * Audience claim retained by legacy CLI LLM-proxy JWTs. Distinct from the MCP/session JWT's
  * `aud='ai-gateway'` so the external gateway's LLM route verifies it
  * independently and a leaked LLM token can't be replayed against the MCP route
  * (and vice versa). The gateway MUST verify `aud='llm-proxy'` end to end.
@@ -753,9 +753,8 @@ export class AgentSnapshotResolver {
     // snapshot. The JWT carries the FULL session vault_ids allowlist (not just the
     // matched ones) — per-call X-Orca-Vault-Id headers narrow it at request time,
     // and the gateway only accepts a vault_id present in the JWT.
-    const nativeSdk = ['codex-sdk', 'pi-sdk', 'dsh-sdk'].includes(
-      resolveAgentProvider(agent.metadata),
-    );
+    const provider = resolveAgentProvider(agent.metadata);
+    const scopedGateway = ['codex-sdk', 'pi-sdk', 'dsh-sdk', 'pi'].includes(provider);
     let sessionJwt = '';
     if (serverNames.length > 0) {
       const minted = await this.minter.mint(
@@ -774,7 +773,7 @@ export class AgentSnapshotResolver {
           credential_ids: [],
           ...guardrailClaims,
         },
-        nativeSdk ? { ttlSecs: 660 } : undefined,
+        scopedGateway ? { ttlSecs: 660 } : undefined,
       );
       sessionJwt = minted.token;
     }
@@ -791,31 +790,30 @@ export class AgentSnapshotResolver {
     };
     if (this.gatewayLlmUrl !== undefined) {
       input.gatewayLlmUrl = this.gatewayLlmUrl;
+      if (provider === 'pi' && agent.model.provider !== 'anthropic')
+        throw new Error('Native Pi Gateway requires an Anthropic Messages model');
       // The native provider route uses the gateway's configured audience and
       // exact model/route claims. Deployment policy is an upper bound, as on
       // the internal mint-jwt endpoint; absence never grants model access.
       const nativeRoute =
-        resolveAgentProvider(agent.metadata) === 'dsh-sdk'
+        provider === 'dsh-sdk'
           ? dshLlmRoute(agent.model.provider, agent.model.id)
-          : resolveAgentProvider(agent.metadata) === 'pi-sdk'
+          : provider === 'pi-sdk' || provider === 'pi'
             ? piLlmRoute(agent.model.provider, agent.model.id)
             : 'llm-responses';
-      if (
-        resolveAgentProvider(agent.metadata) === 'dsh-sdk' &&
-        !dshLlmGrants(this.llmPolicy, agent.model)
-      )
+      if (provider === 'dsh-sdk' && !dshLlmGrants(this.llmPolicy, agent.model))
         throw new Error(
           'dsh_sdk requires its catalog route/model in SESSION_JWT_LLM_ROUTES/MODELS',
         );
-      const models = nativeSdk
+      const models = scopedGateway
         ? intersectLlmModels(this.llmPolicy?.models ?? [], [agent.model.id])
         : [];
-      if (nativeSdk && (!this.llmPolicy?.routes.includes(nativeRoute) || models.length === 0)) {
+      if (scopedGateway && (!this.llmPolicy?.routes.includes(nativeRoute) || models.length === 0)) {
         throw new Error(
           `${resolveAgentProvider(agent.metadata)} requires ${nativeRoute} and its model in SESSION_JWT_LLM_ROUTES/MODELS`,
         );
       }
-      // Each native SDK refreshes the snapshot before each turn. Its token outlives the
+      // Native Pi and SDKs refresh the snapshot before each turn. The token outlives the
       // bounded ten-minute turn, including time spent waiting for approval.
       const llmMinted = await this.minter.mint(
         {
@@ -826,9 +824,9 @@ export class AgentSnapshotResolver {
           vault_ids: [],
           credential_ids: [],
           ...guardrailClaims,
-          ...(nativeSdk ? { llm_routes: [nativeRoute], llm_models: models } : {}),
+          ...(scopedGateway ? { llm_routes: [nativeRoute], llm_models: models } : {}),
         },
-        nativeSdk
+        scopedGateway
           ? { ttlSecs: Math.max(this.llmJwtTtlSecs, 660) }
           : { audience: LLM_PROXY_AUDIENCE, ttlSecs: this.llmJwtTtlSecs },
       );

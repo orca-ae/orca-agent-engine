@@ -80,7 +80,16 @@ policy, supplies logical-to-executable path guidance, and waits for extension an
 RPC readiness. Binding revision and placement incarnation identify reuse. An
 unchanged effective configuration refreshes the gateway scoped JWT or retains the
 runner's direct Anthropic credential without restarting Pi. Gateway snapshots use
-their LLM base URL and Bearer JWT. Direct/sidecar snapshots use
+the configured Session audience (default `ai-gateway`), a Bearer JWT scoped to
+`llm-pi-anthropic-anthropic-messages` and the effective model, and the Gateway origin's
+`/v1/proxy/anthropic` base URL. Pi sends `X-Orca-Session-Id`; the Gateway preserves
+raw Anthropic usage with `emit_usage=false` so Registry remains the accounting writer.
+Both snapshot and internal mint paths require the route/model deployment grants.
+The LLM token lifetime is at least 660 seconds, or the configured
+`AI_GATEWAY_LLM_JWT_TTL_SECS` if longer; credentials refresh between turns.
+The native Pi snapshot's MCP token uses a separate 660-second lifetime.
+Other legacy CLI providers retain their separate `llm-proxy` audience.
+Direct/sidecar snapshots use
 `https://api.anthropic.com` and the runner's `ANTHROPIC_API_KEY` fallback via
 `x-api-key`; the upstream key stays in the runner's private model configuration.
 Missing native model credentials reject startup before Pi launches. Both routes
@@ -106,8 +115,10 @@ turn. Registry commits Files, output events and usage before preparing a durable
 receipt. Prepared ACK releases frozen bytes; completed ACK follows durable terminal
 and completion markers. Reports remain until completed ACK. Cleanup keeps one small
 completed ACK tombstone until the next turn and resumes after restart. Failed and
-interrupted turns use the same ordering. Missing usage or lost unfrozen outputs
-remain explicitly incomplete and block subsequent turns for operator recovery.
+interrupted turns use the same ordering. Pi 0.87.1's native `error` settlement maps to
+a failed completion while preserving whether each usage report is complete.
+Missing usage or lost unfrozen outputs remain explicitly incomplete and block
+subsequent turns for operator recovery.
 
 ### Native capability upgrade and rollback
 
