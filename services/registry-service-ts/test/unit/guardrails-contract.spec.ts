@@ -165,6 +165,7 @@ describe('Guardrail response', () => {
   const wire = {
     id: 'grd_01ABC',
     type: 'guardrail',
+    mode: 'enforce',
     name: 'no-shell',
     description: '',
     enabled: true,

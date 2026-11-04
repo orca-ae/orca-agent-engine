@@ -160,6 +160,7 @@ export interface AgentSnapshotInput {
 
 /** One prepared guardrail on the Registry -> session-runner snapshot wire. */
 export interface SnapshotGuardrail {
+  mode?: 'enforce' | 'observe';
   id: string;
   name: string;
   tier: string;

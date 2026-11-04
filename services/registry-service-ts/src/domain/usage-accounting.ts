@@ -3,6 +3,9 @@
 
 // Shared Registry usage and durable guardrail accounting. Both authenticated
 // internal producers and Registry-owned runner bridges use this same state path.
+import { bumpPolicyStateRevision } from './policy-state-revision.js';
+
+import { isAgentEventId } from '@orca/agent-event-contract';
 import { and, eq, inArray, isNull, like, or, sql } from 'drizzle-orm';
 import {
   computeCostNanoUsd,
@@ -11,7 +14,12 @@ import {
   type ModelPriceEntry,
   type PriceSource,
 } from '@orca/harness-catalog';
-import { SHARED_USAGE_KEYS, STATE_ACTIONS, type StateAction } from '@orca/guardrails';
+import {
+  SHARED_USAGE_KEYS,
+  STATE_ACTIONS,
+  getGuardrailCounterPeriod,
+  type StateAction,
+} from '@orca/guardrails';
 import type { DbClient } from '../persistence/postgres/client.js';
 import { priceUsageReceipt, type UsagePricingContext } from '../pricing/usage-receipt.js';
 import {
@@ -324,6 +332,82 @@ export function usageCounterStateUpdates(
   ];
 }
 
+/** Monthly counters use the already accepted receipt cost; no second pricing lookup. */
+export function usageMonthlyCounterStateUpdates(
+  usage: UsageDelta,
+  costNanoUsd: bigint | null,
+): GuardrailStateWrite[] {
+  if (costNanoUsd === null && usageTokenTotal(usage) === 0) return [];
+  const priced = costNanoUsd !== null;
+  const action = priced ? ('increment' as const) : ('set' as const);
+  const value = priced ? Number(costNanoUsd) / 1_000_000_000 : 1;
+  return [
+    {
+      scope: 'subject_window',
+      key: priced ? SHARED_USAGE_KEYS.monthlyCostUsd : SHARED_USAGE_KEYS.monthlyCostUnpriced,
+      action,
+      value,
+    },
+    {
+      scope: 'workspace_window',
+      key: priced
+        ? SHARED_USAGE_KEYS.workspaceMonthlyCostUsd
+        : SHARED_USAGE_KEYS.workspaceMonthlyCostUnpriced,
+      action,
+      value,
+    },
+  ];
+}
+
+export const WORKSPACE_BUDGET_SUBJECT = '*';
+
+export function utcMonthWindow(now: Date): string {
+  return now.toISOString().slice(0, 7);
+}
+
+const MONTHLY_USAGE_KEYS = new Set<string>([
+  SHARED_USAGE_KEYS.monthlyCostUsd,
+  SHARED_USAGE_KEYS.monthlyCostUnpriced,
+  SHARED_USAGE_KEYS.workspaceMonthlyCostUsd,
+  SHARED_USAGE_KEYS.workspaceMonthlyCostUnpriced,
+]);
+
+/** One period selection for usage writers and policy-log snapshots/private writes. */
+export function guardrailCounterWindow(
+  scope: PersistedStateScope,
+  key: string,
+  now: Date,
+  rule?: unknown,
+): string {
+  const descriptor =
+    rule && typeof rule === 'object' ? (rule as { kind?: string; builtin?: string }) : undefined;
+  const period =
+    scope === 'workspace_window'
+      ? 'month'
+      : descriptor?.kind === 'builtin' && typeof descriptor.builtin === 'string'
+        ? (getGuardrailCounterPeriod(descriptor.builtin) ?? 'day')
+        : MONTHLY_USAGE_KEYS.has(key)
+          ? 'month'
+          : 'day';
+  return period === 'month' ? utcMonthWindow(now) : utcDateWindow(now);
+}
+
+export async function loadGuardrailBudgetState(
+  db: DbClient,
+  workspaceId: string,
+  subject: string,
+  now: Date,
+  monthly = false,
+) {
+  const daily = await loadGuardrailSubjectWindowState(db, workspaceId, subject, utcDateWindow(now));
+  if (!monthly) return { subject_window: daily };
+  const [principal, workspace] = await Promise.all([
+    loadGuardrailSubjectWindowState(db, workspaceId, subject, utcMonthWindow(now)),
+    loadGuardrailSubjectWindowState(db, workspaceId, WORKSPACE_BUDGET_SUBJECT, utcMonthWindow(now)),
+  ]);
+  return { subject_window: { ...daily, ...principal }, workspace_window: workspace };
+}
+
 function usageTokenTotal(usage: UsageDelta): number {
   return (
     usage.inputTokens +
@@ -448,7 +532,7 @@ function hasUsage(usage: UsageDelta): boolean {
 }
 
 /** Scopes that survive the turn they were written in. `turn` is not one. */
-export type PersistedStateScope = 'session' | 'subject_window';
+export type PersistedStateScope = 'session' | 'subject_window' | 'workspace_window';
 
 export interface GuardrailStateWrite {
   scope: PersistedStateScope;
@@ -460,6 +544,7 @@ export interface GuardrailStateWrite {
 export interface GuardrailStateBatch {
   /** Non-null whenever the batch carries a `subject_window` update. */
   subject: string | null;
+  turnEventId?: string;
   window: string | null;
   updates: GuardrailStateWrite[];
 }
@@ -471,7 +556,7 @@ export type GuardrailStateBodyResult =
 const MAX_STATE_KEY_LENGTH = 256;
 const MAX_STATE_SUBJECT_LENGTH = 256;
 const MAX_STATE_WINDOW_LENGTH = 64;
-const STATE_BODY_FIELDS = ['subject', 'window', 'updates'];
+const STATE_BODY_FIELDS = ['subject', 'window', 'updates', 'turn_event_id'];
 const STATE_UPDATE_FIELDS = ['scope', 'key', 'action', 'value'];
 
 function isPlainObject(raw: unknown): raw is Record<string, unknown> {
@@ -523,6 +608,9 @@ export function parseGuardrailStateBody(raw: unknown): GuardrailStateBodyResult 
     return bad('unexpected field in guardrail state payload');
   }
 
+  const turnEventId = raw['turn_event_id'];
+  if (turnEventId !== undefined && !isAgentEventId(turnEventId))
+    return bad('invalid turn event id');
   const subject = optionalBoundedString(raw['subject'], MAX_STATE_SUBJECT_LENGTH);
   if (!subject.ok) return bad('invalid subject');
   const window = optionalBoundedString(raw['window'], MAX_STATE_WINDOW_LENGTH);
@@ -542,7 +630,8 @@ export function parseGuardrailStateBody(raw: unknown): GuardrailStateBodyResult 
     if (scope === 'turn') {
       return bad('turn-scoped state is never persisted and must not be flushed');
     }
-    if (scope !== 'session' && scope !== 'subject_window') return bad('unknown state scope');
+    if (scope !== 'session' && scope !== 'subject_window' && scope !== 'workspace_window')
+      return bad('unknown state scope');
 
     const key = entry['key'];
     if (typeof key !== 'string' || key.length === 0 || key.length > MAX_STATE_KEY_LENGTH) {
@@ -558,7 +647,7 @@ export function parseGuardrailStateBody(raw: unknown): GuardrailStateBodyResult 
       Object.prototype.hasOwnProperty.call(entry, 'value') && entry['value'] !== undefined;
     const value = entry['value'];
 
-    if (scope === 'subject_window') {
+    if (scope === 'subject_window' || scope === 'workspace_window') {
       // `guardrail_counters` holds one number per key. Refusing the writes it
       // cannot hold is what keeps a cross-session budget honest.
       if (action === 'append') return bad('subject_window counters hold numbers, not arrays');
@@ -570,13 +659,27 @@ export function parseGuardrailStateBody(raw: unknown): GuardrailStateBodyResult 
     updates.push({ scope, key, action: action as StateAction, ...(hasValue ? { value } : {}) });
   }
 
+  if (
+    updates.some((update) => update.scope === 'workspace_window') &&
+    (window.value === null || !/^\d{4}-\d{2}$/.test(window.value))
+  )
+    return bad('a UTC month window is required for workspace_window updates');
   if (updates.some((update) => update.scope === 'subject_window')) {
-    if (subject.value === null || window.value === null) {
+    if (subject.value === WORKSPACE_BUDGET_SUBJECT) return bad('reserved workspace subject');
+    if (turnEventId === undefined && (subject.value === null || window.value === null)) {
       return bad('subject and window are required for subject_window updates');
     }
   }
 
-  return { ok: true, batch: { subject: subject.value, window: window.value, updates } };
+  return {
+    ok: true,
+    batch: {
+      subject: subject.value,
+      window: window.value,
+      updates,
+      ...(typeof turnEventId === 'string' ? { turnEventId } : {}),
+    },
+  };
 }
 
 /** The transaction handle `db.transaction` hands its callback. */
@@ -603,6 +706,7 @@ export async function applySessionStateUpdate(
   update: GuardrailStateWrite,
   now: Date,
 ): Promise<void> {
+  await bumpPolicyStateRevision(tx, workspaceId);
   const { key, action, value } = update;
   const rowKey = and(
     eq(guardrailState.workspaceId, workspaceId),
@@ -702,6 +806,7 @@ export async function applyCounterStateUpdate(
   update: GuardrailStateWrite,
   now: Date,
 ): Promise<void> {
+  await bumpPolicyStateRevision(tx, workspaceId);
   const { key, action, value } = update;
   const rowKey = and(
     eq(guardrailCounters.workspaceId, workspaceId),
@@ -878,10 +983,20 @@ export async function persistUsage(
   )) {
     await applySessionStateUpdate(tx, workspaceId, id, update, now);
   }
-  if (turnSubject !== null) {
-    for (const update of usageCounterStateUpdates(usage, costNanoUsd)) {
-      await applyCounterStateUpdate(tx, workspaceId, turnSubject, utcDateWindow(now), update, now);
-    }
+  for (const update of [
+    ...usageCounterStateUpdates(usage, costNanoUsd),
+    ...usageMonthlyCounterStateUpdates(usage, costNanoUsd),
+  ]) {
+    const subject = update.scope === 'workspace_window' ? WORKSPACE_BUDGET_SUBJECT : turnSubject;
+    if (subject !== null)
+      await applyCounterStateUpdate(
+        tx,
+        workspaceId,
+        subject,
+        guardrailCounterWindow(update.scope, update.key, now),
+        update,
+        now,
+      );
   }
   return 'applied' as const;
 }

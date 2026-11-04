@@ -1,6 +1,7 @@
 // Copyright The Orca Authors
 // SPDX-License-Identifier: Apache-2.0
 
+import { guardrailDecisionPayload } from '@orca/agent-event-contract';
 import {
   assertSdkTerminalUsage as assertCodexTerminalUsage,
   parseDshToolManifest,
@@ -40,7 +41,7 @@ import {
   BUILTIN_EVALUATORS,
   compileGuardrailRule,
   InMemoryGuardrailStateStore,
-  SHARED_USAGE_KEYS,
+  applyGuardrailUsageAcknowledgment,
   type StateUpdate,
   evaluateGuardrails,
   evaluateGuardrailExpression,
@@ -137,6 +138,7 @@ export class CodexSdkHarness implements AgentHarness {
   private uncertainCancellations = new Set<string>();
   private terminalUsageEvent: AgentEventInput | undefined;
   private guards: PreparedGuardrail[] = [];
+  private guardrailMonthWindow: string | undefined;
   private guardrailStore = new InMemoryGuardrailStateStore();
   private guarded = false;
   private accountingBlocked = false;
@@ -334,7 +336,9 @@ export class CodexSdkHarness implements AgentHarness {
         `${this.harnessName} stateful request rules require durable guardrail state and usage callbacks`,
       );
     if (
-      resolved.some((g) => g.stateScope === 'subject_window') &&
+      resolved.some(
+        (g) => g.stateScope === 'subject_window' || g.stateScope === 'workspace_window',
+      ) &&
       !this.opts.refreshGuardrailSubjectWindow
     )
       throw new Error(
@@ -362,6 +366,7 @@ export class CodexSdkHarness implements AgentHarness {
           ? assertPiCheckpointInstructions
           : assertCodexCheckpointInstructions)(this.checkpoint, input.agentSnapshot.system ?? '');
     this.input = input;
+    this.guardrailMonthWindow = input.guardrailMonthWindow;
     this.guardrailStore = new InMemoryGuardrailStateStore();
     this.applyGuardrailUsageState(restored.guardrailState ?? input.guardrailState ?? {});
     this.guards = resolved.map((g) => ({
@@ -369,13 +374,19 @@ export class CodexSdkHarness implements AgentHarness {
         id: g.id,
         name: g.name,
         enabled: true,
+        ...(g.mode ? { mode: g.mode } : {}),
         scope: 'explicit',
         phases: g.phases as PreparedGuardrail['guardrail']['phases'],
         // Request-only budgets have no later approval boundary. Unknown spend
         // must deny immediately unless the policy explicitly allows it.
         rule:
           g.rule.kind === 'builtin' &&
-          ['cost_budget', 'user_daily_cost_budget'].includes(g.rule.builtin)
+          [
+            'cost_budget',
+            'user_daily_cost_budget',
+            'user_monthly_cost_budget',
+            'workspace_monthly_cost_budget',
+          ].includes(g.rule.builtin)
             ? {
                 ...g.rule,
                 params: {
@@ -720,7 +731,9 @@ export class CodexSdkHarness implements AgentHarness {
     this.guardrailStore.resetTurn();
     if (this.guarded && this.opts.refreshGuardrailSubjectWindow) {
       const state = await this.opts.refreshGuardrailSubjectWindow(this.turnId!);
-      this.guardrailStore.replace('subject_window', state);
+      this.applyGuardrailUsageState(
+        state['subject_window'] !== undefined ? state : { subject_window: state },
+      );
     }
     const decision = this.evaluate({ phase: 'request', userText: text });
     if (decision.verdict !== 'allow')
@@ -766,7 +779,7 @@ export class CodexSdkHarness implements AgentHarness {
       // generation before releasing work; only acknowledged writes advance state.
       this.accountingBlocked = true;
       try {
-        await this.opts.onGuardrailState!(updates);
+        await this.opts.onGuardrailState!(updates, this.turnId, this.guardrailMonthWindow);
       } catch (cause) {
         this.failed = true;
         throw new DurableHarnessStateError(
@@ -1636,17 +1649,9 @@ export class CodexSdkHarness implements AgentHarness {
     return policy === 'always_allow' ? 'allow' : policy === 'always_deny' ? 'deny' : 'ask';
   }
   applyGuardrailUsageState(state: Readonly<Record<string, unknown>>): void {
-    this.guardrailStore.apply(
-      Object.entries(state).map(([key, value]) => ({
-        scope:
-          key === SHARED_USAGE_KEYS.dailyCostUsd || key === SHARED_USAGE_KEYS.dailyCostUnpriced
-            ? ('subject_window' as const)
-            : ('session' as const),
-        key,
-        action: 'set' as const,
-        value,
-      })),
-    );
+    if (typeof state['month_window'] === 'string')
+      this.guardrailMonthWindow = state['month_window'];
+    applyGuardrailUsageAcknowledgment(this.guardrailStore, state);
   }
 
   hasPendingGuardrailUsage(): boolean {
@@ -1659,7 +1664,7 @@ export class CodexSdkHarness implements AgentHarness {
   }
 
   private evaluate(event: Omit<GuardrailEvent, 'sessionId' | 'modelId'>, seed: Verdict = 'allow') {
-    return evaluateGuardrails(
+    const decision = evaluateGuardrails(
       this.guards,
       { ...event, sessionId: this.input!.sessionId, modelId: this.input!.agentSnapshot.model_id! },
       {
@@ -1669,6 +1674,9 @@ export class CodexSdkHarness implements AgentHarness {
         store: this.guardrailStore,
       },
     );
+    const payload = guardrailDecisionPayload({ phase: event.phase, decision });
+    if (payload) this.emit({ kind: 'session.guardrail_decision', payload });
+    return decision;
   }
   private addBinding(name: string, binding: Binding): void {
     if (this.dshProjection && nativeTools.has(name))

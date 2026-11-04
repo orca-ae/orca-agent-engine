@@ -46,3 +46,5 @@ export type {
   TurnModelSummaryStartPayload,
   UserEventProcessedPayload,
 } from './payloads.js';
+
+export { guardrailDecisionPayload } from './guardrails.js';

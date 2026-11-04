@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { RegistryClient, RegistryInvalidRuntimeBindingError } from '../../src/clients/registry.js';
 import { SessionJwtProvider } from '../../src/mcp/session-jwt-provider.js';
 import { dshProfileConfigSha256, type DshProfileFiles } from '@orca/harness-catalog';
+import { GUARDRAIL_READER_CAPABILITIES } from '@orca/guardrails';
 
 const TEST_TOKEN_PROVIDER = async () => 'test-internal-service-token';
 
@@ -35,11 +36,15 @@ it('advertises native preparation capability and validates retained descriptors 
         workspaceId: 'ws_one',
         sessionId: 'ses_one',
         capabilities: ['dsh_profile_v1'],
+        turnEventId: 'evt_profile_turn',
       })
     )?.primary_agent.dsh_profile,
   ).toEqual(profile);
   expect(JSON.parse(fetch.mock.calls[0]![1]?.body as string)).toEqual({
     capabilities: ['dsh_profile_v1'],
+    guardrail_capabilities: GUARDRAIL_READER_CAPABILITIES,
+    policy_owner: expect.any(String),
+    turn_event_id: 'evt_profile_turn',
   });
   profile.config_sha256 = '0'.repeat(64);
   await expect(
@@ -374,9 +379,14 @@ describe('RegistryClient prepared execution', () => {
     expect(String(calls[0]!.input)).toBe(
       'https://registry.internal/internal/v1/workspaces/ws_one/sessions/ses_one/executions:prepare',
     );
-    expect(calls[0]!.init).toMatchObject({
-      method: 'POST',
-      body: '{}',
+    expect(calls[0]!.init).toMatchObject({ method: 'POST' });
+    expect(JSON.parse(String(calls[0]!.init?.body))).toEqual({
+      guardrail_capabilities: [
+        'guardrails.observe.v1',
+        'guardrails.monthly_budgets.v1',
+        'dogwood.0.1.0',
+      ],
+      policy_owner: expect.any(String),
     });
     const headers = new Headers(calls[0]!.init?.headers);
     expect(headers.get('content-type')).toBe('application/json');

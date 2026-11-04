@@ -4,6 +4,11 @@
 import type { Event } from '@orca/transcript-store-types';
 import type { SessionStopReasonType } from '@orca/agent-event-contract';
 import {
+  projectGuardrailDecision,
+  parseGuardrailSpan,
+  MAX_GUARDRAIL_DECISIONS_PER_TURN,
+} from './guardrail-projection.js';
+import {
   MAX_PROJECTED_TOOLS_PER_TURN,
   closeTools,
   initialToolProjectionState,
@@ -31,6 +36,8 @@ import {
 import { deterministicChildSpanId, deterministicRootSpanId, deterministicTraceId } from './ids.js';
 import { isTraceSampled, parseTraceSamplingPolicy, type TraceSamplingPolicy } from './sampling.js';
 import {
+  GUARDRAIL_PROJECTED_TRACE_SCHEMA_VERSION,
+  GUARDRAIL_IO_PROJECTED_TRACE_SCHEMA_VERSION,
   TREE_PROJECTED_TRACE_SCHEMA_VERSION,
   TREE_IO_PROJECTED_TRACE_SCHEMA_VERSION,
   PROJECTED_TRACE_SCHEMA_VERSION,
@@ -268,6 +275,7 @@ interface OpenEvaluation {
 }
 
 interface ActiveTurn {
+  guardrailDecisions?: ProjectedSpan[];
   threads?: { subpath: string; metadata: ProjectedSpan['metadata'] }[];
   io?: ProjectedIo;
   workspaceId: string;
@@ -301,7 +309,7 @@ interface ActiveTurn {
  * v1–v5 remain readable; old binaries reject v6 rather than dropping overflow state.
  */
 export interface CanonicalProjectionState {
-  version: 1 | 2 | 3 | 4 | 5 | 6;
+  version: 1 | 2 | 3 | 4 | 5 | 6 | 7;
   captureMode?: CaptureMode;
   pendingInputs: PendingInput[];
   activeTurn: ActiveTurn | null;
@@ -356,7 +364,8 @@ export function parseCanonicalProjectionState(value: unknown): CanonicalProjecti
       value.version !== 3 &&
       value.version !== 4 &&
       value.version !== 5 &&
-      value.version !== 6) ||
+      value.version !== 6 &&
+      value.version !== 7) ||
     !Array.isArray(value.pendingInputs)
   ) {
     throw new CanonicalProjectionStateError();
@@ -415,6 +424,8 @@ export function parseCanonicalProjectionState(value: unknown): CanonicalProjecti
         (summary) => (summary.subpath ?? '') !== '',
       ))
   )
+    throw new CanonicalProjectionStateError();
+  if (parsed.version < 7 && parsed.activeTurn?.guardrailDecisions !== undefined)
     throw new CanonicalProjectionStateError();
   checkIoBudgets(parsed, true);
   return parsed;
@@ -738,6 +749,24 @@ export function reduceCanonicalEventBatch(
       case 'span.outcome_evaluation_end':
         if (sampled) projectOutcomeEvaluation(active, event);
         break;
+      case 'session.guardrail_decision': {
+        if (!sampled) break;
+        const decision = projectGuardrailDecision(
+          event,
+          deterministicTraceId(active.workspaceId, active.sessionId, active.anchorEventId),
+        );
+        if (decision) {
+          next.version = 7;
+          next.captureMode ??= 'metadata_only';
+          active.guardrailDecisions ??= [];
+          if (
+            active.guardrailDecisions.length < MAX_GUARDRAIL_DECISIONS_PER_TURN &&
+            !active.guardrailDecisions.some((span) => span.sourceEventId === decision.sourceEventId)
+          )
+            active.guardrailDecisions.push(decision);
+        }
+        break;
+      }
       case 'session.error':
         active.sawNonRetryableError ||=
           readBoolean(parsePayload(event), 'retry_status', 'will_retry') === false;
@@ -928,7 +957,7 @@ function upgradeToolState(state: CanonicalProjectionState): void {
       tools.omittedCallEventCount > 0 ||
       tools.omittedResultEventCount > 0)
   ) {
-    state.version = 6;
+    if (state.version < 6) state.version = 6;
     state.captureMode ??= 'metadata_only';
   }
 }
@@ -1238,8 +1267,11 @@ function evaluationStatus(result: string): ProjectedSpan['status'] {
 }
 
 function closeTurn(active: ActiveTurn, terminal: Event, terminalReason: string): ProjectedTrace {
-  const schemaVersion =
-    active.threads !== undefined
+  const schemaVersion = active.guardrailDecisions?.length
+    ? active.io === undefined
+      ? GUARDRAIL_PROJECTED_TRACE_SCHEMA_VERSION
+      : GUARDRAIL_IO_PROJECTED_TRACE_SCHEMA_VERSION
+    : active.threads !== undefined
       ? active.io === undefined
         ? TREE_PROJECTED_TRACE_SCHEMA_VERSION
         : TREE_IO_PROJECTED_TRACE_SCHEMA_VERSION
@@ -1261,6 +1293,7 @@ function closeTurn(active: ActiveTurn, terminal: Event, terminalReason: string):
     ...active.completedModelSummaries,
     ...tools,
     ...(active.completedEvaluations ?? []),
+    ...(active.guardrailDecisions ?? []),
   ];
   for (const span of spans) span.metadata['orca.projection.schema_version'] = schemaVersion;
   const latestChildEnd = spans.reduce(
@@ -1466,6 +1499,21 @@ function parseActiveTurn(
   const traceId = deterministicTraceId(workspaceId, sessionId, anchorEventId);
   const rootSpanId = deterministicRootSpanId(traceId);
   const completedModelSummaries = value.completedModelSummaries.map(parseCompletedModelSummarySpan);
+  const guardrailDecisions =
+    value.guardrailDecisions === undefined
+      ? undefined
+      : parseEvaluationArray(
+          value.guardrailDecisions,
+          MAX_GUARDRAIL_DECISIONS_PER_TURN,
+          parseGuardrailSpan,
+        );
+  for (const span of guardrailDecisions ?? [])
+    if (
+      span.parentSpanId !== rootSpanId ||
+      span.spanId !==
+        deterministicChildSpanId(traceId, 'guardrail_decision', span.subpath, span.sourceEventId)
+    )
+      throw new CanonicalProjectionStateError();
   for (const span of completedModelSummaries) {
     if (
       span.parentSpanId !== rootSpanId ||
@@ -1525,6 +1573,7 @@ function parseActiveTurn(
       : initialToolProjectionState(),
     ...(openEvaluations === undefined ? {} : { openEvaluations }),
     ...(completedEvaluations === undefined ? {} : { completedEvaluations }),
+    ...(guardrailDecisions === undefined ? {} : { guardrailDecisions }),
     ...(ioEnabled && value.io !== undefined ? { io: parseProjectedIo(value.io) } : {}),
   };
 }

@@ -453,6 +453,7 @@ export interface DispatcherOptions {
   openaiApiKey?: string;
   openaiBaseURL?: string;
   modelDefault: string;
+  dogwoodDispatchClockErrorBoundMs?: number;
   /** Override the harness implementation. Tests inject a `FakeHarness`. */
   harnessFactory?: HarnessFactory;
   /**
@@ -809,6 +810,9 @@ export class Dispatcher {
     const harnessOpts: ClaudeHarnessOptions = {
       apiKey: llmEgress === 'gateway' ? '' : this.opts.anthropicApiKey,
       modelDefault: this.opts.modelDefault,
+      ...(this.opts.dogwoodDispatchClockErrorBoundMs !== undefined
+        ? { dogwoodDispatchClockErrorBoundMs: this.opts.dogwoodDispatchClockErrorBoundMs }
+        : {}),
       adapter,
       workspaceId,
       sessionId,
@@ -826,6 +830,10 @@ export class Dispatcher {
       );
     } else if (this.opts.anthropicBaseURL !== undefined) {
       harnessOpts.baseURL = this.opts.anthropicBaseURL;
+    }
+    if (this.opts.registry) {
+      const transport = this.opts.registry.dogwoodTransport({ workspaceId, sessionId });
+      harnessOpts.dogwoodTransport = transport;
     }
     const guardrailStateWriter = this.guardrailStateWriter(workspaceId, sessionId);
     if (guardrailStateWriter) harnessOpts.onGuardrailState = guardrailStateWriter;
@@ -1171,7 +1179,13 @@ export class Dispatcher {
       if (!session) throw new Error(`Registry session ${sessionId} disappeared during usage flush`);
       return {
         ...(session.guardrail_usage_state ?? {}),
-        ...(session.guardrail_subject_window_state ?? {}),
+        ...(session.guardrail_month_window ? { month_window: session.guardrail_month_window } : {}),
+        ...(session.guardrail_subject_window_state
+          ? { subject_window: session.guardrail_subject_window_state }
+          : {}),
+        ...(session.guardrail_workspace_window_state
+          ? { workspace_window: session.guardrail_workspace_window_state }
+          : {}),
       };
     };
   }
@@ -1202,22 +1216,23 @@ export class Dispatcher {
     // than a background flusher: the guarded action is not released, nor is
     // local state advanced, until Registry acknowledges the durable write.
     let writeTail: Promise<void> = Promise.resolve();
-    return async (updates) => {
-      const subjectWindowUpdate = updates.find((update) => update.scope === 'subject_window');
-      if (subjectWindowUpdate) {
-        throw new Error(
-          'subject_window guardrail updates must be derived and persisted by Registry from authenticated turn usage',
-        );
-      }
+    return async (updates, turnEventId, monthWindow) => {
       const persistent = updates.filter(
-        (update): update is typeof update & { scope: 'session' } => update.scope === 'session',
+        (
+          update,
+        ): update is typeof update & { scope: 'session' | 'subject_window' | 'workspace_window' } =>
+          update.scope !== 'turn',
       );
+      if (persistent.some((update) => update.scope === 'subject_window') && !turnEventId)
+        throw new Error('Authenticated turn identity required for cross-session state');
       if (persistent.length === 0) return;
       const write = writeTail.then(async () => {
         await registry.applyGuardrailStateInternal({
           workspaceId,
           sessionId,
           updates: persistent,
+          ...(turnEventId ? { turnEventId } : {}),
+          ...(monthWindow ? { window: monthWindow } : {}),
           signal: AbortSignal.timeout(GUARDRAIL_STATE_WRITE_TIMEOUT_MS),
         });
       });
@@ -2996,6 +3011,7 @@ export class Dispatcher {
       prepared = await this.opts.registry.prepareExecution({
         workspaceId,
         sessionId,
+        ...(userEventId ? { turnEventId: userEventId } : {}),
         ...(this.opts.sandboxRuntime?.capabilities.supportsDshProfiles
           ? { capabilities: ['dsh_profile_v1'] }
           : {}),
@@ -3371,6 +3387,7 @@ export class Dispatcher {
       const prepared = await this.opts.registry.prepareExecution({
         workspaceId,
         sessionId,
+        inspectPolicy: true,
         ...(this.opts.sandboxRuntime?.capabilities.supportsDshProfiles
           ? { capabilities: ['dsh_profile_v1'] }
           : {}),
@@ -5535,7 +5552,15 @@ export class Dispatcher {
         }
         return {
           ...(session.guardrail_usage_state ?? {}),
-          ...(session.guardrail_subject_window_state ?? {}),
+          ...(session.guardrail_month_window
+            ? { month_window: session.guardrail_month_window }
+            : {}),
+          ...(session.guardrail_subject_window_state
+            ? { subject_window: session.guardrail_subject_window_state }
+            : {}),
+          ...(session.guardrail_workspace_window_state
+            ? { workspace_window: session.guardrail_workspace_window_state }
+            : {}),
         };
       };
     }
@@ -5606,6 +5631,12 @@ export class Dispatcher {
           ? { guardrails: prepared.guardrails.map(toSessionGuardrail) }
           : {}),
         ...(prepared?.guardrail_state ? { guardrailState: prepared.guardrail_state } : {}),
+        ...(prepared?.guardrail_month_window
+          ? { guardrailMonthWindow: prepared.guardrail_month_window }
+          : {}),
+        ...(prepared?.guardrail_workspace_window_state
+          ? { guardrailWorkspaceWindowState: prepared.guardrail_workspace_window_state }
+          : {}),
       });
       this.assertLifecycleCurrent(lifecycleGeneration);
       if (selection.harness === 'dsh_sdk') {
@@ -5690,6 +5721,7 @@ export class Dispatcher {
       const prepared = await this.opts.registry.prepareExecution({
         workspaceId,
         sessionId,
+        inspectPolicy: true,
         ...(this.opts.sandboxRuntime?.capabilities.supportsDshProfiles
           ? { capabilities: ['dsh_profile_v1'] }
           : {}),
@@ -5921,6 +5953,11 @@ function sessionRuntimeConfigKey(session: SessionRecord | null): string {
   });
 }
 
+/** Stable configuration ordering across process locales and ICU versions. */
+function compareCodeUnits(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
 function preparedExecutionRuntimeConfigKey(prepared: PreparedExecutionV2): string {
   return stableJson({
     session: {
@@ -5935,7 +5972,7 @@ function preparedExecutionRuntimeConfigKey(prepared: PreparedExecutionV2): strin
     },
     primary_agent: prepared.primary_agent,
     subagents: [...prepared.subagents].sort((a, b) =>
-      `${a.id}:${a.version}`.localeCompare(`${b.id}:${b.version}`),
+      compareCodeUnits(`${a.id}:${a.version}`, `${b.id}:${b.version}`),
     ),
     environment: prepared.environment,
     vault_credentials: runtimeAffectingVaultCredentials(prepared.vault_credentials),
@@ -5944,7 +5981,7 @@ function preparedExecutionRuntimeConfigKey(prepared: PreparedExecutionV2): strin
     // restart the runner rather than let an in-flight session keep enforcing
     // the rule it started with. Omitting this would make a guardrail change
     // take effect only on the next session, silently.
-    guardrails: [...(prepared.guardrails ?? [])].sort((a, b) => a.id.localeCompare(b.id)),
+    guardrails: [...(prepared.guardrails ?? [])].sort((a, b) => compareCodeUnits(a.id, b.id)),
   });
 }
 
@@ -5957,7 +5994,7 @@ function runtimeAffectingVaultCredentials(
   // non-MCP credentials because they may affect future sandbox/runtime setup.
   return credentials
     .filter((credential) => !credential.mcp_server_url)
-    .sort((a, b) => a.credential_id.localeCompare(b.credential_id));
+    .sort((a, b) => compareCodeUnits(a.credential_id, b.credential_id));
 }
 
 /** Wire shape to runtime shape: snake_case crossing the service boundary. */
@@ -5968,6 +6005,7 @@ function toSessionGuardrail(record: PreparedGuardrailRecord): SessionGuardrail {
     tier: record.tier,
     phases: record.phases,
     rule: record.rule,
+    ...(record.mode ? { mode: record.mode } : {}),
     stateful: record.stateful,
     ...(record.state_scope ? { stateScope: record.state_scope } : {}),
     ...(record.subagent_id ? { subagentId: record.subagent_id } : {}),
@@ -5977,7 +6015,7 @@ function toSessionGuardrail(record: PreparedGuardrailRecord): SessionGuardrail {
 function sessionResourcesRuntimeConfig(
   resources: SessionRecord['resources'],
 ): SessionRecord['resources'] {
-  return [...(resources ?? [])].sort((a, b) => a.id.localeCompare(b.id));
+  return [...(resources ?? [])].sort((a, b) => compareCodeUnits(a.id, b.id));
 }
 
 function buildMemoryStoreGrants(resources: PreparedExecutionV2['resources']): MemoryStoreGrant[] {
@@ -6024,6 +6062,7 @@ function skillIsBlocked(prepared: PreparedExecutionV2, skill: SkillDescriptor): 
         id: g.id,
         name: g.name,
         enabled: true,
+        ...(g.mode ? { mode: g.mode } : {}),
         phases: g.phases as PreparedGuardrail['guardrail']['phases'],
         scope: 'explicit',
         rule: g.rule as PreparedGuardrail['guardrail']['rule'],

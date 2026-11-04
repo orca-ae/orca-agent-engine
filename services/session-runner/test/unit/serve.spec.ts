@@ -94,6 +94,10 @@ describe('serveTunnel (runner tunnel client + serve loop)', () => {
     // The capability-advertise + recovery fields ride the hello's harnesses +
     // resume_cursors on the wire (the registry's connect hook reads them).
     expect(runner.hello.harnesses).toEqual(['claude']);
+    expect(runner.hello.guardrailCapabilities).toEqual([
+      'guardrails.observe.v1',
+      'guardrails.monthly_budgets.v1',
+    ]);
     expect(runner.hello.resumeCursors).toEqual({ ses_1: 'evt_99' });
     await handle.stop();
   });

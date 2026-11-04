@@ -1,6 +1,7 @@
 // Copyright The Orca Authors
 // SPDX-License-Identifier: Apache-2.0
 
+import { guardrailRolloutError, type GuardrailRollout } from './guardrail-rollout.js';
 import { compileGuardrailRule } from '@orca/guardrails';
 import type { Guardrail, GuardrailRule, Phase, Scope, StateScope, Tier } from '@orca/guardrails';
 
@@ -18,6 +19,7 @@ export interface GuardrailRow {
   id: string;
   name: string;
   enabled: boolean;
+  mode?: 'enforce' | 'observe';
   phases: readonly string[];
   scope: Scope;
   rule: unknown;
@@ -65,7 +67,10 @@ export interface ComposedGuardrails {
   invalid: readonly InvalidGuardrail[];
 }
 
-export function composeGuardrails(sources: GuardrailSources): ComposedGuardrails {
+export function composeGuardrails(
+  sources: GuardrailSources,
+  rollout: GuardrailRollout = {},
+): ComposedGuardrails {
   const byId = new Map(sources.visible.map((row) => [row.id, row]));
   const guardrails: ComposedGuardrail[] = [];
   const invalid: InvalidGuardrail[] = [];
@@ -79,6 +84,12 @@ export function composeGuardrails(sources: GuardrailSources): ComposedGuardrails
     if (seen.has(bindingKey)) return;
     seen.add(bindingKey);
 
+    const rolloutError = guardrailRolloutError(row, rollout);
+    if (rolloutError) {
+      invalid.push({ id: row.id, name: row.name, errors: [rolloutError] });
+      return;
+    }
+
     const compiled = compileGuardrailRule(row.rule as GuardrailRule, row.scope);
     if (!compiled.ok) {
       invalid.push({ id: row.id, name: row.name, errors: compiled.errors.map((e) => e.message) });
@@ -90,6 +101,7 @@ export function composeGuardrails(sources: GuardrailSources): ComposedGuardrails
         id: row.id,
         name: row.name,
         enabled: row.enabled,
+        ...(rollout.observeEnabled ? { mode: row.mode ?? 'enforce' } : {}),
         phases: row.phases as readonly Phase[],
         scope: row.scope,
         rule: row.rule as GuardrailRule,

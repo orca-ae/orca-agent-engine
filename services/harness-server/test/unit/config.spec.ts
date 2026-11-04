@@ -568,3 +568,17 @@ describe('Kafka transcript schema configuration', () => {
     );
   });
 });
+
+describe('Dogwood dispatch clock qualification', () => {
+  it('keeps an unknown bound distinct from an explicit qualified bound', () => {
+    expect(loadConfig(baseEnv).dogwoodDispatchClockErrorBoundMs).toBeUndefined();
+    expect(
+      loadConfig({ ...baseEnv, DOGWOOD_DISPATCH_CLOCK_ERROR_BOUND_MS: '125' })
+        .dogwoodDispatchClockErrorBoundMs,
+    ).toBe(125);
+    for (const value of ['', '-1', 'NaN', 'Infinity'])
+      expect(() =>
+        loadConfig({ ...baseEnv, DOGWOOD_DISPATCH_CLOCK_ERROR_BOUND_MS: value }),
+      ).toThrow(/DOGWOOD_DISPATCH_CLOCK_ERROR_BOUND_MS/);
+  });
+});

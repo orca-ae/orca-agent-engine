@@ -309,6 +309,10 @@ const SOURCE_DIRS = ['services', 'packages', 'charts', 'scripts', '.github', 'ex
  * byte-identical.
  */
 const EXCUSED_DIRS = new Map([
+  [
+    'vendor',
+    'immutable pinned dependency archives and provenance; Engine environment readers remain in services, packages and scripts',
+  ],
   ['docs', 'documentation; scanned by DOC_ROOTS instead, which walks it wholesale'],
   ['patches', 'third-party dependency patch diffs, not operator-facing environment configuration'],
   [

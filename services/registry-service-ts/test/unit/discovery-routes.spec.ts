@@ -166,7 +166,9 @@ describe('discovery', () => {
         // every caller. The workspace never appears in the path either way —
         // `namespaced` is about ownership, not URL shape.
         { name: 'guardrails', namespaced: true, kind: 'Guardrail' },
+        { name: 'effectiveguardrails', namespaced: true, kind: 'GuardrailBundle' },
         { name: 'guardrailtypes', namespaced: false, kind: 'GuardrailType' },
+        { name: 'policyschemas', namespaced: false, kind: 'PolicySchema' },
       ],
     });
     expect(ApiResourceList.safeParse(policy.json()).success).toBe(true);

@@ -102,6 +102,7 @@ function toPrepared(guardrail: SnapshotGuardrail): PreparedGuardrail {
       id: guardrail.id,
       name: guardrail.name,
       enabled: true,
+      ...(guardrail.mode ? { mode: guardrail.mode } : {}),
       phases: guardrail.phases as PreparedGuardrail['guardrail']['phases'],
       scope: 'explicit',
       rule: guardrail.rule as PreparedGuardrail['guardrail']['rule'],

@@ -321,7 +321,14 @@ secretStore:
     confirmLocalCutover: false
     secretName: ''
 
+guardrails:
+  dogwood:
+    enabled: false
+
 registry:
+  guardrails:
+    observeEnabled: false
+    monthlyBudgetsEnabled: false
   pricing:
     conditionalEnabled: false
     sources: []
@@ -726,6 +733,7 @@ aiGateway:
   # deploying a Gateway image that includes RegistryGuardrailSource. Policy
   # edits then refresh through the source cache without changing this ConfigMap.
   registryGuardrails:
+    dogwood: false
     enabled: false
     baseUrl: ''
     timeoutMs: 3000

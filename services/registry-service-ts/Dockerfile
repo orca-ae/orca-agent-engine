@@ -13,6 +13,7 @@ RUN npm install -g pnpm@9.15.9
 # Copy workspace manifests for dependency installation layer caching
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json .npmrc ./
 COPY patches ./patches
+COPY vendor/dogwood ./vendor/dogwood
 COPY packages/codex-harness/package.json ./packages/codex-harness/
 COPY packages/sdk-harness/package.json ./packages/sdk-harness/
 COPY packages/pi-harness/package.json ./packages/pi-harness/

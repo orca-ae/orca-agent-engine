@@ -10,6 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends python3 make g+
 RUN corepack enable && corepack prepare pnpm@9 --activate
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json .npmrc ./
 COPY patches ./patches
+COPY vendor/dogwood ./vendor/dogwood
 COPY services/observability-exporter/package.json ./services/observability-exporter/
 COPY packages/agent-event-contract/package.json ./packages/agent-event-contract/
 COPY packages/transcript-store-types/package.json ./packages/transcript-store-types/

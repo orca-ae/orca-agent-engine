@@ -19,6 +19,8 @@ import {
 } from './dsh-profile.js';
 import type { FileStore } from '@orca/file-store';
 import type { MemoryStore } from '@orca/memory-store';
+import { assertGuardrailReaderCapabilities, GUARDRAIL_READER_CAPABILITIES } from '@orca/guardrails';
+import { bindPolicyTurn, isDogwood } from './policy-events.js';
 import { and, eq, inArray, isNull, isNotNull, or } from 'drizzle-orm';
 import {
   PreparedAgentSnapshotSchema,
@@ -26,6 +28,12 @@ import {
   type PreparedExecutionV2,
 } from '../contracts/internal.contract.js';
 import { normalizeStoredPackages } from '../contracts/environment-wire.js';
+import {
+  loadGuardrailSubjectWindowState,
+  utcMonthWindow,
+  WORKSPACE_BUDGET_SUBJECT,
+} from './usage-accounting.js';
+import type { GuardrailRouteOptions as GuardrailRollout } from './guardrail-rollout.js';
 import { composeGuardrails, type GuardrailRow } from './guardrail-composition.js';
 import {
   normalizeModelForStorage,
@@ -38,6 +46,7 @@ import {
   environments,
   gitCredentials,
   guardrails,
+  guardrailPolicyBindings,
   guardrailState,
   sessionResources,
   sessionSkillBindings,
@@ -172,7 +181,11 @@ export async function prepareExecution(input: {
   memoryStore?: MemoryStore;
   workspaceId: string;
   sessionId: string;
+  guardrailCapabilities?: readonly string[] | undefined;
+  policyOwner?: string | undefined;
+  turnEventId?: string | undefined;
   gatewayRegistryUsageEnabled?: boolean;
+  guardrails?: GuardrailRollout;
 }): Promise<PreparedExecutionV2> {
   // Session revision, pinned versions, vault bindings, and session resources
   // must come from one Registry snapshot. Without REPEATABLE READ, concurrent
@@ -192,15 +205,19 @@ export async function prepareExecution(input: {
 
 /** Prepare only the session's pinned guardrails for the Gateway refresh path. */
 export async function prepareGatewayGuardrails(input: {
+  guardrails?: GuardrailRollout;
   db: DbClient;
   workspaceId: string;
   sessionId: string;
 }): Promise<{
   workspace_id: string;
   session: { id: string; runtime_revision: number };
+  policy_bundle_id?: string;
   agent_ids: string[];
   guardrails: PreparedExecutionV2['guardrails'];
   guardrail_state: Record<string, unknown>;
+  guardrail_workspace_window_state?: Record<string, unknown>;
+  guardrail_month_window?: string;
 }> {
   return input.db.transaction(
     async (tx) => {
@@ -247,13 +264,39 @@ export async function prepareGatewayGuardrails(input: {
         session.id,
         loadedAgents,
         sessionGuardrailIds(session.agentOverrides),
+        input.guardrails,
       );
+      const [binding] = await db
+        .select()
+        .from(guardrailPolicyBindings)
+        .where(
+          and(
+            eq(guardrailPolicyBindings.workspaceId, input.workspaceId),
+            eq(guardrailPolicyBindings.sessionId, input.sessionId),
+          ),
+        );
+      if (binding) {
+        const pinned = binding.data as import('./dogwood-types.js').PolicyBinding;
+        if (pinned.enforcer === 'ai-gateway') policy.guardrails = pinned.guardrails;
+        else policy.guardrails = policy.guardrails.filter((g) => !isDogwood(g.rule));
+      } else if (policy.guardrails.some((g) => isDogwood(g.rule)))
+        throw new InvalidRuntimeBindingError(
+          'guardrail',
+          'Dogwood has no prepared enforcer binding',
+        );
       return {
         workspace_id: input.workspaceId,
         session: { id: session.id, runtime_revision: session.runtimeRevision },
         agent_ids: loadedAgents.map((agent) => agent.id),
+        ...(binding ? { policy_bundle_id: (binding.data as { bundleId: string }).bundleId } : {}),
         guardrails: policy.guardrails,
         guardrail_state: policy.state,
+        ...(policy.workspaceState
+          ? {
+              guardrail_workspace_window_state: policy.workspaceState,
+              guardrail_month_window: policy.monthWindow!,
+            }
+          : {}),
       };
     },
     { isolationLevel: 'repeatable read' },
@@ -268,7 +311,11 @@ async function buildPreparedExecution(input: {
   memoryStore?: MemoryStore;
   workspaceId: string;
   sessionId: string;
+  guardrailCapabilities?: readonly string[] | undefined;
+  policyOwner?: string | undefined;
+  turnEventId?: string | undefined;
   gatewayRegistryUsageEnabled?: boolean;
+  guardrails?: GuardrailRollout;
 }): Promise<PreparedExecutionV2> {
   const { db, fileStore, memoryStore, workspaceId, sessionId } = input;
   const workspaceRows = await db
@@ -391,6 +438,7 @@ async function buildPreparedExecution(input: {
     session.id,
     loadedAgents,
     sessionGuardrailIds(session.agentOverrides),
+    input.guardrails,
   );
   const selection = resolveHarnessAnnotation(primaryLoaded.snapshot.metadata);
   if ('error' in selection) throw new InvalidRuntimeBindingError('harness', selection.error);
@@ -410,7 +458,10 @@ async function buildPreparedExecution(input: {
         })
       : null;
   if (featureError) throw new InvalidRuntimeBindingError('harness', featureError);
-  const guardrailError = validateHarnessGuardrails(selection, guardrailPayload.guardrails);
+  const guardrailError = validateHarnessGuardrails(
+    selection,
+    guardrailPayload.guardrails.filter((g) => !isDogwood(g.rule)),
+  );
   if (guardrailError) throw new InvalidRuntimeBindingError('guardrail', guardrailError);
   let checkpointRevision: string | null = null;
   let harnessState: unknown = null;
@@ -432,6 +483,113 @@ async function buildPreparedExecution(input: {
     }
   }
 
+  const dogwoodRules = guardrailPayload.guardrails.filter((g) => isDogwood(g.rule));
+  let dogwood: PreparedExecutionV2['dogwood'];
+  const [previousPolicy] = await db
+    .select()
+    .from(guardrailPolicyBindings)
+    .where(
+      and(
+        eq(guardrailPolicyBindings.workspaceId, workspaceId),
+        eq(guardrailPolicyBindings.sessionId, sessionId),
+      ),
+    );
+  if (dogwoodRules.length || previousPolicy) {
+    if (dogwoodRules.length > 16)
+      throw new InvalidRuntimeBindingError('guardrail', 'at most 16 Dogwood guardrails');
+    const harness =
+      selection.harness === 'claude_agent_sdk' &&
+      selection.mode === 'separate' &&
+      environment?.target !== 'self_hosted';
+    if (dogwoodRules.length && !harness && !input.guardrails?.gatewayDogwoodEnabled)
+      throw new InvalidRuntimeBindingError('guardrail', 'Dogwood requires a qualified Gateway');
+    if (
+      !harness &&
+      dogwoodRules.some(
+        (g) => (g.rule as { appliesTo?: string }).appliesTo !== 'mcp_tools' || g.subagent_id,
+      )
+    )
+      throw new InvalidRuntimeBindingError(
+        'guardrail',
+        'Gateway requires unbound mcp_tools Dogwood rules',
+      );
+    if (
+      environment?.target === 'self_hosted' &&
+      (
+        await db
+          .select({ mode: environments.egressMode })
+          .from(environments)
+          .where(
+            and(eq(environments.workspaceId, workspaceId), eq(environments.id, environment.id)),
+          )
+      )[0]?.mode === 'sidecar'
+    )
+      throw new InvalidRuntimeBindingError('guardrail', 'Dogwood cannot govern sidecar egress');
+    const oldBinding = previousPolicy?.data as
+      | import('./dogwood-types.js').PolicyBinding
+      | undefined;
+    const preserve =
+      oldBinding && (!input.turnEventId || oldBinding.turnEventId === input.turnEventId);
+    const readerRules = preserve ? oldBinding.guardrails : guardrailPayload.guardrails;
+    const readerEnforcer = preserve ? oldBinding.enforcer : harness ? 'harness' : 'ai-gateway';
+    try {
+      assertGuardrailReaderCapabilities(
+        readerEnforcer === 'ai-gateway'
+          ? readerRules.filter((g) => !isDogwood(g.rule))
+          : readerRules,
+        input.guardrailCapabilities ?? GUARDRAIL_READER_CAPABILITIES,
+      );
+    } catch (error) {
+      throw new InvalidRuntimeBindingError('guardrail_reader', String(error));
+    }
+    const policyOwner =
+      input.policyOwner ?? (previousPolicy?.data as { owner?: string } | undefined)?.owner;
+    if (!policyOwner)
+      throw new InvalidRuntimeBindingError(
+        'guardrail',
+        'Dogwood preparation requires an explicit owner',
+      );
+    dogwood =
+      !input.policyOwner && previousPolicy
+        ? {
+            enforcer: (previousPolicy.data as import('./dogwood-types.js').PolicyBinding).enforcer,
+            epoch: previousPolicy.epoch.toString(),
+            bundle_id: (previousPolicy.data as import('./dogwood-types.js').PolicyBinding).bundleId,
+          }
+        : await bindPolicyTurn(
+            db as unknown as import('../persistence/postgres/client.js').DbTransaction,
+            {
+              workspaceId,
+              sessionId,
+              owner: policyOwner,
+              guardrails: guardrailPayload.guardrails,
+              enforcer: harness ? 'harness' : 'ai-gateway',
+              ...(input.turnEventId ? { turnEventId: input.turnEventId } : {}),
+              resources: loadedAgents.map((a) => ({ id: a.id, name: a.snapshot.name })),
+              mcpServers: primaryLoaded.snapshot.mcp_servers.flatMap((m) =>
+                isRecord(m) && typeof m.name === 'string' && typeof m.url === 'string'
+                  ? [{ name: m.name, url: m.url }]
+                  : [],
+              ),
+              now: input.guardrails?.now ?? (() => new Date()),
+            },
+          );
+  }
+
+  if (dogwood) {
+    const [pinned] = await db
+      .select()
+      .from(guardrailPolicyBindings)
+      .where(
+        and(
+          eq(guardrailPolicyBindings.workspaceId, workspaceId),
+          eq(guardrailPolicyBindings.sessionId, sessionId),
+        ),
+      );
+    guardrailPayload.guardrails = (
+      pinned!.data as import('./dogwood-types.js').PolicyBinding
+    ).guardrails;
+  }
   return {
     schema_version: 2,
     workspace_id: workspaceId,
@@ -461,8 +619,18 @@ async function buildPreparedExecution(input: {
     environment,
     vault_credentials: vaultCredentialMetadata,
     resources,
-    guardrails: guardrailPayload.guardrails,
+    ...(dogwood ? { dogwood } : {}),
+    guardrails:
+      dogwood?.enforcer === 'ai-gateway'
+        ? guardrailPayload.guardrails.filter((g) => !isDogwood(g.rule))
+        : guardrailPayload.guardrails,
     guardrail_state: guardrailPayload.state,
+    ...(guardrailPayload.workspaceState
+      ? {
+          guardrail_workspace_window_state: guardrailPayload.workspaceState,
+          guardrail_month_window: guardrailPayload.monthWindow!,
+        }
+      : {}),
     archived_thread_subpaths: await loadArchivedThreadSubpaths(db, workspaceId, session.id),
   };
 }
@@ -500,7 +668,13 @@ async function loadGuardrails(
   sessionId: string,
   loadedAgents: LoadedAgent[],
   sessionIds: readonly string[],
-): Promise<{ guardrails: PreparedExecutionV2['guardrails']; state: Record<string, unknown> }> {
+  rollout: GuardrailRollout = {},
+): Promise<{
+  guardrails: PreparedExecutionV2['guardrails'];
+  state: Record<string, unknown>;
+  workspaceState?: Record<string, unknown>;
+  monthWindow?: string;
+}> {
   const workspaceRow = await db
     .select({ organizationId: workspaces.organizationId })
     .from(workspaces)
@@ -513,6 +687,7 @@ async function loadGuardrails(
       id: guardrails.id,
       name: guardrails.name,
       enabled: guardrails.enabled,
+      mode: guardrails.mode,
       phases: guardrails.phases,
       scope: guardrails.scope,
       rule: guardrails.rule,
@@ -538,6 +713,7 @@ async function loadGuardrails(
     id: row.id,
     name: row.name,
     enabled: row.enabled,
+    mode: row.mode,
     phases: Array.isArray(row.phases) ? (row.phases as string[]) : [],
     scope: row.scope as GuardrailRow['scope'],
     rule: row.rule,
@@ -550,12 +726,15 @@ async function loadGuardrails(
     if (ids.length > 0) subagentIds[agent.id] = ids;
   }
 
-  const composed = composeGuardrails({
-    sessionIds,
-    agentIds: coordinator ? guardrailIdsOf(coordinator) : [],
-    subagentIds,
-    visible,
-  });
+  const composed = composeGuardrails(
+    {
+      sessionIds,
+      agentIds: coordinator ? guardrailIdsOf(coordinator) : [],
+      subagentIds,
+      visible,
+    },
+    rollout,
+  );
 
   if (composed.invalid.length > 0) {
     // A stored rule that no longer compiles means the type catalog moved under
@@ -583,10 +762,14 @@ async function loadGuardrails(
     state[row.key] = row.valueNum ?? row.valueJson;
   }
 
+  const monthWindow = rollout.monthlyBudgetsEnabled
+    ? utcMonthWindow((rollout.now ?? (() => new Date()))())
+    : undefined;
   return {
     guardrails: composed.guardrails.map((entry) => ({
       id: entry.guardrail.id,
       name: entry.guardrail.name,
+      ...(entry.guardrail.mode ? { mode: entry.guardrail.mode } : {}),
       tier: entry.tier,
       phases: [...entry.guardrail.phases],
       rule: entry.guardrail.rule,
@@ -595,6 +778,17 @@ async function loadGuardrails(
       ...(entry.subagentId ? { subagent_id: entry.subagentId } : {}),
     })),
     state,
+    ...(rollout.monthlyBudgetsEnabled
+      ? {
+          monthWindow: monthWindow!,
+          workspaceState: await loadGuardrailSubjectWindowState(
+            db,
+            workspaceId,
+            WORKSPACE_BUDGET_SUBJECT,
+            monthWindow!,
+          ),
+        }
+      : {}),
   };
 }
 

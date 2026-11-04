@@ -313,6 +313,9 @@ importers:
       '@bufbuild/cel':
         specifier: ^0.6.0
         version: 0.6.0(@bufbuild/protobuf@2.12.0)
+      '@runorca/dogwood':
+        specifier: file:../../vendor/dogwood/runorca-dogwood-0.1.0-df6624b.tgz
+        version: file:vendor/dogwood/runorca-dogwood-0.1.0-df6624b.tgz
     devDependencies:
       '@vitest/coverage-v8':
         specifier: ^2.0.0
@@ -689,6 +692,9 @@ importers:
       '@orca/transcript-store':
         specifier: workspace:*
         version: link:../../packages/transcript-store
+      '@runorca/dogwood':
+        specifier: file:../../vendor/dogwood/runorca-dogwood-0.1.0-df6624b.tgz
+        version: file:vendor/dogwood/runorca-dogwood-0.1.0-df6624b.tgz
       fastify:
         specifier: ^5.0.0
         version: 5.8.5
@@ -856,6 +862,9 @@ importers:
       '@orca/transcript-store':
         specifier: workspace:*
         version: link:../../packages/transcript-store
+      '@runorca/dogwood':
+        specifier: file:../../vendor/dogwood/runorca-dogwood-0.1.0-df6624b.tgz
+        version: file:vendor/dogwood/runorca-dogwood-0.1.0-df6624b.tgz
       '@ts-rest/core':
         specifier: ^3.51.0
         version: 3.52.1(@types/node@25.9.5)(zod@3.25.76)
@@ -1002,6 +1011,9 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: ^1.29.0
         version: 1.29.0(zod@4.4.3)
+      '@orca/agent-event-contract':
+        specifier: workspace:*
+        version: link:../../packages/agent-event-contract
       '@orca/codex-harness':
         specifier: workspace:*
         version: link:../../packages/codex-harness
@@ -5604,6 +5616,11 @@ packages:
     resolution: {integrity: sha512-Nd/SgG27WoA9e+/TdK74KnHz852TLa94ovOYySo/yMPuTmpckK/jIF2jSwS3g7ELSKXK13/cVdmg1Z/DaCWKxA==}
     cpu: [x64]
     os: [win32]
+
+  '@runorca/dogwood@file:vendor/dogwood/runorca-dogwood-0.1.0-df6624b.tgz':
+    resolution: {integrity: sha512-MQmzyGPnIad4QGt3xq+q+A0fwlftIa7SKj36N5+h+Xy90M1XaJy0A0fPzw7vt1SNRMVPI+ii/6miqjafUlIjPg==, tarball: file:vendor/dogwood/runorca-dogwood-0.1.0-df6624b.tgz}
+    version: 0.1.0
+    engines: {node: '>=22'}
 
   '@sec-ant/readable-stream@0.4.1':
     resolution: {integrity: sha512-831qok9r2t8AlxLko40y2ebgSDhenenCatLVeW/uBtnHPyhHOvG0C7TvfgecV+wHzIm5KUICgzmVpWS+IMEAeg==}
@@ -14512,6 +14529,8 @@ snapshots:
 
   '@rollup/rollup-win32-x64-msvc@4.60.2':
     optional: true
+
+  '@runorca/dogwood@file:vendor/dogwood/runorca-dogwood-0.1.0-df6624b.tgz': {}
 
   '@sec-ant/readable-stream@0.4.1': {}
 

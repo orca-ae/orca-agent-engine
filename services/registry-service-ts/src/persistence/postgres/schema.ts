@@ -2320,6 +2320,7 @@ export const guardrails = pgTable(
     name: text('name').notNull(),
     description: text('description'),
     enabled: boolean('enabled').notNull().default(true),
+    mode: text('mode').$type<'enforce' | 'observe'>().notNull().default('enforce'),
     phases: jsonb('phases').notNull().default([]),
     scope: text('scope').notNull(),
     rule: jsonb('rule').notNull(),
@@ -2342,6 +2343,7 @@ export const guardrails = pgTable(
       columns: [t.workspaceId],
       foreignColumns: [workspaces.id],
     }).onDelete('restrict'),
+    check('guardrails_mode_check', sql`${t.mode} in ('enforce', 'observe')`),
     check('guardrails_scope_check', sql`${t.scope} in ('organization', 'workspace', 'explicit')`),
     // An organization-scoped guardrail has no workspace; every other scope must
     // name one. Without this a workspace-scoped row with a null workspace would
@@ -2450,5 +2452,94 @@ export const modelPrices = pgTable(
       'model_prices_scope_check',
       sql`(${t.source} = 'operator' and ${t.organizationId} <> '') or (${t.source} <> 'operator' and ${t.organizationId} = '')`,
     ),
+  ],
+);
+
+// Dogwood policy tables. Heads and immutable receipts outlive the 24h event window.
+export const guardrailPolicyHeads = pgTable(
+  'guardrail_policy_heads',
+  {
+    workspaceId: text('workspace_id').notNull(),
+    scope: text('scope').notNull(),
+    subject: text('subject').notNull(),
+    head: bigint('head', { mode: 'bigint' })
+      .notNull()
+      .default(sql`0`),
+    lastTime: bigint('last_time', { mode: 'number' }).notNull().default(0),
+  },
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.scope, t.subject] }),
+    foreignKey({ columns: [t.workspaceId], foreignColumns: [workspaces.id] }).onDelete('cascade'),
+    check('policy_head_scope', sql`${t.scope} in ('session','principal','state')`),
+  ],
+);
+export const guardrailPolicyBindings = pgTable(
+  'guardrail_policy_bindings',
+  {
+    workspaceId: text('workspace_id').notNull(),
+    sessionId: text('session_id').notNull(),
+    epoch: bigint('epoch', { mode: 'bigint' }).notNull(),
+    data: jsonb('data').notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.sessionId] }),
+    foreignKey({
+      columns: [t.workspaceId, t.sessionId],
+      foreignColumns: [sessions.workspaceId, sessions.id],
+    }).onDelete('cascade'),
+  ],
+);
+export const guardrailPolicyEvents = pgTable(
+  'guardrail_policy_events',
+  {
+    workspaceId: text('workspace_id').notNull(),
+    sessionId: text('session_id').notNull(),
+    seq: bigint('seq', { mode: 'bigint' }).notNull(),
+    principalKey: text('principal_key'),
+    principalSeq: bigint('principal_seq', { mode: 'bigint' }),
+    timestampMs: bigint('timestamp_ms', { mode: 'number' }).notNull(),
+    payload: jsonb('payload').notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.sessionId, t.seq] }),
+    index('policy_events_retention').on(t.workspaceId, t.timestampMs),
+    index('policy_events_principal').on(t.workspaceId, t.principalKey, t.principalSeq),
+    foreignKey({
+      columns: [t.workspaceId, t.sessionId],
+      foreignColumns: [sessions.workspaceId, sessions.id],
+    }).onDelete('cascade'),
+  ],
+);
+export const guardrailPolicyCalls = pgTable(
+  'guardrail_policy_calls',
+  {
+    workspaceId: text('workspace_id').notNull(),
+    sessionId: text('session_id').notNull(),
+    toolUseId: text('tool_use_id').notNull(),
+    data: jsonb('data').notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.sessionId, t.toolUseId] }),
+    foreignKey({
+      columns: [t.workspaceId, t.sessionId],
+      foreignColumns: [sessions.workspaceId, sessions.id],
+    }).onDelete('cascade'),
+  ],
+);
+export const guardrailPolicyBatches = pgTable(
+  'guardrail_policy_batches',
+  {
+    workspaceId: text('workspace_id').notNull(),
+    sessionId: text('session_id').notNull(),
+    batchId: text('batch_id').notNull(),
+    digest: text('digest').notNull(),
+    response: jsonb('response').notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.sessionId, t.batchId] }),
+    foreignKey({
+      columns: [t.workspaceId, t.sessionId],
+      foreignColumns: [sessions.workspaceId, sessions.id],
+    }).onDelete('cascade'),
   ],
 );

@@ -1,12 +1,14 @@
 // Copyright The Orca Authors
 // SPDX-License-Identifier: Apache-2.0
 
+import { guardrailDecisionPayload } from '@orca/agent-event-contract';
 import {
   BUILTIN_EVALUATORS,
   InMemoryGuardrailStateStore,
-  SHARED_USAGE_KEYS,
+  applyGuardrailUsageAcknowledgment,
   evaluateGuardrails,
   type PreparedGuardrail,
+  type Decision,
   type StateUpdate,
   type Verdict,
 } from '@orca/guardrails';
@@ -81,7 +83,11 @@ export interface InSandboxHarnessOptions {
    * Defaults to 5 minutes.
    */
   customToolResultTerminalTimeoutMs?: number;
-  onGuardrailState?: (updates: readonly StateUpdate[]) => Promise<void> | void;
+  onGuardrailState?: (
+    updates: readonly StateUpdate[],
+    turnEventId?: string,
+    monthWindow?: string,
+  ) => Promise<void> | void;
   refreshGuardrailSubjectWindow?: (
     turnEventId: string,
   ) => Promise<Readonly<Record<string, unknown>>>;
@@ -101,6 +107,7 @@ export class InSandboxHarness implements AgentHarness {
   private model: string | undefined;
   private sessionId = '';
   private preparedGuardrails: PreparedGuardrail[] = [];
+  private guardrailMonthWindow: string | undefined;
   private guardrailStore = new InMemoryGuardrailStateStore();
   private readonly pendingCustomToolUseIds = new Set<string>();
   private readonly sessionSystemMessages: string[] = [];
@@ -135,12 +142,16 @@ export class InSandboxHarness implements AgentHarness {
     this.modelProvider = input.agentSnapshot.model_provider;
     this.model = input.agentSnapshot.model_id;
     this.sessionId = input.sessionId;
+    this.guardrailMonthWindow = input.guardrailMonthWindow;
     const replay = this.opts.replaySource ? await this.opts.replaySource() : [];
     const preparedGuardrails = (input.guardrails ?? []).map(toPreparedGuardrail);
     this.preparedGuardrails = preparedGuardrails;
-    this.guardrailStore = new InMemoryGuardrailStateStore(
-      input.guardrailState ? { session: { ...input.guardrailState } } : {},
-    );
+    this.guardrailStore = new InMemoryGuardrailStateStore({
+      ...(input.guardrailState ? { session: { ...input.guardrailState } } : {}),
+      ...(input.guardrailWorkspaceWindowState
+        ? { workspace_window: { ...input.guardrailWorkspaceWindowState } }
+        : {}),
+    });
     for (const guardrail of preparedGuardrails.filter(
       (entry) => entry.stateful && !entry.guardrail.phases.includes('request'),
     )) {
@@ -154,9 +165,21 @@ export class InSandboxHarness implements AgentHarness {
         }),
       });
     }
-    const agents = buildSubagentDefinitions(input.agentSnapshot.multiagent, preparedGuardrails);
+    const recordExposure = (decision: Decision, tool: string) => {
+      const payload = guardrailDecisionPayload({ phase: 'tool_call', decision, tools: [tool] });
+      if (payload) this.push({ kind: SessionEventKind.guardrailDecision, payload });
+    };
+    const agents = buildSubagentDefinitions(
+      input.agentSnapshot.multiagent,
+      preparedGuardrails,
+      recordExposure,
+    );
     const customTools = input.agentSnapshot.custom_tools ?? [];
-    const toolOptions = buildSdkToolOptions(input.agentSnapshot, preparedGuardrails);
+    const toolOptions = buildSdkToolOptions(
+      input.agentSnapshot,
+      preparedGuardrails,
+      recordExposure,
+    );
     const runtimeTools = runtimeAgentToolNameUnion(input.agentSnapshot);
     this.channel = await transport.open({
       agent: this.opts.providerId,
@@ -178,17 +201,9 @@ export class InSandboxHarness implements AgentHarness {
   }
 
   applyGuardrailUsageState(state: Readonly<Record<string, unknown>>): void {
-    this.guardrailStore.apply(
-      Object.entries(state).map(([key, value]) => ({
-        scope:
-          key === SHARED_USAGE_KEYS.dailyCostUsd
-            ? ('subject_window' as const)
-            : ('session' as const),
-        key,
-        action: 'set' as const,
-        value,
-      })),
-    );
+    if (typeof state['month_window'] === 'string')
+      this.guardrailMonthWindow = state['month_window'];
+    applyGuardrailUsageAcknowledgment(this.guardrailStore, state);
   }
 
   async submit(event: UserEvent, hooks?: SubmitHooks): Promise<UserEventSubmitResult | void> {
@@ -520,13 +535,19 @@ export class InSandboxHarness implements AgentHarness {
         store: this.guardrailStore,
       },
     );
+    const observed = guardrailDecisionPayload({ phase: 'request', decision });
+    if (observed) this.push({ kind: SessionEventKind.guardrailDecision, payload: observed });
     if (decision.verdict !== 'allow') {
       const message =
         decision.reasons.join(' ') || 'The request was denied by a managed-agent guardrail.';
       throw new GuardrailPolicyDeniedError(decision.reasons, message);
     }
     if (decision.stateUpdates.length > 0) {
-      await this.opts.onGuardrailState?.(decision.stateUpdates);
+      await this.opts.onGuardrailState?.(
+        decision.stateUpdates,
+        this.currentTurnEventId,
+        this.guardrailMonthWindow,
+      );
       this.guardrailStore.apply(decision.stateUpdates);
     }
   }
@@ -534,7 +555,9 @@ export class InSandboxHarness implements AgentHarness {
   private async refreshGuardrailSubjectWindow(): Promise<void> {
     if (!this.currentTurnEventId || !this.opts.refreshGuardrailSubjectWindow) return;
     const state = await this.opts.refreshGuardrailSubjectWindow(this.currentTurnEventId);
-    this.guardrailStore.replace('subject_window', state);
+    this.applyGuardrailUsageState(
+      state['subject_window'] !== undefined ? state : { subject_window: state },
+    );
   }
 }
 
@@ -656,6 +679,7 @@ function sdkToolNameForLogicalName(logicalName: string): string | undefined {
 function buildSdkToolOptions(
   snapshot: SessionStartInput['agentSnapshot'],
   guardrails: readonly PreparedGuardrail[] = [],
+  onDecision?: (decision: Decision, tool: string) => void,
 ): Pick<OpenSessionOptions, 'tools' | 'allowedTools'> {
   const logicalNames = snapshot.allowed_tool_names;
   if (logicalNames === undefined) return {};
@@ -671,7 +695,14 @@ function buildSdkToolOptions(
       );
       continue;
     }
-    const policy = statelessToolVerdict(logicalName, sdkName, policies, guardrails);
+    const policy = statelessToolVerdict(
+      logicalName,
+      sdkName,
+      policies,
+      guardrails,
+      undefined,
+      (decision) => onDecision?.(decision, sdkName),
+    );
     if (policy !== 'always_allow') {
       if (policy === 'always_ask') {
         console.warn(
@@ -704,6 +735,7 @@ function toPreparedGuardrail(
       id: g.id,
       name: g.name,
       enabled: true,
+      ...(g.mode ? { mode: g.mode } : {}),
       phases: g.phases as PreparedGuardrail['guardrail']['phases'],
       scope: 'explicit',
       rule: g.rule as PreparedGuardrail['guardrail']['rule'],
@@ -721,6 +753,7 @@ function statelessToolVerdict(
   policies: Readonly<Record<string, 'always_allow' | 'always_ask' | 'always_deny'>>,
   guardrails: readonly PreparedGuardrail[],
   subagentId?: string,
+  onDecision?: (decision: Decision) => void,
 ): 'always_allow' | 'always_ask' | 'always_deny' {
   const seedPolicy = inSandboxToolPolicy(logicalName, sdkName, policies);
   if (guardrails.length === 0) return seedPolicy;
@@ -766,10 +799,12 @@ function statelessToolVerdict(
     { builtins: BUILTIN_EVALUATORS, expression: evaluateGuardrailExpression, seed },
   );
 
+  onDecision?.(decision);
+
   // `ask` is the exposure-time representation of "cannot decide without the
   // real arguments". In-sandbox approval is unavailable, so the caller removes
   // the tool rather than treating an empty synthetic input as an allow.
-  if (inputRead) return 'always_ask';
+  if (inputRead && decision.verdict !== 'allow') return 'always_ask';
 
   return decision.verdict === 'deny'
     ? 'always_deny'
@@ -797,6 +832,7 @@ function inSandboxToolPolicy(
 function buildSubagentDefinitions(
   multiagent: SessionStartInput['agentSnapshot']['multiagent'] | undefined,
   guardrails: readonly PreparedGuardrail[],
+  onDecision?: (decision: Decision, tool: string) => void,
 ): Record<string, SandboxAgentDefinition> {
   if (!multiagent || multiagent.type !== 'coordinator') return {};
   const out: Record<string, SandboxAgentDefinition> = {};
@@ -808,6 +844,7 @@ function buildSubagentDefinitions(
       agent.tool_permission_policies ?? {},
       guardrails,
       agent.id,
+      onDecision,
     );
     out[key] = {
       managedAgentId: agent.id,
@@ -827,6 +864,7 @@ function sdkToolNamesForSubagent(
   policies: Readonly<Record<string, 'always_allow' | 'always_ask' | 'always_deny'>>,
   guardrails: readonly PreparedGuardrail[],
   subagentId: string,
+  onDecision?: (decision: Decision, tool: string) => void,
 ): string[] | undefined {
   if (allowedLogicalNames === undefined) return undefined;
   const tools: string[] = [];
@@ -839,8 +877,9 @@ function sdkToolNamesForSubagent(
       continue;
     }
     if (
-      statelessToolVerdict(logicalName, sdkName, policies, guardrails, subagentId) ===
-      'always_allow'
+      statelessToolVerdict(logicalName, sdkName, policies, guardrails, subagentId, (decision) =>
+        onDecision?.(decision, sdkName),
+      ) === 'always_allow'
     ) {
       tools.push(sdkName);
     }

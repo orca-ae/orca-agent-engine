@@ -15,7 +15,8 @@
     "lint": "eslint 'src/**/*.ts' 'test/**/*.ts'"
   },
   "dependencies": {
-    "@bufbuild/cel": "^0.6.0"
+    "@bufbuild/cel": "^0.6.0",
+    "@runorca/dogwood": "file:../../vendor/dogwood/runorca-dogwood-0.1.0-df6624b.tgz"
   },
   "devDependencies": {
     "@vitest/coverage-v8": "^2.0.0",

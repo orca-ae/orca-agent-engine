@@ -577,7 +577,11 @@ describe('conditional pricing PostgreSQL/API/accounting', () => {
         .select()
         .from(guardrailCounters)
         .where(
-          and(eq(guardrailCounters.workspaceId, workspace), eq(guardrailCounters.subject, subject)),
+          and(
+            eq(guardrailCounters.workspaceId, workspace),
+            eq(guardrailCounters.subject, subject),
+            eq(guardrailCounters.key, 'daily_cost_usd'),
+          ),
         );
       expect(counter!.window).toBe(afterMidnight.toISOString().slice(0, 10));
       expect(counter!.valueNum).toBeGreaterThan(0);

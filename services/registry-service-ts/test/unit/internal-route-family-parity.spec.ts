@@ -43,6 +43,10 @@ type WorkloadCaller = 'harness' | 'ai-gateway' | 'observability-exporter';
 
 const EXPECTED_ROUTE_CALLERS: Record<string, readonly WorkloadCaller[]> = {
   'GET /internal/v1/guardrails/effective': ['ai-gateway'],
+  'GET /internal/v1/workspaces/:workspaceId/guardrails/effective': ['ai-gateway'],
+  'GET /internal/v1/workspaces/:workspaceId/sessions/:id/policy-events': ['harness', 'ai-gateway'],
+  'POST /internal/v1/workspaces/:workspaceId/sessions/:id/policy-events': ['harness', 'ai-gateway'],
+  'POST /internal/v1/workspaces/:workspaceId/sessions/:id/policy-warnings': ['ai-gateway'],
   'POST /internal/v1/workspaces/:workspaceId/sessions/:sessionId/agent-observability/context/resolve':
     ['observability-exporter'],
   'POST /internal/v1/workspaces/:workspaceId/sessions/:sessionId/agent-observability/secret/resolve':
@@ -120,7 +124,11 @@ describe('internal workload route-capability parity', () => {
       .sort();
     expect(aiGateway).toEqual([
       'GET /internal/v1/guardrails/effective',
+      'GET /internal/v1/workspaces/:workspaceId/guardrails/effective',
+      'GET /internal/v1/workspaces/:workspaceId/sessions/:id/policy-events',
       'POST /internal/v1/workspaces/:workspaceId/sessions/:id/guardrail-state',
+      'POST /internal/v1/workspaces/:workspaceId/sessions/:id/policy-events',
+      'POST /internal/v1/workspaces/:workspaceId/sessions/:id/policy-warnings',
       'POST /internal/v1/workspaces/:workspaceId/sessions/:id/usage',
       'POST /internal/v1/workspaces/:workspaceId/sessions/:sessionId/mcp-destination/resolve',
       'POST /internal/v1/workspaces/:workspaceId/sessions/:sessionId/vault-credentials/:id/resolve',

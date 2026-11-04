@@ -148,6 +148,12 @@ where the sandbox runs; there is no per-`target` transport split. The server hal
 of the handshake — auth gates, owner resolution, close codes — is
 [`registry-service.md`](./registry-service.md) ("Runner tunnel").
 
+The hello declares the runner's observe-mode and monthly-budget reader capabilities.
+It does not advertise Dogwood evaluation. For supported Gateway-owned Dogwood sessions,
+Registry removes Dogwood rules from the runner snapshot and delivers them to the selected
+Gateway enforcer. Registry checks the remaining guardrails against the declared reader
+capabilities at snapshot delivery and turn boundaries.
+
 The runner is spawned once per session by the environment-worker, which points a
 launch command at `node dist/main.js` and seeds four wiring variables (binding
 token, workspace root, parent pid, registry tunnel URL). Those four names are

@@ -1,18 +1,28 @@
 // Copyright The Orca Authors
 // SPDX-License-Identifier: Apache-2.0
 
+import {
+  DogwoodEnforcer,
+  DogwoodConflict,
+  type DogwoodTransport,
+  type DogwoodDecision,
+} from '../dogwood.js';
+import { readMcpTools, manifestDrift } from '../dogwood-manifests.js';
+import { guardrailDecisionPayload } from '@orca/agent-event-contract';
 import { v5 as uuidv5, v7 as uuidv7 } from 'uuid';
 import {
   BUILTIN_EVALUATORS,
   InMemoryGuardrailStateStore,
-  SHARED_USAGE_KEYS,
+  applyGuardrailUsageAcknowledgment,
   evaluateGuardrails,
   isEnforced,
   maxVerdict,
   type GuardrailEvent,
+  type Decision,
   type PreparedGuardrail,
   type StateUpdate,
   type Verdict,
+  type ObservedGuardrailVerdict,
 } from '@orca/guardrails';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -121,6 +131,9 @@ const DEFAULT_OUTCOME_MAX_ITERATIONS = 3;
 const MAX_OUTCOME_MAX_ITERATIONS = 20;
 
 interface PendingToolConfirmation {
+  reask?: () => void;
+  dogwood?: (confirmationEventId: string, approved: boolean) => Promise<DogwoodDecision>;
+  signal?: AbortSignal;
   toolName: string;
   toolInput: Record<string, unknown>;
   toolUseID: string;
@@ -173,13 +186,19 @@ function deriveClaudeSessionId(orcaSessionId: string): string {
 }
 
 export interface ClaudeHarnessOptions {
+  dogwoodTransport?: DogwoodTransport;
+  dogwoodDispatchClockErrorBoundMs?: number;
   /**
    * Called with the guardrail state a decision produced, so the runner can
    * persist it. The harness waits for this write-through before allowing the
    * guarded action, so a failed flush cannot silently turn a durable cap into
    * a process-local one.
    */
-  onGuardrailState?: (updates: readonly StateUpdate[]) => Promise<void> | void;
+  onGuardrailState?: (
+    updates: readonly StateUpdate[],
+    turnEventId?: string,
+    monthWindow?: string,
+  ) => Promise<void> | void;
   /** Refresh Registry-authenticated cross-session counters before request enforcement. */
   refreshGuardrailSubjectWindow?: (
     turnEventId: string,
@@ -322,6 +341,7 @@ export class ClaudeAgentSdkHarness implements AgentHarness {
    * runner left off — a cap that reset on restart could be cleared by forcing
    * one.
    */
+  private guardrailMonthWindow: string | undefined;
   private guardrailStore = new InMemoryGuardrailStateStore();
   /** Outcome criteria defined via user.define_outcome, keyed by outcome id. */
   private definedOutcomes = new Map<string, OutcomeCriterion>();
@@ -338,6 +358,7 @@ export class ClaudeAgentSdkHarness implements AgentHarness {
   private currentModelSummaryStartId: AgentEventId | null = null;
   private usageTracker: ClaudeUsageTracker | undefined;
   private currentTurnEventId: string | undefined;
+  private dogwood: DogwoodEnforcer | undefined;
 
   constructor(private readonly opts: ClaudeHarnessOptions) {
     this.outcomeEvaluator = opts.evaluateOutcome ?? null;
@@ -364,6 +385,58 @@ export class ClaudeAgentSdkHarness implements AgentHarness {
       });
     }
     this.input = input;
+    this.guardrailMonthWindow = input.guardrailMonthWindow;
+    if (input.guardrails?.some((g) => (g.rule as { kind?: string })?.kind === 'dogwood')) {
+      if (!this.opts.dogwoodTransport) throw new Error('Dogwood requires Registry authorization');
+      this.dogwood = new DogwoodEnforcer(this.opts.dogwoodTransport, {
+        ...(this.opts.dogwoodDispatchClockErrorBoundMs !== undefined
+          ? { clockErrorBoundMs: this.opts.dogwoodDispatchClockErrorBoundMs }
+          : {}),
+        applyTurn: (updates) => this.guardrailStore.apply(updates),
+        mirror: (state) => {
+          for (const scope of ['session', 'subject_window', 'workspace_window'] as const)
+            this.guardrailStore.replace(scope, state[scope]);
+        },
+        inspectManifests: async (view) => {
+          if (this.mcpJwtProvider) {
+            const auth = await this.mcpJwtProvider.getValidToken();
+            if (this.mcpServers)
+              this.mcpServers = withMcpAuthorization(this.mcpServers, auth.token);
+          }
+          const manifests = view.guardrails.flatMap(
+            (g) => (g.rule as import('@runorca/dogwood').Rule).mcpManifests ?? [],
+          );
+          const seen = new Set<string>(),
+            signal = AbortSignal.timeout(5000);
+          for (const manifest of manifests) {
+            if (seen.has(manifest.url)) continue;
+            seen.add(manifest.url);
+            const configured = view.mcp_servers?.find((s) => s.url === manifest.url);
+            const endpoint = configured ? this.mcpServers?.[configured.name] : undefined;
+            let drift = true;
+            try {
+              if (endpoint && (endpoint.type === 'http' || endpoint.type === 'sse'))
+                drift = manifestDrift(
+                  manifest.tools,
+                  await readMcpTools(endpoint.url, endpoint.headers ?? {}, signal),
+                );
+            } catch {
+              /* Missing live schema is visible evidence; actual evaluation remains fail-closed. */
+            }
+            if (drift)
+              this.emit({
+                kind: SessionEventKind.warning,
+                payload: sessionWarningPayload({
+                  type: 'dogwood_manifest_drift',
+                  message: `Dogwood MCP manifest ${manifest.server} differs from or cannot be checked against the live tools/list catalog.`,
+                }),
+              });
+          }
+        },
+        evidence: (payload) => this.emit({ kind: SessionEventKind.guardrailDecision, payload }),
+      });
+    }
+
     // Seed guardrails and their counters from the prepared runtime. Restoring
     // state here rather than lazily means the first tool call of a respawned
     // session already sees the totals the previous runner reached.
@@ -372,6 +445,7 @@ export class ClaudeAgentSdkHarness implements AgentHarness {
         id: g.id,
         name: g.name,
         enabled: true,
+        ...(g.mode ? { mode: g.mode } : {}),
         phases: g.phases as PreparedGuardrail['guardrail']['phases'],
         scope: 'explicit',
         rule: g.rule as PreparedGuardrail['guardrail']['rule'],
@@ -382,9 +456,12 @@ export class ClaudeAgentSdkHarness implements AgentHarness {
       ...(g.subagentId ? { subagentId: g.subagentId } : {}),
     }));
     this.reportUnenforceableGuardrails();
-    this.guardrailStore = new InMemoryGuardrailStateStore(
-      input.guardrailState ? { session: { ...input.guardrailState } } : {},
-    );
+    this.guardrailStore = new InMemoryGuardrailStateStore({
+      ...(input.guardrailState ? { session: { ...input.guardrailState } } : {}),
+      ...(input.guardrailWorkspaceWindowState
+        ? { workspace_window: { ...input.guardrailWorkspaceWindowState } }
+        : {}),
+    });
     this.mcpServers = input.mcpServers;
     this.mcpJwtProvider = input.mcpJwtProvider;
     this.remoteMcpToolsets = input.remoteMcpToolsets;
@@ -416,17 +493,9 @@ export class ClaudeAgentSdkHarness implements AgentHarness {
   }
 
   applyGuardrailUsageState(state: Readonly<Record<string, unknown>>): void {
-    this.guardrailStore.apply(
-      Object.entries(state).map(([key, value]) => ({
-        scope:
-          key === SHARED_USAGE_KEYS.dailyCostUsd
-            ? ('subject_window' as const)
-            : ('session' as const),
-        key,
-        action: 'set' as const,
-        value,
-      })),
-    );
+    if (typeof state['month_window'] === 'string')
+      this.guardrailMonthWindow = state['month_window'];
+    applyGuardrailUsageAcknowledgment(this.guardrailStore, state);
   }
 
   hasPendingGuardrailUsage(): boolean {
@@ -437,7 +506,7 @@ export class ClaudeAgentSdkHarness implements AgentHarness {
     if (this.terminated) return 'deferred';
     await this.flushPendingUsageReports();
     if (event.kind === 'user.tool_confirmation') {
-      const prepared = this.prepareToolConfirmation(event.payload);
+      const prepared = this.prepareToolConfirmation(event.payload, event.id ?? '');
       if (!prepared) {
         throw new UnappliedUserEventError(
           event.kind,
@@ -500,6 +569,10 @@ export class ClaudeAgentSdkHarness implements AgentHarness {
       await hooks?.onAccepted();
       this.guardrailStore.resetTurn();
       this.currentTurnEventId = event.id;
+      if (this.dogwood) {
+        if (!event.id) throw new Error('Dogwood requires an authenticated turn event');
+        await this.dogwood.startTurn(event.id);
+      }
       await this.refreshGuardrailSubjectWindow();
       this.definedOutcomes.set(criterion.id, criterion);
       const text = outcomePrompt(criterion);
@@ -526,6 +599,10 @@ export class ClaudeAgentSdkHarness implements AgentHarness {
     await hooks?.onAccepted();
     this.guardrailStore.resetTurn();
     this.currentTurnEventId = event.id;
+    if (this.dogwood) {
+      if (!event.id) throw new Error('Dogwood requires an authenticated turn event');
+      await this.dogwood.startTurn(event.id);
+    }
     await this.refreshGuardrailSubjectWindow();
     await this.evaluateRequestGuardrails(text);
     this.rememberSystemMessage(textOf(event.systemMessage));
@@ -1219,7 +1296,11 @@ export class ClaudeAgentSdkHarness implements AgentHarness {
       if ((block as { type?: unknown }).type !== 'tool_result') continue;
       const b = block as { tool_use_id?: unknown; content?: unknown; is_error?: unknown };
       const toolUseId = typeof b.tool_use_id === 'string' ? b.tool_use_id : '';
-      const result = await this.applyToolResultGuardrails(toolUseId, b.content);
+      const result = await this.applyToolResultGuardrails(
+        toolUseId,
+        b.content,
+        Boolean(b.is_error),
+      );
       if (toolUseId && this.clientExecutedSdkToolUseIds.delete(toolUseId)) {
         this.publicEventIdByToolUseId.delete(toolUseId);
         this.guardrailToolCallByToolUseId.delete(toolUseId);
@@ -1490,6 +1571,7 @@ export class ClaudeAgentSdkHarness implements AgentHarness {
   async stop(reason: TerminationReason): Promise<void> {
     void reason;
     this.terminated = true;
+    await this.dogwood?.stop();
     this.opts.llmGatewayJwtProvider?.close();
     // Startup may be awaiting the shared mint. Cancel it BEFORE joining startup.
     const mcpJwtProvider = this.mcpJwtProvider;
@@ -1682,7 +1764,80 @@ export class ClaudeAgentSdkHarness implements AgentHarness {
     // and guardrails compose on top of it, so a guardrail can tighten what the
     // policy allows but never loosen what it denies — the ordering is a
     // property of the lattice rather than of this function.
-    const permission = this.decideToolPermission(toolName, input, options.agentID);
+    const permission = this.decideToolPermission(
+      toolName,
+      input,
+      options.agentID,
+      options.toolUseID,
+    );
+
+    let dogwoodDecision: DogwoodDecision | undefined;
+    const publicId = this.publicEventIdByToolUseId.get(options.toolUseID) ?? `evt_${uuidv7()}`;
+    let askedBuiltinIntent: string | undefined;
+    const dogwoodDecide = async (confirmationEventId?: string, approved?: boolean) => {
+      const agentType = options.agentID
+        ? this.runtimeSubagentTypeById.get(options.agentID)
+        : undefined;
+      if (options.agentID && !agentType) throw new Error('Dogwood subagent identity is not mapped');
+      const resourceId = agentType ? this.subagentManagedAgentIdByType.get(agentType) : undefined;
+      return this.dogwood!.decide({
+        ...(usageTracker?.toolGroup(options.toolUseID)
+          ? { group: usageTracker.toolGroup(options.toolUseID)! }
+          : {}),
+        toolUseId: options.toolUseID,
+        toolName,
+        input,
+        publicToolUseId: publicId,
+        signal: options.signal,
+        ...(resourceId ? { resourceId } : {}),
+        ...(confirmationEventId
+          ? {
+              confirmation: {
+                event_id: confirmationEventId,
+                tool_use_id: publicId,
+                approved: approved === true,
+              },
+            }
+          : {}),
+        other: () => {
+          const fresh = this.decideToolPermission(
+            toolName,
+            input,
+            options.agentID,
+            options.toolUseID,
+          );
+          const intent = JSON.stringify([
+            fresh.guardrailVerdict,
+            fresh.reason ?? null,
+            fresh.intendedStateUpdates,
+          ]);
+          if (confirmationEventId && fresh.verdict === 'ask' && askedBuiltinIntent !== intent)
+            throw new DogwoodConflict('Builtin approval changed');
+          if (!confirmationEventId) askedBuiltinIntent = intent;
+          return {
+            ...(fresh.reason ? { reason: fresh.reason } : {}),
+            verdict: confirmationEventId && fresh.verdict === 'ask' ? 'allow' : fresh.verdict,
+            updates: confirmationEventId ? fresh.intendedStateUpdates : fresh.stateUpdates,
+            ...(fresh.observed ? { observed: fresh.observed } : {}),
+          };
+        },
+      });
+    };
+    if (this.dogwood) {
+      try {
+        dogwoodDecision = await dogwoodDecide();
+        permission.verdict = dogwoodDecision.verdict;
+        permission.guardrailVerdict = dogwoodDecision.verdict;
+        if (dogwoodDecision.verdict !== 'allow' && dogwoodDecision.reason)
+          permission.reason = dogwoodDecision.reason;
+      } catch {
+        return {
+          behavior: 'deny',
+          message: 'Tool authorization is unavailable; propose a new call.',
+          toolUseID: options.toolUseID,
+        };
+      }
+    }
 
     if (permission.verdict === 'deny') {
       return {
@@ -1699,16 +1854,23 @@ export class ClaudeAgentSdkHarness implements AgentHarness {
       permission.guardrailVerdict === 'allow';
     if (permission.verdict === 'allow' || clientPolicyApproval) {
       if (isCustomTool) this.clientExecutedSdkToolUseIds.add(options.toolUseID);
-      await this.applyGuardrailState(
-        clientPolicyApproval ? permission.intendedStateUpdates : permission.stateUpdates,
-      );
+      if (!this.dogwood)
+        await this.applyGuardrailState(
+          clientPolicyApproval ? permission.intendedStateUpdates : permission.stateUpdates,
+        );
       this.rememberGuardedToolCall(toolName, input, options.toolUseID, options.agentID);
       this.rememberSubagentDispatch(toolName, input, options.toolUseID);
+      if (dogwoodDecision && !dogwoodDecision.release()) {
+        await dogwoodDecision.interrupt();
+        return abortedToolPermissionResult(options.toolUseID);
+      }
+      if (options.signal.aborted || this.terminated)
+        return abortedToolPermissionResult(options.toolUseID);
       return { behavior: 'allow', updatedInput: input, toolUseID: options.toolUseID };
     }
 
     const existingEventId = this.publicEventIdByToolUseId.get(options.toolUseID);
-    const eventId = existingEventId ?? `evt_${uuidv7()}`;
+    const eventId = existingEventId ?? publicId;
     const remoteMcpTool = this.remoteMcpToolPartsForToolName(toolName);
     const isRemoteMcpTool =
       remoteMcpTool !== null && remoteMcpTool.serverName !== ORCA_MCP_SERVER_NAME;
@@ -1733,6 +1895,17 @@ export class ClaudeAgentSdkHarness implements AgentHarness {
         toolInput: input,
         toolUseID: options.toolUseID,
         approvedStateUpdates: permission.intendedStateUpdates,
+        signal: options.signal,
+        reask: () => {
+          this.publicEventIdByToolUseId.delete(options.toolUseID);
+          void this.canUseManagedAgentTool(toolName, input, options, usageTracker).then(
+            resolve,
+            () => resolve(abortedToolPermissionResult(options.toolUseID)),
+          );
+        },
+        ...(this.dogwood
+          ? { dogwood: (id: string, approved: boolean) => dogwoodDecide(id, approved) }
+          : {}),
         ...(options.agentID ? { runtimeSubagentId: options.agentID } : {}),
         resolve,
       });
@@ -1775,9 +1948,11 @@ export class ClaudeAgentSdkHarness implements AgentHarness {
     toolName: string,
     input: Record<string, unknown>,
     runtimeSubagentId?: string,
+    toolUseId?: string,
   ): {
     verdict: Verdict;
     guardrailVerdict: Verdict;
+    observed?: readonly ObservedGuardrailVerdict[];
     reason?: string;
     stateUpdates: readonly StateUpdate[];
     intendedStateUpdates: readonly StateUpdate[];
@@ -1818,18 +1993,30 @@ export class ClaudeAgentSdkHarness implements AgentHarness {
     // client-executed tools distinguish an ordinary policy ask (the client
     // tool result is its approval) from a guardrail ask that still needs the
     // explicit confirmation round trip.
-    const decision = evaluateGuardrails(this.preparedGuardrails, event, {
-      builtins: BUILTIN_EVALUATORS,
-      expression: evaluateGuardrailExpression,
-      seed: 'allow',
-      store: this.guardrailStore,
-    });
+    const decision = evaluateGuardrails(
+      this.preparedGuardrails.filter((g) => g.guardrail.rule.kind !== 'dogwood'),
+      event,
+      {
+        builtins: BUILTIN_EVALUATORS,
+        expression: evaluateGuardrailExpression,
+        seed: 'allow',
+        store: this.guardrailStore,
+      },
+    );
 
     const verdict = maxVerdict(seed, decision.verdict);
+    const observed = guardrailDecisionPayload({
+      phase: 'tool_call',
+      decision: { ...decision, verdict },
+      ...(toolUseId ? { toolUseId } : {}),
+    });
+    if (observed && !this.dogwood)
+      this.emit({ kind: SessionEventKind.guardrailDecision, payload: observed });
 
     return {
       verdict,
       guardrailVerdict: decision.verdict,
+      ...(decision.observed ? { observed: decision.observed } : {}),
       ...(decision.reasons.length > 0 ? { reason: decision.reasons.join(' ') } : {}),
       stateUpdates: verdict === 'allow' ? decision.stateUpdates : [],
       intendedStateUpdates: decision.intendedStateUpdates,
@@ -1839,33 +2026,49 @@ export class ClaudeAgentSdkHarness implements AgentHarness {
   /** Persist guardrail state before exposing it to the next local decision. */
   private async applyGuardrailState(updates: readonly StateUpdate[]): Promise<void> {
     if (updates.length === 0) return;
-    await this.opts.onGuardrailState?.(updates);
+    await this.opts.onGuardrailState?.(updates, this.currentTurnEventId, this.guardrailMonthWindow);
     this.guardrailStore.apply(updates);
   }
 
   private async applyToolResultGuardrails(
     toolUseId: string,
     content: unknown,
+    failed = false,
   ): Promise<{ content: unknown; denied: boolean }> {
     const call = this.guardrailToolCallByToolUseId.get(toolUseId);
-    if (!call || this.preparedGuardrails.length === 0) return { content, denied: false };
-    const decision = evaluateGuardrails(
-      this.preparedGuardrails,
-      {
-        phase: 'tool_result',
-        sessionId: this.input?.sessionId ?? '',
-        tool: { name: call.toolName, input: call.input },
-        result: content,
-        ...(call.subagentId ? { subagentId: call.subagentId } : {}),
-        ...(call.modelId ? { modelId: call.modelId } : {}),
-      },
-      {
-        builtins: BUILTIN_EVALUATORS,
-        expression: evaluateGuardrailExpression,
-        store: this.guardrailStore,
-      },
-    );
-    await this.applyGuardrailState(decision.stateUpdates);
+    if (!call || this.preparedGuardrails.length === 0) {
+      await this.dogwood?.complete(toolUseId, failed ? 'failed' : 'response', content);
+      return { content, denied: false };
+    }
+    let decision: Decision | undefined;
+    const evaluate = () => {
+      decision = evaluateGuardrails(
+        this.preparedGuardrails.filter((g) => g.guardrail.rule.kind !== 'dogwood'),
+        {
+          phase: 'tool_result',
+          sessionId: this.input?.sessionId ?? '',
+          tool: { name: call.toolName, input: call.input },
+          result: content,
+          ...(call.subagentId ? { subagentId: call.subagentId } : {}),
+          ...(call.modelId ? { modelId: call.modelId } : {}),
+        },
+        {
+          builtins: BUILTIN_EVALUATORS,
+          expression: evaluateGuardrailExpression,
+          store: this.guardrailStore,
+        },
+      );
+      return decision.stateUpdates;
+    };
+    if (this.dogwood)
+      await this.dogwood.complete(toolUseId, failed ? 'failed' : 'response', content, evaluate);
+    else {
+      evaluate();
+      await this.applyGuardrailState(decision!.stateUpdates);
+    }
+    if (!decision) return { content, denied: false };
+    const observed = guardrailDecisionPayload({ phase: 'tool_result', decision, toolUseId });
+    if (observed) this.emit({ kind: SessionEventKind.guardrailDecision, payload: observed });
     if (decision.verdict !== 'deny') return { content, denied: false };
     const reason = decision.reasons.join(' ') || 'Tool output denied by a managed-agent guardrail.';
     return {
@@ -1898,7 +2101,7 @@ export class ClaudeAgentSdkHarness implements AgentHarness {
   private async evaluateRequestGuardrails(userText: string): Promise<void> {
     if (this.preparedGuardrails.length === 0) return;
     const decision = evaluateGuardrails(
-      this.preparedGuardrails,
+      this.preparedGuardrails.filter((g) => g.guardrail.rule.kind !== 'dogwood'),
       {
         phase: 'request',
         sessionId: this.input?.sessionId ?? '',
@@ -1913,6 +2116,8 @@ export class ClaudeAgentSdkHarness implements AgentHarness {
         store: this.guardrailStore,
       },
     );
+    const observed = guardrailDecisionPayload({ phase: 'request', decision });
+    if (observed) this.emit({ kind: SessionEventKind.guardrailDecision, payload: observed });
     if (decision.verdict !== 'allow') {
       const message =
         decision.reasons.join(' ') || 'The request was denied by a managed-agent guardrail.';
@@ -1924,7 +2129,9 @@ export class ClaudeAgentSdkHarness implements AgentHarness {
   private async refreshGuardrailSubjectWindow(): Promise<void> {
     if (!this.currentTurnEventId || !this.opts.refreshGuardrailSubjectWindow) return;
     const state = await this.opts.refreshGuardrailSubjectWindow(this.currentTurnEventId);
-    this.guardrailStore.replace('subject_window', state);
+    this.applyGuardrailUsageState(
+      state['subject_window'] !== undefined ? state : { subject_window: state },
+    );
   }
 
   private permissionPolicyForTool(
@@ -2008,7 +2215,10 @@ export class ClaudeAgentSdkHarness implements AgentHarness {
     await this.waitForQueryIdleOrDone();
   }
 
-  private prepareToolConfirmation(payload: unknown): PreparedRequiredAction | null {
+  private prepareToolConfirmation(
+    payload: unknown,
+    confirmationEventId: string,
+  ): PreparedRequiredAction | null {
     if (!payload || typeof payload !== 'object') return null;
     const p = payload as Record<string, unknown>;
     const eventId = typeof p['tool_use_id'] === 'string' ? p['tool_use_id'] : null;
@@ -2026,7 +2236,20 @@ export class ClaudeAgentSdkHarness implements AgentHarness {
           // Inside `apply`, not before it: a stale confirmation never reaches
           // here, so an approval the session has moved past cannot advance a
           // counter for a call that will not run.
-          await this.applyGuardrailState(pending.approvedStateUpdates);
+          let authorization: DogwoodDecision | undefined;
+          if (pending.dogwood) {
+            try {
+              authorization = await pending.dogwood(confirmationEventId, true);
+            } catch (error) {
+              this.pendingToolConfirmations.delete(eventId);
+              if (error instanceof DogwoodConflict && pending.reask) {
+                pending.reask();
+                return;
+              }
+              pending.resolve(abortedToolPermissionResult(pending.toolUseID));
+              return;
+            }
+          } else await this.applyGuardrailState(pending.approvedStateUpdates);
           this.rememberGuardedToolCall(
             pending.toolName,
             pending.toolInput,
@@ -2035,6 +2258,15 @@ export class ClaudeAgentSdkHarness implements AgentHarness {
           );
           this.rememberSubagentDispatch(pending.toolName, pending.toolInput, pending.toolUseID);
           this.pendingToolConfirmations.delete(eventId);
+          if (authorization && !authorization.release()) {
+            await authorization.interrupt();
+            pending.resolve(abortedToolPermissionResult(pending.toolUseID));
+            return;
+          }
+          if (this.terminated || pending.signal?.aborted) {
+            pending.resolve(abortedToolPermissionResult(pending.toolUseID));
+            return;
+          }
           pending.resolve({
             behavior: 'allow',
             updatedInput: pending.toolInput,
@@ -2049,7 +2281,8 @@ export class ClaudeAgentSdkHarness implements AgentHarness {
         : `Tool ${pending.toolName} denied by user confirmation.`;
     return {
       isCurrent: () => this.pendingToolConfirmations.get(eventId) === pending,
-      apply: () => {
+      apply: async () => {
+        await pending.dogwood?.(confirmationEventId, false).catch(() => undefined);
         this.pendingToolConfirmations.delete(eventId);
         pending.resolve({
           behavior: 'deny',

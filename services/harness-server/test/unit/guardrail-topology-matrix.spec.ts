@@ -130,7 +130,10 @@ type CanUseTool = (
  * the thing `in_sandbox` has no equivalent of, and the reason these two
  * topologies cannot enforce the same rule the same way.
  */
-async function startSeparate(guardrails: SessionGuardrail[]): Promise<CanUseTool> {
+async function startSeparate(
+  guardrails: SessionGuardrail[],
+  overrides: Partial<SessionStartInput> = {},
+): Promise<CanUseTool> {
   queryMock.mockReset();
   queryMock.mockReturnValueOnce(emptyAsyncIterable());
   const harness = new ClaudeAgentSdkHarness({
@@ -145,6 +148,7 @@ async function startSeparate(guardrails: SessionGuardrail[]): Promise<CanUseTool
     sessionId: 'ses_test',
     agentSnapshot: { tool_permission_policies: { mcp__orca__bash: 'always_allow' } },
     guardrails,
+    ...overrides,
   } satisfies SessionStartInput);
   await harness.submit({
     kind: 'user.message',
@@ -297,5 +301,69 @@ describe('guardrail enforcement differs by topology, on purpose', () => {
       // The tool stays exposed — the rule is inert, not enforcing by removal.
       expect(exposedTools(transport)).toContain('Bash');
     });
+  });
+});
+
+describe('observe mode at both tool enforcement points', () => {
+  it.each([
+    { kind: 'builtin', builtin: 'block_tools', params: { tools: SHELL_TOOLS } },
+    { kind: 'expression', expression: "event.tool.input.command != 'git push'", onFalse: 'deny' },
+  ])('keeps an observed tool exposed and callable: $builtin', async (rule) => {
+    const guardrail: SessionGuardrail = {
+      id: 'grd_observe',
+      name: 'Observe shells',
+      tier: 'workspace',
+      mode: 'observe',
+      phases: ['tool_call'],
+      rule,
+      stateful: false,
+    };
+    const enforced = await startInSandbox([{ ...guardrail, mode: 'enforce' }]);
+    expect(exposedTools(enforced.transport)).not.toContain('Bash');
+    const { transport } = await startInSandbox([guardrail]);
+    expect(exposedTools(transport)).toContain('Bash');
+    const canUseTool = await startSeparate([guardrail]);
+    expect(
+      (
+        await canUseTool(
+          'mcp__orca__bash',
+          { command: 'git push' },
+          { signal: new AbortController().signal, toolUseID: 'toolu_observed' },
+        )
+      ).behavior,
+    ).toBe('allow');
+  });
+});
+
+describe('monthly workspace budget runtime', () => {
+  it('restores workspace state before the first tool and preserves an unpriced flag', async () => {
+    const rule: SessionGuardrail = {
+      id: 'grd_monthly',
+      name: 'Monthly',
+      tier: 'workspace',
+      phases: ['tool_call'],
+      stateful: true,
+      stateScope: 'workspace_window',
+      rule: {
+        kind: 'builtin',
+        builtin: 'workspace_monthly_cost_budget',
+        params: { max_cost_usd: 5, on_unpriced: 'deny' },
+      },
+    };
+    for (const state of [
+      { workspace_monthly_cost_usd: 5 },
+      { workspace_monthly_cost_usd: 0, workspace_monthly_cost_unpriced: 1 },
+    ]) {
+      const gate = await startSeparate([rule], { guardrailWorkspaceWindowState: state });
+      expect(
+        (
+          await gate(
+            'mcp__orca__bash',
+            { command: 'ls' },
+            { signal: new AbortController().signal, toolUseID: 'toolu_monthly' },
+          )
+        ).behavior,
+      ).toBe('deny');
+    }
   });
 });

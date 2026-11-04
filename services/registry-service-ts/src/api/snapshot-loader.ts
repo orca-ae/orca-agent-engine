@@ -1,6 +1,8 @@
 // Copyright The Orca Authors
 // SPDX-License-Identifier: Apache-2.0
 
+import { bindPolicyTurn } from '../domain/policy-events.js';
+import { guardrailPolicyBindings } from '../persistence/postgres/schema.js';
 import { nativeHarnessState } from '../domain/harness-state.js';
 import { bindStoredHarness } from '@orca/harness-catalog';
 // Drizzle-backed {@link SnapshotRecordLoader} over the registry tables.
@@ -60,6 +62,40 @@ import type { PreparedSkillDescriptor } from '../contracts/internal.contract.js'
  */
 export function buildSnapshotRecordLoader(db: DbClient): SnapshotRecordLoader {
   return {
+    async prepareDogwood(input) {
+      await db.transaction(async (tx) => {
+        const [session] = await tx
+          .select()
+          .from(sessions)
+          .where(
+            and(
+              eq(sessions.workspaceId, input.workspaceId),
+              eq(sessions.id, input.sessionId),
+              isNull(sessions.deletedAt),
+            ),
+          );
+        if (!session) throw new Error('policy session unavailable');
+        const [existing] = await tx
+          .select()
+          .from(guardrailPolicyBindings)
+          .where(
+            and(
+              eq(guardrailPolicyBindings.workspaceId, input.workspaceId),
+              eq(guardrailPolicyBindings.sessionId, input.sessionId),
+            ),
+          );
+        if (!input.policyOwner) {
+          if (existing) return;
+          throw new Error('Dogwood requires a bound runner generation');
+        }
+        await bindPolicyTurn(tx, {
+          ...input,
+          owner: input.policyOwner,
+          enforcer: 'ai-gateway',
+          ...(input.turnEventId ? { turnEventId: input.turnEventId } : {}),
+        });
+      });
+    },
     async loadSession(sessionId: string): Promise<ResolverSessionRecord | null> {
       // Joined to `workspaces` for `organization_id` — the session JWT's required
       // `org_id` claim (see `SessionJwtMinter.mint`, `src/auth/session-jwt.ts`).
@@ -334,6 +370,7 @@ export function buildSnapshotRecordLoader(db: DbClient): SnapshotRecordLoader {
           id: guardrails.id,
           name: guardrails.name,
           enabled: guardrails.enabled,
+          mode: guardrails.mode,
           phases: guardrails.phases,
           scope: guardrails.scope,
           rule: guardrails.rule,
@@ -370,6 +407,7 @@ export function buildSnapshotRecordLoader(db: DbClient): SnapshotRecordLoader {
           id: row.id,
           name: row.name,
           enabled: row.enabled,
+          mode: row.mode,
           phases: Array.isArray(row.phases) ? (row.phases as string[]) : [],
           scope: row.scope as 'organization' | 'workspace' | 'explicit',
           rule: row.rule,

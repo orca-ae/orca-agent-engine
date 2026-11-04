@@ -302,7 +302,10 @@ policy used by the other remote runtimes.
    prepared runtime: registry enqueues a runtime-invalidation sentinel through
    the lifecycle outbox, and the dispatcher re-prepares the runner at the next
    turn boundary — a mid-turn session finishes its turn under the old rule and
-   never starts one under a stale rule. See [`../guardrails.md`](../guardrails.md).
+   never starts one under a stale rule. The configuration key orders subagents,
+   guardrails, runtime-affecting credentials and resource bindings by code unit,
+   so locale and ICU differences do not change their ordering.
+   See [`../guardrails.md`](../guardrails.md).
    Before draining each user message deferred behind a required-action boundary,
    the dispatcher reloads Registry's authoritative guardrail counters and leaves
    the message queued if that refresh fails, so request-phase budgets fail closed.
@@ -789,21 +792,21 @@ against an earlier runner's artifact.
 
 ### Env knobs
 
-| Var                       | Default           | Effect                                                                                                                                                                                                                |
-| ------------------------- | ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `S3_BUCKET`               | _unset_           | Bucket holding workspace-isolated files, memories, and execution outputs. When unset, the dispatcher skips creds-minting + output mounting + indexing entirely.                                                       |
-| `S3_KEY_PREFIX`           | `managed-agents/` | Deployment root shared by all stores. Components append `workspaces/{workspace_id}/...`; callers cannot supply an absolute object prefix.                                                                             |
-| `S3_ENDPOINT`             | _unset_           | S3 data-plane endpoint used by the S3 SDK and `s3fs`'s `-o url=` flag.                                                                                                                                                |
-| `S3_FORCE_PATH_STYLE`     | `true`            | Path-style bucket addressing for host-side AWS SDK clients and sandbox s3fs mounts. Set `false` for AWS S3 virtual-hosted addressing.                                                                                 |
-| `S3_STS_ENDPOINT`         | _unset_           | Optional STS endpoint override for `AssumeRole`. When unset, the AWS SDK selects its default STS endpoint; `S3_ENDPOINT` is never reused implicitly.                                                                  |
-| `S3_REGION`               | _unset_           | Region passed to STS / S3 clients. Defaults via SDK when unset.                                                                                                                                                       |
-| `S3_STS_ROLE_ARN`         | _unset_           | IAM role ARN to `AssumeRole` for per-session creds. **Production MUST set this.** When unset, sandbox FUSE creds require the explicitly enabled static-key fallback (DEV ONLY).                                       |
-| `S3_ACCESS_KEY_ID`        | _unset_           | Optional static access-key for host-side S3 and STS clients. When the pair is absent, both use AWS default credential chain (including IRSA). Used directly by the sandbox dev fallback only when explicitly enabled. |
-| `S3_SECRET_ACCESS_KEY`    | _unset_           | Pair to `S3_ACCESS_KEY_ID`.                                                                                                                                                                                           |
-| `E2B_TEMPLATE_ID`         | _unset_           | Custom E2B template id (from `e2b template build`). When set, `E2BSandboxRuntime` uses it; otherwise the SDK default is used.                                                                                         |
-| `HARNESS_TURN_TIMEOUT_MS` | `600000` | Whole-turn deadline for the shared SDK host; see [SDK turn deadlines](#sdk-turn-deadlines). |
-| `HARNESS_TURN_TIMEOUT_OVERRIDES_MS` | `{}` | Optional JSON map of SDK harness IDs to integer millisecond overrides, taking precedence over the global deadline. |
-| `SESSION_IDLE_TIMEOUT_MS` | `60000`           | Warm-runner retention timeout after a completed turn. The session is already `idle`; when it fires, the dispatcher stops the runner, destroys the sandbox, and clears `sandbox_handle_id`.                            |
+| Var                                 | Default           | Effect                                                                                                                                                                                                                |
+| ----------------------------------- | ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `S3_BUCKET`                         | _unset_           | Bucket holding workspace-isolated files, memories, and execution outputs. When unset, the dispatcher skips creds-minting + output mounting + indexing entirely.                                                       |
+| `S3_KEY_PREFIX`                     | `managed-agents/` | Deployment root shared by all stores. Components append `workspaces/{workspace_id}/...`; callers cannot supply an absolute object prefix.                                                                             |
+| `S3_ENDPOINT`                       | _unset_           | S3 data-plane endpoint used by the S3 SDK and `s3fs`'s `-o url=` flag.                                                                                                                                                |
+| `S3_FORCE_PATH_STYLE`               | `true`            | Path-style bucket addressing for host-side AWS SDK clients and sandbox s3fs mounts. Set `false` for AWS S3 virtual-hosted addressing.                                                                                 |
+| `S3_STS_ENDPOINT`                   | _unset_           | Optional STS endpoint override for `AssumeRole`. When unset, the AWS SDK selects its default STS endpoint; `S3_ENDPOINT` is never reused implicitly.                                                                  |
+| `S3_REGION`                         | _unset_           | Region passed to STS / S3 clients. Defaults via SDK when unset.                                                                                                                                                       |
+| `S3_STS_ROLE_ARN`                   | _unset_           | IAM role ARN to `AssumeRole` for per-session creds. **Production MUST set this.** When unset, sandbox FUSE creds require the explicitly enabled static-key fallback (DEV ONLY).                                       |
+| `S3_ACCESS_KEY_ID`                  | _unset_           | Optional static access-key for host-side S3 and STS clients. When the pair is absent, both use AWS default credential chain (including IRSA). Used directly by the sandbox dev fallback only when explicitly enabled. |
+| `S3_SECRET_ACCESS_KEY`              | _unset_           | Pair to `S3_ACCESS_KEY_ID`.                                                                                                                                                                                           |
+| `E2B_TEMPLATE_ID`                   | _unset_           | Custom E2B template id (from `e2b template build`). When set, `E2BSandboxRuntime` uses it; otherwise the SDK default is used.                                                                                         |
+| `HARNESS_TURN_TIMEOUT_MS`           | `600000`          | Whole-turn deadline for the shared SDK host; see [SDK turn deadlines](#sdk-turn-deadlines).                                                                                                                           |
+| `HARNESS_TURN_TIMEOUT_OVERRIDES_MS` | `{}`              | Optional JSON map of SDK harness IDs to integer millisecond overrides, taking precedence over the global deadline.                                                                                                    |
+| `SESSION_IDLE_TIMEOUT_MS`           | `60000`           | Warm-runner retention timeout after a completed turn. The session is already `idle`; when it fires, the dispatcher stops the runner, destroys the sandbox, and clears `sandbox_handle_id`.                            |
 
 The custom E2B template `orca-default` bakes in `s3fs-fuse + fuse3`, removes
 the upstream blanket sudo rule, and permits only the constrained
@@ -998,3 +1001,11 @@ Pi-only direct credentials also accept `PI_SDK_PROVIDER_CREDENTIALS`, a JSON map
 provider IDs to `apiKeyEnv` and optional `baseUrlEnv` references. `GEMINI_API_KEY`,
 `GEMINI_BASE_URL`, `ZAI_API_KEY` and `ZAI_BASE_URL` select Gemini and ZAI directly.
 See [Pi SDK credentials](../libraries/pi-harness.md#credentials-and-native-gateway-transport).
+
+### Dogwood tool release
+
+The separate Claude SDK enforcer uses actual bounded WASM evaluation and Registry final
+authorization. Both direct and confirmed tool permissions check the live original receipt
+immediately before callback resolution. `DOGWOOD_DISPATCH_CLOCK_ERROR_BOUND_MS` has no
+default: finite release needs a qualified interval bound plus a checksummed suspend-inclusive
+native helper. See [Dogwood guardrails](../dogwood.md) for replay, recovery and clock behavior.

@@ -203,10 +203,11 @@ class FakeRunner {
     this.socket = new RunnerSocket((raw) => this.onFrame(raw));
   }
 
-  connect(): void {
+  connect(guardrailCapabilities?: string[]): void {
     const hello: HelloFrame = {
       kind: FrameKind.Hello,
       runnerVersion: '0.1.0-test',
+      ...(guardrailCapabilities ? { guardrailCapabilities } : {}),
       frameProtocolVersion: 1,
       harnesses: [],
       envs: [],
@@ -798,3 +799,64 @@ class FakeRunnerCapturingHeaders extends FakeRunner {
     }
   }
 }
+
+describe('runner guardrail compatibility at delivery', () => {
+  it('refuses unexpected Dogwood rules before sending them to an observe/monthly runner', async () => {
+    const registry = new TunnelRegistry();
+    const runner = new FakeRunner(registry, RUNNER_ID);
+    runner.connect(['guardrails.observe.v1', 'guardrails.monthly_budgets.v1']);
+    const snapshot = sampleSnapshot();
+    snapshot.guardrails = [
+      {
+        id: 'grd_dogwood',
+        name: 'Gateway-owned',
+        tier: 'workspace',
+        phases: ['tool_call'],
+        stateful: true,
+        rule: { kind: 'dogwood', policy: 'permit(principal, action, resource);' },
+      },
+    ];
+    const delivery = new SessionSnapshotDelivery({
+      workspaceId: WORKSPACE_ID,
+      sessionId: SESSION_ID,
+      runnerId: RUNNER_ID,
+      registry,
+      provider: { resolve: async () => snapshot },
+    });
+    await expect(delivery.deliver()).rejects.toThrow('dogwood.0.1.0');
+    expect(runner.requests).toEqual([]);
+    runner.disconnect();
+  });
+
+  it('refuses an older warm runner after an observe edit and admits a qualified reconnect', async () => {
+    const registry = new TunnelRegistry();
+    const runner = new FakeRunner(registry, RUNNER_ID);
+    runner.connect();
+    const snapshot = sampleSnapshot();
+    const delivery = new SessionSnapshotDelivery({
+      workspaceId: WORKSPACE_ID,
+      sessionId: SESSION_ID,
+      runnerId: RUNNER_ID,
+      registry,
+      provider: { resolve: async () => snapshot },
+    });
+    await expect(delivery.deliver()).resolves.toMatchObject({ delivered: true });
+    const originalRequests = runner.requests.length;
+    snapshot.guardrails = [
+      {
+        id: 'grd_observe',
+        name: 'Observe',
+        tier: 'workspace',
+        mode: 'observe',
+        phases: ['request'],
+        stateful: false,
+        rule: { kind: 'expression', expression: 'false', onFalse: 'deny' },
+      },
+    ];
+    await expect(delivery.deliver()).rejects.toThrow('guardrails.observe.v1');
+    expect(runner.requests).toHaveLength(originalRequests);
+    runner.disconnect();
+    runner.connect(['guardrails.observe.v1', 'guardrails.monthly_budgets.v1']);
+    await expect(delivery.deliver()).resolves.toMatchObject({ delivered: true });
+  });
+});

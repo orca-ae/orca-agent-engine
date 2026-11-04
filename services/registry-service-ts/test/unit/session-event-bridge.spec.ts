@@ -4540,3 +4540,49 @@ it('keeps a queued new message after abandoning the callback of the preceding tu
     await bridge.stop();
   }
 });
+
+describe('guardrail audit recovery', () => {
+  it.each(['observation', 'manifest-warning'])(
+    'does not treat preparation %s as an answered turn after reconnect',
+    async (evidence) => {
+      const { bridge, store, runner } = buildBridge();
+      runner.connect();
+      const id = 'evt_observe_recovery';
+      runner.scriptTurn(id, { lines: [{ type: 'agent.message', content: 'resumed' }] });
+      await store.append(WORKSPACE_ID, SESSION_ID, [
+        httpEventToProto({
+          workspaceId: WORKSPACE_ID,
+          sessionId: SESSION_ID,
+          producedBy: 'client',
+          idempotencyKey: '',
+          input: { id, type: 'user.message', content: [{ type: 'text', text: 'continue' }] },
+        }),
+        httpEventToProto({
+          workspaceId: WORKSPACE_ID,
+          sessionId: SESSION_ID,
+          producedBy: 'harness',
+          idempotencyKey: '',
+          input: {
+            ...(evidence === 'manifest-warning'
+              ? {
+                  type: 'session.warning',
+                  warning: { type: 'dogwood_manifest_drift', message: 'catalog drift' },
+                }
+              : {
+                  type: 'session.guardrail_decision',
+                  phase: 'request',
+                  decision: 'allow',
+                  guardrails: [{ guardrail_id: 'grd_one', mode: 'observe', verdict: 'deny' }],
+                }),
+          },
+        }),
+      ]);
+      bridge.start();
+      try {
+        await waitFor(() => runner.turns.some((turn) => turn.userEvent['id'] === id));
+      } finally {
+        await bridge.stop();
+      }
+    },
+  );
+});

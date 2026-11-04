@@ -6,6 +6,7 @@ import {
   AgentRuntimeSignalKind,
   CANONICAL_AGENT_EVENT_KINDS,
   InternalTranscriptEventKind,
+  SessionEventKind,
 } from '@orca/agent-event-contract';
 import {
   CLAUDE_SESSION_EVENT_TYPES,
@@ -19,9 +20,11 @@ import {
 } from '../../src/domain/events.js';
 
 describe('event mapping', () => {
-  it('includes every canonical producer kind but excludes runtime and marker kinds', () => {
+  it('includes Claude-compatible canonical kinds and excludes Orca-only and internal signals', () => {
     for (const kind of CANONICAL_AGENT_EVENT_KINDS) {
-      expect(CLAUDE_SESSION_EVENT_TYPES.has(kind)).toBe(true);
+      expect(CLAUDE_SESSION_EVENT_TYPES.has(kind)).toBe(
+        kind !== SessionEventKind.guardrailDecision,
+      );
     }
     expect(CLAUDE_SESSION_EVENT_TYPES.has(AgentRuntimeSignalKind.usage)).toBe(false);
     expect(CLAUDE_SESSION_EVENT_TYPES.has(InternalTranscriptEventKind.userEventProcessed)).toBe(

@@ -7,17 +7,25 @@ export const IO_PROJECTED_TRACE_SCHEMA_VERSION = 'orca.observability.projected-t
 export const TREE_PROJECTED_TRACE_SCHEMA_VERSION = 'orca.observability.projected-trace.v3' as const;
 export const TREE_IO_PROJECTED_TRACE_SCHEMA_VERSION =
   'orca.observability.projected-trace.v4' as const;
+export const GUARDRAIL_PROJECTED_TRACE_SCHEMA_VERSION =
+  'orca.observability.projected-trace.v5' as const;
+export const GUARDRAIL_IO_PROJECTED_TRACE_SCHEMA_VERSION =
+  'orca.observability.projected-trace.v6' as const;
 export function isProjectionSchema(value: unknown): value is ProjectedTrace['schemaVersion'] {
   return [
     PROJECTED_TRACE_SCHEMA_VERSION,
     IO_PROJECTED_TRACE_SCHEMA_VERSION,
     TREE_PROJECTED_TRACE_SCHEMA_VERSION,
     TREE_IO_PROJECTED_TRACE_SCHEMA_VERSION,
+    GUARDRAIL_PROJECTED_TRACE_SCHEMA_VERSION,
+    GUARDRAIL_IO_PROJECTED_TRACE_SCHEMA_VERSION,
   ].some((v) => v === value);
 }
 export function isIoProjectionSchema(value: unknown): boolean {
   return (
-    value === IO_PROJECTED_TRACE_SCHEMA_VERSION || value === TREE_IO_PROJECTED_TRACE_SCHEMA_VERSION
+    value === IO_PROJECTED_TRACE_SCHEMA_VERSION ||
+    value === TREE_IO_PROJECTED_TRACE_SCHEMA_VERSION ||
+    value === GUARDRAIL_IO_PROJECTED_TRACE_SCHEMA_VERSION
   );
 }
 export type CaptureMode = 'metadata_only' | 'raw_io';
@@ -83,7 +91,12 @@ export interface ProjectedSpan {
   sourceEventId: string;
   subpath: string;
   name: string;
-  observationType: 'agent_turn' | 'turn_model_summary' | 'tool' | 'outcome_evaluation';
+  observationType:
+    | 'agent_turn'
+    | 'turn_model_summary'
+    | 'tool'
+    | 'outcome_evaluation'
+    | 'guardrail_decision';
   startedAt: string;
   endedAt: string;
   /** unset marks incomplete tools or interrupted evaluators; roots/models require ok/error. */
@@ -99,7 +112,9 @@ export interface ProjectedTrace {
     | typeof PROJECTED_TRACE_SCHEMA_VERSION
     | typeof IO_PROJECTED_TRACE_SCHEMA_VERSION
     | typeof TREE_PROJECTED_TRACE_SCHEMA_VERSION
-    | typeof TREE_IO_PROJECTED_TRACE_SCHEMA_VERSION;
+    | typeof TREE_IO_PROJECTED_TRACE_SCHEMA_VERSION
+    | typeof GUARDRAIL_PROJECTED_TRACE_SCHEMA_VERSION
+    | typeof GUARDRAIL_IO_PROJECTED_TRACE_SCHEMA_VERSION;
   traceId: string;
   workspaceId: string;
   sessionId: string;

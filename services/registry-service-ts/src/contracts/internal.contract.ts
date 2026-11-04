@@ -1,6 +1,13 @@
 // Copyright The Orca Authors
 // SPDX-License-Identifier: Apache-2.0
 
+import {
+  WorkspaceGuardrailBundle,
+  WorkspaceBundleQuery,
+  GuardrailLeaseResponseHeaders,
+} from './guardrails.contract.js';
+import { policyEventsContract } from './policy-events.contract.js';
+import { responseHeaderMetadata } from './openapi-headers.js';
 import { initContract } from '@ts-rest/core';
 import { z } from 'zod';
 import { parseDshProfileDescriptor, type DshProfileDescriptor } from '@orca/harness-catalog';
@@ -438,7 +445,8 @@ const PreparedGuardrail = z
     phases: z.array(z.string().min(1)),
     rule: z.unknown(),
     stateful: z.boolean(),
-    state_scope: z.enum(['turn', 'session', 'subject_window']).optional(),
+    mode: z.enum(['enforce', 'observe']).optional(),
+    state_scope: z.enum(['turn', 'session', 'subject_window', 'workspace_window']).optional(),
     /** Set when the guardrail came from a dispatched subagent's own record. */
     subagent_id: z.string().min(1).optional(),
   })
@@ -599,12 +607,24 @@ export const PreparedExecutionV2Schema = z.object({
    * compiled. Additive: a runtime that predates guardrails ignores the field,
    * so no `schema_version` bump is warranted.
    */
+  dogwood: z
+    .object({
+      enforcer: z.enum(['harness', 'ai-gateway']),
+      epoch: z.string(),
+      bundle_id: z.string(),
+    })
+    .optional(),
   guardrails: z.array(PreparedGuardrail).default([]),
   /**
    * Session-scoped guardrail counters, restored. Handing these back at every
    * preparation is what stops a cap being reset by forcing a runner restart.
    */
   guardrail_state: z.record(z.string(), z.unknown()).default({}),
+  guardrail_workspace_window_state: z.record(z.string(), z.unknown()).optional(),
+  guardrail_month_window: z
+    .string()
+    .regex(/^\d{4}-\d{2}$/)
+    .optional(),
   archived_thread_subpaths: z.array(z.string()).optional(),
 });
 
@@ -612,6 +632,25 @@ export type PreparedAgentSnapshot = z.infer<typeof PreparedAgentSnapshotSchema>;
 export type PreparedExecutionV2 = z.infer<typeof PreparedExecutionV2Schema>;
 
 export const internalContract = c.router({
+  policyEvents: policyEventsContract,
+  effectiveWorkspaceGuardrails: {
+    metadata: responseHeaderMetadata({
+      200: GuardrailLeaseResponseHeaders,
+      304: GuardrailLeaseResponseHeaders,
+    }),
+    method: 'GET',
+    path: '/internal/v1/workspaces/:workspaceId/guardrails/effective',
+    pathParams: z.object({ workspaceId: z.string().min(1) }),
+    query: WorkspaceBundleQuery,
+    headers: z.object({ 'if-none-match': z.string().optional() }).passthrough(),
+    responses: {
+      200: WorkspaceGuardrailBundle,
+      304: c.noBody(),
+      400: z.object({ error: z.string() }),
+      404: z.object({ error: z.string() }),
+      503: z.object({ error: z.string() }),
+    },
+  },
   effectiveGuardrails: {
     method: 'GET',
     path: '/internal/v1/guardrails/effective',
@@ -624,6 +663,8 @@ export const internalContract = c.router({
       'scope.workspace_id': z.string().min(1),
       'scope.session_id': idString('ses'),
       'scope.agent_id': idString('agt').optional(),
+      guardrail_capabilities: z.string().max(512).optional(),
+      rule_kinds: z.string().max(200).optional(),
     }),
     responses: {
       200: z.object({
@@ -636,7 +677,10 @@ export const internalContract = c.router({
         expires_at: isoTimestamp,
         seed_verdict: z.literal('allow'),
         guardrails: z.array(PreparedGuardrail),
-        guardrail_state: z.object({ session: z.record(z.string(), z.unknown()) }),
+        guardrail_state: z.object({
+          session: z.record(z.string(), z.unknown()),
+          workspace_window: z.record(z.string(), z.unknown()).optional(),
+        }),
       }),
       400: z.object({ error: z.string() }),
       403: z.object({ error: z.string() }),
@@ -728,17 +772,26 @@ export const internalContract = c.router({
       sessionId: idString('ses'),
     }),
     body: z
-      .object({ capabilities: z.array(z.string().min(1).max(128)).max(32).optional() })
+      .object({
+        capabilities: z.array(z.string().min(1).max(128)).max(32).optional(),
+        guardrail_capabilities: z.array(z.string().max(100)).max(32).optional(),
+        policy_owner: z.string().min(1).max(200).optional(),
+        turn_event_id: z.string().optional(),
+      })
       .strict(),
     responses: {
       200: PreparedExecutionV2Schema,
       400: z.object({ error: z.string() }),
+      403: z.object({ error: z.string() }),
       404: z.object({ error: z.string() }),
-      409: z.object({
-        error: z.literal('invalid_runtime_binding'),
-        resource_type: z.string(),
-        resource_id: z.string(),
-      }),
+      409: z.union([
+        z.object({
+          error: z.literal('invalid_runtime_binding'),
+          resource_type: z.string(),
+          resource_id: z.string(),
+        }),
+        z.object({ error: z.string() }),
+      ]),
       503: z.object({ error: z.string() }),
     },
   },
@@ -866,7 +919,14 @@ export const internalContract = c.router({
     pathParams: z.object({ workspaceId: z.string().min(1), id: idString('ses') }),
     body: z.object({ turn_event_id: idString('evt') }),
     responses: {
-      200: z.object({ guardrail_subject_window_state: z.record(z.string(), z.unknown()) }),
+      200: z.object({
+        guardrail_subject_window_state: z.record(z.string(), z.unknown()),
+        guardrail_workspace_window_state: z.record(z.string(), z.unknown()).optional(),
+        guardrail_month_window: z
+          .string()
+          .regex(/^\d{4}-\d{2}$/)
+          .optional(),
+      }),
       400: z.object({ error: z.string() }),
       404: z.object({ error: z.string() }),
     },
@@ -893,12 +953,13 @@ export const internalContract = c.router({
          * are part of that counter's key, and the caller — not Registry — owns
          * the window boundary its evaluation used.
          */
+        turn_event_id: idString('evt').optional(),
         subject: z.string().min(1).max(256).optional(),
         window: z.string().min(1).max(64).optional(),
         updates: z.array(
           z
             .object({
-              scope: z.enum(['session', 'subject_window']),
+              scope: z.enum(['session', 'subject_window', 'workspace_window']),
               key: z.string().min(1).max(256),
               action: z.enum(['set', 'increment', 'delete', 'append']),
               value: z.unknown().optional(),

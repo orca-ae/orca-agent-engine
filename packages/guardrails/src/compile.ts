@@ -1,6 +1,7 @@
 // Copyright The Orca Authors
 // SPDX-License-Identifier: Apache-2.0
 
+import { validateRule } from '@runorca/dogwood';
 import { getGuardrailType, type JsonSchema } from './catalog.js';
 import { compileExpression, type CompiledExpression } from './cel.js';
 import { SCOPES, type GuardrailRule, type Scope, type StateScope } from './types.js';
@@ -29,16 +30,32 @@ export interface CompiledRule {
   params: Record<string, unknown>;
   /** Present for expression rules, so the expression is parsed once. */
   compiled?: CompiledExpression;
+  warnings?: readonly string[];
 }
 
 export type RuleCompileResult = CompiledRule | { ok: false; errors: readonly RuleCompileError[] };
 
 export function compileGuardrailRule(rule: GuardrailRule, scope: Scope): RuleCompileResult {
+  if (
+    !rule ||
+    !['builtin', 'expression', 'dogwood'].includes(String((rule as { kind?: unknown }).kind))
+  )
+    return { ok: false, errors: [{ message: 'unknown guardrail rule kind' }] };
   if (!SCOPES.some((candidate) => candidate === scope)) {
     return {
       ok: false,
       errors: [{ path: 'scope', message: `scope must be one of ${SCOPES.join(', ')}` }],
     };
+  }
+  if (rule.kind === 'dogwood') {
+    try {
+      const result = validateRule(rule);
+      return result.valid
+        ? { ok: true, stateful: true, params: {}, warnings: result.warnings }
+        : { ok: false, errors: result.errors.map((message) => ({ path: 'policy', message })) };
+    } catch (error) {
+      return { ok: false, errors: [{ path: 'policy', message: String(error) }] };
+    }
   }
   if (rule.kind === 'expression') return compileExpressionRule(rule);
   return compileBuiltinRule(rule.builtin, rule.params ?? {}, scope);

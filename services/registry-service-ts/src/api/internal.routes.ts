@@ -2,12 +2,27 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
+  PolicyAppend,
+  PolicyWarning,
+  policyEventsContract,
+} from '../contracts/policy-events.contract.js';
+import {
+  appendPolicyEvents,
+  readPolicyEvents,
+  PolicyLogError,
+  PolicyContextError,
+} from '../domain/policy-events.js';
+import { v5 as uuidv5 } from 'uuid';
+import { assertGuardrailReaderCapabilities } from '@orca/guardrails';
+import {
   parseUsageDelta,
   persistUsage,
   loadGuardrailUsageState,
   loadGuardrailTurnSubject,
-  loadGuardrailSubjectWindowState,
   utcDateWindow,
+  utcMonthWindow,
+  WORKSPACE_BUDGET_SUBJECT,
+  loadGuardrailBudgetState,
   applySessionStateUpdate,
   applyCounterStateUpdate,
   parseGuardrailStateBody,
@@ -23,9 +38,13 @@ export {
 } from '../domain/usage-accounting.js';
 
 import { Readable } from 'node:stream';
+import { composeWorkspaceBundle } from '../domain/workspace-guardrail-bundle.js';
+import { loadOrganizationId } from './guardrails.routes.js';
+import { sendWorkspaceGuardrailBundle } from './guardrails.routes.js';
+import { WorkspaceBundleQuery } from '../contracts/guardrails.contract.js';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { RequestPriceFactsSchema } from '../contracts/model-price-rules.contract.js';
-import { eq, and, isNull, sql, inArray, ne } from 'drizzle-orm';
+import { eq, and, isNull, sql, inArray, ne, or } from 'drizzle-orm';
 import type { FileStore, FilePurpose, FileRecord } from '@orca/file-store';
 import {
   SEED_PRICE_PROVIDER,
@@ -59,6 +78,7 @@ import {
   agentVersions,
   environments,
   gitCredentials,
+  guardrails,
   sessionResources,
   sessions,
   vaultCredentials,
@@ -231,6 +251,21 @@ const MAX_FILE_BYTES = 500 * 1024 * 1024;
  */
 const MAX_MEMORY_BYTES = 100 * 1024;
 
+/** Keep policy error statuses explicit for the route-source conformance audit. */
+function sendPolicyContextError(reply: FastifyReply, error: PolicyContextError): FastifyReply {
+  const body = { error: error.message };
+  switch (error.status) {
+    case 403:
+      return reply.code(403).send(body);
+    case 404:
+      return reply.code(404).send(body);
+    case 409:
+      return reply.code(409).send(body);
+    case 503:
+      return reply.code(503).send(body);
+  }
+}
+
 /**
  * Stop the secret-release authorization transaction when its peer has gone
  * away. `close` also fires after a normal response, so only treat it as a
@@ -344,6 +379,13 @@ function versionToApi(r: MemoryVersionRecord): {
 }
 
 export interface InternalRoutesOptions {
+  recordPolicyWarning?: (
+    workspaceId: string,
+    sessionId: string,
+    eventId: string,
+    message: string,
+  ) => Promise<void>;
+  guardrails?: import('../domain/guardrail-rollout.js').GuardrailRouteOptions;
   dshApprovedProfiles?: import('../domain/dsh-profile.js').DshApprovedProfiles;
   /**
    * Heartbeat-staleness TTL (ms) for the durable environment-claim reaper
@@ -369,6 +411,7 @@ export function registerInternalRoutes(
   fetchImpl?: typeof fetch,
   options: InternalRoutesOptions = {},
 ): void {
+  const clock = options.guardrails?.now ?? (() => new Date());
   const secrets = buildRuntimeSecretResolver(secretProvider, secretStore);
   const oauthFetch = fetchImpl ?? createGuardedFetch(globalThis.fetch);
 
@@ -378,6 +421,119 @@ export function registerInternalRoutes(
   const claims = new EnvironmentClaimStore(db);
   const claimTtlMs = options.environmentClaimTtlMs ?? DEFAULT_ENVIRONMENT_CLAIM_TTL_MS;
   const gatewayRegistryUsageEnabled = options.gatewayRegistryUsageEnabled ?? false;
+
+  app.post(
+    '/internal/v1/workspaces/:workspaceId/sessions/:id/policy-warnings',
+    async (req, reply) => {
+      reply.header('Cache-Control', 'no-store');
+      const { workspaceId, id } = req.params as { workspaceId: string; id: string };
+      if (!isWorkspaceId(workspaceId) || !SESSION_ID_RE.test(id))
+        return reply.code(400).send({ error: 'invalid warning scope' });
+      const caller = req.internalAuth?.caller ?? '';
+      if (!['ai-gateway', 'shared'].includes(caller))
+        return reply.code(403).send({ error: 'forbidden' });
+      const body = PolicyWarning.safeParse(req.body);
+      if (!body.success) return reply.code(400).send({ error: 'invalid policy warning' });
+      try {
+        const view = await readPolicyEvents(db, workspaceId, id, {}, clock, caller);
+        const warning = body.data;
+        const guardrail = view.guardrails.find((g) => g.id === warning.guardrail_id);
+        if (
+          view.epoch !== warning.epoch ||
+          view.bundle_id !== warning.bundle_id ||
+          !guardrail ||
+          (guardrail.rule as import('@runorca/dogwood').Rule).mcpManifests?.every(
+            (m) => m.server !== warning.server,
+          ) !== false
+        )
+          return reply.code(409).send({ error: 'policy warning binding changed' });
+        if (!options.recordPolicyWarning)
+          return reply.code(503).send({ error: 'policy warning sink unavailable' });
+        const eventId = `evt_${uuidv5(JSON.stringify([workspaceId, id, warning]), uuidv5.URL)}`;
+        await options.recordPolicyWarning(
+          workspaceId,
+          id,
+          eventId,
+          `Dogwood MCP manifest ${warning.server} differs from or cannot be checked against the live tools/list catalog.`,
+        );
+        return reply.send({ recorded: true });
+      } catch {
+        return reply.code(503).send({ error: 'policy warning unavailable' });
+      }
+    },
+  );
+
+  for (const method of ['GET', 'POST'] as const) {
+    app.route({
+      method,
+      url: '/internal/v1/workspaces/:workspaceId/sessions/:id/policy-events',
+      handler: async (req, reply) => {
+        reply.header('Cache-Control', 'no-store');
+        const { workspaceId, id } = req.params as { workspaceId: string; id: string };
+        if (!isWorkspaceId(workspaceId) || !SESSION_ID_RE.test(id))
+          return reply.code(400).send({ error: 'invalid policy scope' });
+        const caller = req.internalAuth?.caller ?? '';
+        if (!['harness', 'ai-gateway', 'shared'].includes(caller))
+          return reply.code(403).send({ error: 'forbidden' });
+        try {
+          if (method === 'GET') {
+            const query = policyEventsContract.read.query.safeParse(req.query);
+            if (!query.success) return reply.code(400).send({ error: 'invalid policy query' });
+            return reply.send(
+              await readPolicyEvents(db, workspaceId, id, query.data, clock, caller),
+            );
+          }
+          const body = PolicyAppend.safeParse(req.body);
+          if (!body.success) return reply.code(400).send({ error: 'invalid policy append' });
+          return reply.send(
+            await appendPolicyEvents(
+              db,
+              workspaceId,
+              id,
+              body.data as import('@orca/guardrails').PolicyAppendBody,
+              clock,
+              caller,
+            ),
+          );
+        } catch (error) {
+          if (error instanceof PolicyContextError) return sendPolicyContextError(reply, error);
+          if (error instanceof PolicyLogError)
+            return reply
+              .code(409)
+              .send({ error: error.message, code: error.code, now: error.now, head: error.head });
+          return reply
+            .code(400)
+            .send({ error: error instanceof Error ? error.message : 'policy log unavailable' });
+        }
+      },
+    });
+  }
+
+  app.get('/internal/v1/workspaces/:workspaceId/guardrails/effective', async (req, reply) => {
+    const { workspaceId } = req.params as { workspaceId: string };
+    if (!isWorkspaceId(workspaceId)) return reply.code(400).send({ error: 'invalid workspace id' });
+    const parsed = WorkspaceBundleQuery.safeParse(req.query);
+    if (!parsed.success) return reply.code(400).send({ error: 'invalid rule_kinds query' });
+    try {
+      const bundle = await composeWorkspaceBundle({
+        db,
+        workspaceId,
+        now: options.guardrails?.now ?? (() => new Date()),
+        ...(parsed.data.rule_kinds ? { ruleKinds: parsed.data.rule_kinds.split(',') } : {}),
+        ...(options.guardrails ? { rollout: options.guardrails } : {}),
+      });
+      if (!bundle) return reply.code(404).send({ error: 'workspace not found' });
+      assertGuardrailReaderCapabilities(
+        bundle.guardrails,
+        parsed.data.guardrail_capabilities?.split(',') ?? [],
+      );
+      return sendWorkspaceGuardrailBundle(req, reply, bundle);
+    } catch (error) {
+      return reply.code(503).send({
+        error: error instanceof Error ? error.message : 'guardrail composition unavailable',
+      });
+    }
+  });
 
   app.get('/internal/v1/guardrails/effective', async (req, reply) => {
     // Only the authenticated Gateway workload may project its verified session
@@ -408,6 +564,7 @@ export function registerInternalRoutes(
     }
     try {
       const prepared = await prepareGatewayGuardrails({
+        ...(options.guardrails ? { guardrails: options.guardrails } : {}),
         db,
         workspaceId,
         sessionId,
@@ -418,7 +575,18 @@ export function registerInternalRoutes(
       ) {
         return reply.code(409).send({ error: 'guardrail revision or agent mismatch' });
       }
-      const bundle = effectiveGuardrailBundle({ prepared, organizationId, issuedAt: new Date() });
+      try {
+        assertGuardrailReaderCapabilities(
+          prepared.guardrails,
+          query.data.guardrail_capabilities?.split(',') ?? [],
+        );
+      } catch (error) {
+        return reply.code(503).send({
+          error: error instanceof Error ? error.message : 'incompatible guardrail reader',
+        });
+      }
+      const bundle = effectiveGuardrailBundle({ prepared, organizationId, issuedAt: clock() });
+      if (prepared.policy_bundle_id) bundle.bundle_id = prepared.policy_bundle_id;
       return reply.code(200).send(bundle);
     } catch (error) {
       if (error instanceof PreparedExecutionNotFoundError) {
@@ -544,6 +712,7 @@ export function registerInternalRoutes(
           }),
         );
       } catch (error) {
+        if (error instanceof PolicyContextError) return sendPolicyContextError(reply, error);
         if (error instanceof PreparedExecutionNotFoundError) {
           return reply.code(404).send({ error: 'not found' });
         }
@@ -661,6 +830,7 @@ export function registerInternalRoutes(
       const profileStartedAt = performance.now();
       try {
         const prepared = await prepareExecution({
+          ...(options.guardrails ? { guardrails: options.guardrails } : {}),
           ...(body.data.capabilities ? { capabilities: body.data.capabilities } : {}),
           ...(options.dshApprovedProfiles
             ? { dshApprovedProfiles: options.dshApprovedProfiles }
@@ -671,7 +841,21 @@ export function registerInternalRoutes(
           workspaceId,
           sessionId,
           gatewayRegistryUsageEnabled,
+          guardrailCapabilities: body.data.guardrail_capabilities ?? [],
+          policyOwner: body.data.policy_owner,
+          turnEventId: body.data.turn_event_id,
         });
+        try {
+          assertGuardrailReaderCapabilities(
+            prepared.guardrails,
+            body.data.guardrail_capabilities ?? [],
+          );
+        } catch (error) {
+          throw new InvalidRuntimeBindingError(
+            'guardrail_reader',
+            error instanceof Error ? error.message : 'incompatible guardrail reader',
+          );
+        }
         if (prepared.primary_agent.dsh_profile)
           req.log.info(
             {
@@ -687,6 +871,7 @@ export function registerInternalRoutes(
           );
         return reply.send(prepared);
       } catch (error) {
+        if (error instanceof PolicyContextError) return sendPolicyContextError(reply, error);
         if (error instanceof PreparedExecutionNotFoundError) {
           return reply.code(404).send({ error: 'session not found' });
         }
@@ -1202,7 +1387,7 @@ export function registerInternalRoutes(
       return reply.code(404).send({ error: 'session not found' });
     }
 
-    const now = new Date();
+    const now = clock();
     const hasSandboxHandle = Object.prototype.hasOwnProperty.call(body, 'sandbox_handle_id');
     const update = {
       status: body.status,
@@ -1377,7 +1562,7 @@ export function registerInternalRoutes(
     // and what is recorded never changes afterwards. A model with no price data
     // yields `null` — the tokens are still recorded, the cost is not, and
     // nothing anywhere substitutes zero for "unknown".
-    let now = new Date();
+    let now = clock();
     const outcome = await db.transaction(async (tx) => {
       // Serialize with negotiated authority changes, including shared-token writers
       // that passed the outer check before the Registry claimed this execution.
@@ -1389,7 +1574,7 @@ export function registerInternalRoutes(
         .for('update');
       if (await hasNativeUsageAuthority(tx as unknown as DbClient, workspaceId, id))
         return 'native_registry_owned' as const;
-      now = new Date();
+      now = clock();
       return persistUsage(tx, {
         workspaceId,
         sessionId: id,
@@ -1406,7 +1591,7 @@ export function registerInternalRoutes(
           : {}),
         now,
         pricingClock: () => {
-          now = new Date();
+          now = clock();
           return now;
         },
         turnSubject,
@@ -1430,14 +1615,27 @@ export function registerInternalRoutes(
       id,
       typeof subagentId === 'string' ? subagentId : undefined,
     );
-    const subjectWindowState =
+    const budgetState =
       turnSubject === null
-        ? {}
-        : await loadGuardrailSubjectWindowState(db, workspaceId, turnSubject, utcDateWindow(now));
+        ? { subject_window: {} }
+        : await loadGuardrailBudgetState(
+            db,
+            workspaceId,
+            turnSubject,
+            now,
+            options.guardrails?.monthlyBudgetsEnabled,
+          );
+    const subjectWindowState = budgetState.subject_window;
     return reply.send({
       ...session,
       guardrail_usage_state: guardrailUsageState,
       guardrail_subject_window_state: subjectWindowState,
+      ...(options.guardrails?.monthlyBudgetsEnabled
+        ? { guardrail_month_window: utcMonthWindow(now) }
+        : {}),
+      ...(budgetState.workspace_window
+        ? { guardrail_workspace_window_state: budgetState.workspace_window }
+        : {}),
     });
   });
 
@@ -1454,13 +1652,22 @@ export function registerInternalRoutes(
       }
       const subject = await loadGuardrailTurnSubject(db, workspaceId, id, turnEventId);
       if (subject === null) return reply.code(404).send({ error: 'turn event subject not found' });
+      const budgetTime = clock();
+      const state = await loadGuardrailBudgetState(
+        db,
+        workspaceId,
+        subject,
+        budgetTime,
+        options.guardrails?.monthlyBudgetsEnabled,
+      );
       return reply.send({
-        guardrail_subject_window_state: await loadGuardrailSubjectWindowState(
-          db,
-          workspaceId,
-          subject,
-          utcDateWindow(new Date()),
-        ),
+        guardrail_subject_window_state: state.subject_window,
+        ...(options.guardrails?.monthlyBudgetsEnabled
+          ? { guardrail_month_window: utcMonthWindow(budgetTime) }
+          : {}),
+        ...(state.workspace_window
+          ? { guardrail_workspace_window_state: state.workspace_window }
+          : {}),
       });
     },
   );
@@ -1485,9 +1692,74 @@ export function registerInternalRoutes(
       }
       const parsed = parseGuardrailStateBody(req.body);
       if (!parsed.ok) return reply.code(400).send({ error: parsed.error });
-      const { subject, window, updates } = parsed.batch;
+      const { subject, window, updates, turnEventId } = parsed.batch;
+      if (
+        !options.guardrails?.monthlyBudgetsEnabled &&
+        updates.some((update) => update.scope === 'workspace_window' || window?.length === 7)
+      ) {
+        return reply
+          .code(400)
+          .send({ error: 'monthly state requires GUARDRAILS_MONTHLY_BUDGETS_ENABLED' });
+      }
 
-      const now = new Date();
+      const now = clock();
+      const resolvedSubject = turnEventId
+        ? await loadGuardrailTurnSubject(db, workspaceId, id, turnEventId)
+        : subject;
+      if (updates.some((update) => update.scope === 'subject_window') && resolvedSubject === null)
+        return reply.code(400).send({ error: 'authenticated turn subject unavailable' });
+      const monthlyIds = new Set<string>();
+      if (turnEventId) {
+        const ids = [
+          ...new Set(
+            updates
+              .map((update) => /^g:([^:]+):/.exec(update.key)?.[1])
+              .filter((value): value is string => value !== undefined),
+          ),
+        ];
+        if (ids.length) {
+          const orgId = await loadOrganizationId(db, workspaceId);
+          const rows = await db
+            .select({ id: guardrails.id, rule: guardrails.rule })
+            .from(guardrails)
+            .where(
+              and(
+                inArray(guardrails.id, ids),
+                or(
+                  eq(guardrails.workspaceId, workspaceId),
+                  and(eq(guardrails.organizationId, orgId), eq(guardrails.scope, 'organization')),
+                ),
+              ),
+            );
+          for (const row of rows)
+            if ((row.rule as { builtin?: string }).builtin === 'user_monthly_cost_budget')
+              monthlyIds.add(row.id);
+        }
+      }
+      if (
+        updates.some(
+          (update) =>
+            update.scope === 'workspace_window' ||
+            monthlyIds.has(/^g:([^:]+):/.exec(update.key)?.[1] ?? ''),
+        ) &&
+        window !== utcMonthWindow(now)
+      )
+        return reply
+          .code(409)
+          .send({ error: 'monthly state snapshot expired; refresh before retrying' });
+      if (
+        updates.some((update) =>
+          [
+            'monthly_cost_usd',
+            'monthly_cost_unpriced',
+            'workspace_monthly_cost_usd',
+            'workspace_monthly_cost_unpriced',
+          ].includes(update.key),
+        )
+      )
+        return reply
+          .code(400)
+          .send({ error: 'usage-owned counters are written only through usage accounting' });
       const found = await db.transaction(async (tx) => {
         // Session-scoped rows carry a foreign key to the session, so resolving
         // it first turns a stale flush into a 404 rather than a constraint
@@ -1528,7 +1800,19 @@ export function registerInternalRoutes(
           } else {
             // Non-null by construction: a batch carrying a `subject_window`
             // update without both key parts was refused above.
-            await applyCounterStateUpdate(tx, workspaceId, subject!, window!, update, now);
+            await applyCounterStateUpdate(
+              tx,
+              workspaceId,
+              update.scope === 'workspace_window' ? WORKSPACE_BUDGET_SUBJECT : resolvedSubject!,
+              update.scope === 'workspace_window' ||
+                (turnEventId && monthlyIds.has(/^g:([^:]+):/.exec(update.key)?.[1] ?? ''))
+                ? utcMonthWindow(now)
+                : turnEventId
+                  ? utcDateWindow(now)
+                  : window!,
+              update,
+              now,
+            );
           }
         }
         return true;

@@ -228,8 +228,8 @@ fields alone do not authorize access to another Session.
 
 1. Serve the documented Anthropic-compatible REST operations for **Agents, Environments, Sessions, Files, MemoryStores (with nested memories + memory_versions), Vaults, Skills**, plus the polymorphic `/v1/sessions/{id}/resources` endpoint and the **Session Threads API** (`/v1/sessions/{id}/threads[...]`, the Anthropic thread-model multiagent — read routes per the Anthropic spec plus the mutating `/archive`, and an Orca-extension `/interrupt`; see below). Serve cron-only **Triggers** at `/v1/triggers` as an explicitly tagged Orca Core extension. The Agent contract additionally carries an optional `multiagent` coordinator field (roster of delegate agents, pinned to an immutable snapshot at create; surfaced as the top-level `multiagent` field on read and stored as a dedicated `agents.multiagent` column plus a top-level key in the version snapshot). The Outcomes field on Session returns null for SDK compatibility — no execution behind it in v1.
 2. Authenticate inbound (`x-api-key` table-lookup OR OIDC/JWT validator).
-3. Serve the engine extension groups: `policy.runorca.ai/v1` (Guardrails and the
-   guardrail type catalog) and `pricing.runorca.ai/v1` (model prices), plus the
+3. Serve the engine extension groups: `policy.runorca.ai/v1` (Guardrails, the
+   guardrail type catalog and effective workspace bundles) and `pricing.runorca.ai/v1` (model prices), plus the
    `/api` and `/apis` discovery routes that advertise them. Registry is the
    control plane for guardrails: it validates and compiles rules at write time,
    composes the four authority tiers when a session's runtime is prepared, and
@@ -2197,3 +2197,13 @@ cloud modes and self-hosted colocated mode. Native history is stored only in
 against the Session-pinned Agent selection; Codex and Pi histories cannot be exchanged.
 The private envelope and pending-usage key retain their historical Codex names for
 compatibility. See [Pi SDK runtime](../libraries/pi-harness.md).
+
+### Dogwood policy authorization
+
+[Dogwood guardrails](../dogwood.md) use native PostgreSQL heads, events, pinned turn bindings,
+call statuses and immutable batch receipts. The workload-authenticated policy-events routes
+validate time, ownership, identities, confirmations and private state in one transaction.
+`GUARDRAILS_DOGWOOD_ENABLED` and `AI_GATEWAY_DOGWOOD_ENABLED` default to `false`. The public
+`policyschemas/dogwood` route serves the actual pinned core schema without enabling writes.
+The internal policy-warnings route accepts only bound manifest drift evidence and creates
+safe, idempotent session warnings.

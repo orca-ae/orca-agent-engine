@@ -45,6 +45,8 @@ import {
 } from './agent-snapshot.js';
 import type { PreparedSkillDescriptor } from '../contracts/internal.contract.js';
 import { readMultiagentSnapshot, type MultiagentSnapshot } from './multiagent.js';
+import { PreparedGuardrailWire } from '../contracts/guardrails.contract.js';
+import { isDogwood } from './policy-events.js';
 import { composeGuardrails, type GuardrailRow } from './guardrail-composition.js';
 import {
   selectEgressStrategy,
@@ -187,6 +189,17 @@ export interface ResolverVaultRecord {
  * reads are scoped to it.
  */
 export interface SnapshotRecordLoader {
+  prepareDogwood?(input: {
+    policyOwner?: string;
+    turnEventId?: string;
+    workspaceId: string;
+    sessionId: string;
+    guardrails: import('../contracts/internal.contract.js').PreparedExecutionV2['guardrails'];
+    resources: { id: string; name: string }[];
+    mcpServers: { name: string; url: string }[];
+    now: () => Date;
+  }): Promise<void>;
+
   loadSession(sessionId: string): Promise<ResolverSessionRecord | null>;
   loadAgent(workspaceId: string, agentId: string): Promise<ResolverAgentRecord | null>;
   loadEnvironment(environmentId: string): Promise<ResolverEnvironmentRecord | null>;
@@ -235,6 +248,8 @@ export interface SnapshotRecordLoader {
 
 /** Options for {@link AgentSnapshotResolver}. */
 export interface AgentSnapshotResolverOptions {
+  now?: () => Date;
+  guardrails?: import('./guardrail-rollout.js').GuardrailRollout;
   /** The record-loader seam. */
   loader: SnapshotRecordLoader;
   /** The registry's session-JWT minter (in-process; no HTTP). */
@@ -269,6 +284,8 @@ export interface AgentSnapshotResolverOptions {
  * replica, called on a runner (re)connect by the snapshot-delivery wiring.
  */
 export class AgentSnapshotResolver {
+  private readonly clock: () => Date;
+  private readonly guardrails: import('./guardrail-rollout.js').GuardrailRollout;
   private readonly loader: SnapshotRecordLoader;
   private readonly minter: SessionJwtMinter;
   private readonly gatewayMcpUrl: string | undefined;
@@ -277,6 +294,8 @@ export class AgentSnapshotResolver {
   private readonly llmPolicy: SessionJwtLlmPolicy | undefined;
 
   constructor(opts: AgentSnapshotResolverOptions) {
+    this.guardrails = opts.guardrails ?? {};
+    this.clock = opts.now ?? (() => new Date());
     this.loader = opts.loader;
     this.llmPolicy = opts.llmPolicy;
     this.minter = opts.minter;
@@ -312,7 +331,10 @@ export class AgentSnapshotResolver {
    *   workspace (a snapshot built on a missing/foreign skill would silently drop
    *   that Skill's bundle, so this fails loud).
    */
-  async resolve(sessionId: string): Promise<AgentSnapshot | null> {
+  async resolve(
+    sessionId: string,
+    preparation?: { policyOwner?: string; turnEventId?: string },
+  ): Promise<AgentSnapshot | null> {
     const session = await this.loader.loadSession(sessionId);
     if (session === null) return null;
     if (session.agentVersion !== undefined && !this.loader.loadAgentVersion) {
@@ -395,19 +417,53 @@ export class AgentSnapshotResolver {
         session.organizationId,
         session.id,
       );
-      const composed = composeGuardrails({
-        sessionIds: session.guardrailIds ?? [],
-        agentIds: agent.guardrailIds ?? [],
-        subagentIds: resolvedMultiagent?.subagentGuardrailIds ?? {},
-        visible: context.visible,
-      });
+      const composed = composeGuardrails(
+        {
+          sessionIds: session.guardrailIds ?? [],
+          agentIds: agent.guardrailIds ?? [],
+          subagentIds: resolvedMultiagent?.subagentGuardrailIds ?? {},
+          visible: context.visible,
+        },
+        this.guardrails,
+      );
       if (composed.invalid.length > 0) {
         const detail = composed.invalid
           .map((entry) => `${entry.name} (${entry.id}): ${entry.errors.join('; ')}`)
           .join(' | ');
         throw new Error(`snapshot: guardrail no longer valid: ${detail}`);
       }
-      snapshot.guardrails = composed.guardrails.map(toSnapshotGuardrail);
+      const dogwood = composed.guardrails.filter((g) => isDogwood(g.guardrail.rule));
+      if (dogwood.length) {
+        if (
+          dogwood.length > 16 ||
+          !this.guardrails.gatewayDogwoodEnabled ||
+          egressMode === 'sidecar' ||
+          dogwood.some(
+            (g) =>
+              (g.guardrail.rule as { appliesTo?: string }).appliesTo !== 'mcp_tools' ||
+              g.subagentId,
+          ) ||
+          !this.loader.prepareDogwood
+        )
+          throw new Error(
+            'snapshot: Dogwood requires a qualified Gateway and unbound mcp_tools rules',
+          );
+        await this.loader.prepareDogwood({
+          workspaceId: session.workspaceId,
+          sessionId: session.id,
+          guardrails: composed.guardrails.map((g) =>
+            PreparedGuardrailWire.parse(toSnapshotGuardrail(g)),
+          ),
+          resources: [{ id: agent.id, name: agent.name ?? 'agent' }],
+          mcpServers: session.mcpServers ?? agent.mcpServers,
+          now: this.clock,
+          ...(preparation?.policyOwner ? { policyOwner: preparation.policyOwner } : {}),
+          ...(preparation?.turnEventId ? { turnEventId: preparation.turnEventId } : {}),
+        });
+      }
+      snapshot.guardrails = composed.guardrails
+        .filter((g) => !isDogwood(g.guardrail.rule))
+        .map(toSnapshotGuardrail);
       snapshot.guardrail_state = context.state;
     }
     return snapshot;
@@ -788,6 +844,7 @@ function toSnapshotGuardrail(
   return {
     id: entry.guardrail.id,
     name: entry.guardrail.name,
+    ...(entry.guardrail.mode ? { mode: entry.guardrail.mode } : {}),
     tier: entry.tier,
     phases: [...entry.guardrail.phases],
     rule: entry.guardrail.rule,

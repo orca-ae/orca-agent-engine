@@ -11,3 +11,7 @@ export * from './compile.js';
 export * from './engine.js';
 export * from './expression-evaluator.js';
 export * from './builtins/index.js';
+export * from './capabilities.js';
+export * from './dogwood-worker.js';
+export * from './dogwood-events.js';
+export * from './dogwood-protocol.js';

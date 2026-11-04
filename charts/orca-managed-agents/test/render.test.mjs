@@ -4068,3 +4068,22 @@ test('Pi native bindings leave legacy SDK routes intact and keep SDK usage autho
   );
   assert.doesNotMatch(helmTemplate(''), /native_api_key/);
 });
+
+test('OIP-028 guardrail rollout flags remain off and render independently', () => {
+  for (const [observeEnabled, monthlyBudgetsEnabled] of [[false, false], [true, false], [false, true], [true, true]]) {
+    const rendered = helmTemplate(yaml.dump({ registry: { guardrails: { observeEnabled, monthlyBudgetsEnabled } } }));
+    const config = yaml.load(document(rendered, 'ConfigMap', 'orca-managed-agents-registry-config'));
+    assert.equal(config.data.GUARDRAILS_OBSERVE_ENABLED, String(observeEnabled));
+    assert.equal(config.data.GUARDRAILS_MONTHLY_BUDGETS_ENABLED, String(monthlyBudgetsEnabled));
+  }
+});
+
+
+test('OIP-029 Dogwood gates default off and render independently',()=>{
+  for(const [authoring,gateway] of [[false,false],[true,false],[false,true],[true,true]]){
+    const rendered=helmTemplate(yaml.dump({guardrails:{dogwood:{enabled:authoring}},aiGateway:{registryGuardrails:{dogwood:gateway}}}));
+    const config=yaml.loadAll(rendered).find(doc=>doc?.kind==='ConfigMap'&&doc.metadata.name==='orca-managed-agents-registry-config');
+    assert.equal(config.data.GUARDRAILS_DOGWOOD_ENABLED,String(authoring));
+    assert.equal(config.data.AI_GATEWAY_DOGWOOD_ENABLED,String(gateway));
+  }
+});

@@ -2,7 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { BuiltinEvaluator } from '../engine.js';
-import { costBudget, subagentCostBudget, tokenBudget, userDailyCostBudget } from './cost.js';
+import {
+  costBudget,
+  subagentCostBudget,
+  tokenBudget,
+  userDailyCostBudget,
+  userMonthlyCostBudget,
+  workspaceMonthlyCostBudget,
+} from './cost.js';
 import { detectLoop, detectThrashing } from './context.js';
 import { githubPolicy } from './github.js';
 import { gcalendarPolicy, gdrivePolicy, gmailPolicy } from './google.js';
@@ -42,6 +49,8 @@ export const BUILTIN_EVALUATORS: ReadonlyMap<string, BuiltinEvaluator> = new Map
   ['token_budget', tokenBudget],
   ['cost_budget', costBudget],
   ['user_daily_cost_budget', userDailyCostBudget],
+  ['user_monthly_cost_budget', userMonthlyCostBudget],
+  ['workspace_monthly_cost_budget', workspaceMonthlyCostBudget],
   ['subagent_cost_budget', subagentCostBudget],
   ['detect_loop', detectLoop],
   ['detect_thrashing', detectThrashing],

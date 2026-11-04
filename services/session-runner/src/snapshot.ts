@@ -214,6 +214,7 @@ export type ToolPermissionPolicy = 'always_ask' | 'always_allow' | 'always_deny'
  * second definition to keep in step.
  */
 export interface SnapshotGuardrail {
+  mode?: 'enforce' | 'observe';
   id: string;
   name: string;
   tier: string;
@@ -482,10 +483,15 @@ function parseGuardrails(raw: unknown): SnapshotGuardrail[] | undefined {
       rule: obj.rule,
       stateful: obj.stateful,
     };
+    if (obj.mode !== undefined) {
+      if (obj.mode !== 'enforce' && obj.mode !== 'observe')
+        throw new SnapshotParseError(`guardrails[${index}].mode is not recognized`);
+      guardrail.mode = obj.mode;
+    }
     if (obj.state_scope !== undefined) {
       if (
         typeof obj.state_scope !== 'string' ||
-        !['turn', 'session', 'subject_window'].includes(obj.state_scope)
+        !['turn', 'session', 'subject_window', 'workspace_window'].includes(obj.state_scope)
       ) {
         throw new SnapshotParseError(`guardrails[${index}].state_scope is not recognized`);
       }

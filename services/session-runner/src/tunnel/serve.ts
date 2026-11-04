@@ -53,6 +53,7 @@
 // connector, so the whole loop is unit-testable in-process against a fake registry
 // runner-tunnel WS peer + a fake dispatcher.
 
+import { GUARDRAIL_READER_CAPABILITIES } from '@orca/guardrails';
 import {
   FrameKind,
   encodeFrame,
@@ -466,6 +467,12 @@ function buildHelloFrame(opts: ServeTunnelOptions): HelloFrame {
   return {
     kind: FrameKind.Hello,
     runnerVersion: opts.runnerVersion,
+    // Advertise only semantics this runner consumes. Dogwood is Gateway-owned;
+    // a new capability in the shared catalog must not silently opt this reader in.
+    guardrailCapabilities: GUARDRAIL_READER_CAPABILITIES.filter(
+      (capability) =>
+        capability === 'guardrails.observe.v1' || capability === 'guardrails.monthly_budgets.v1',
+    ),
     frameProtocolVersion: FRAME_PROTOCOL_VERSION,
     // Capability advertise: the providers ride the hello's harnesses field (the
     // field the registry's connect hook + runner listing read); the env types ride

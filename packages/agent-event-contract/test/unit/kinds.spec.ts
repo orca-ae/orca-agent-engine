@@ -37,6 +37,7 @@ describe('canonical event kinds', () => {
       statusRescheduled: 'session.status_rescheduled',
       statusTerminated: 'session.status_terminated',
       error: 'session.error',
+      guardrailDecision: 'session.guardrail_decision',
     });
     expect(SessionThreadEventKind).toEqual({
       created: 'session.thread_created',
