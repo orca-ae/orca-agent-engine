@@ -2,7 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { createHash, randomUUID } from 'node:crypto';
-import { sessionErrorPayload, userEventProcessedPayload } from '@orca/agent-event-contract';
+import {
+  sessionErrorPayload,
+  sessionIdlePayload,
+  userEventProcessedPayload,
+} from '@orca/agent-event-contract';
 import { and, eq, isNull, ne, inArray, sql } from 'drizzle-orm';
 import {
   NATIVE_USAGE_SOURCE,
@@ -31,6 +35,8 @@ import {
 
 const AUTHORITY_ID = 'authority';
 const NATIVE_APPEND_BATCH_BYTES = 512 * 1024;
+// The retained journal plus acceptance, running, error, idle and two completion markers.
+const NATIVE_REPLAY_EVENT_LIMIT = 10006;
 interface NativeBinding {
   executionId: string;
   placementId: string;
@@ -39,6 +45,7 @@ interface NativeBinding {
 interface ReceiptRecord extends NativeBinding {
   source: typeof NATIVE_USAGE_SOURCE;
   producedAt: string;
+  finishedAt?: string;
   checkpoint?: ResourceCheckpoint;
   digest?: string;
   incompleteCompletion?: NativeCompletion;
@@ -189,7 +196,7 @@ export class NativeCompletionCoordinator {
       event.kind !== 'user.message'
     )
       throw new Error('Unsupported native driving event');
-    await this.locked(binding.revision, async (tx) => {
+    const producedAt = await this.locked(binding.revision, async (tx) => {
       const unfinished = await tx
         .select()
         .from(receipts)
@@ -206,16 +213,24 @@ export class NativeCompletionCoordinator {
           record.revision !== binding.revision
         )
           throw new Error('Native turn cannot be replayed on a new execution');
-        return;
+        return record.producedAt;
       }
+      const producedAt = new Date().toISOString();
       await tx.insert(receipts).values({
         workspaceId: o.workspaceId,
         sessionId: o.sessionId,
         turnId: event.id,
         phase: 'running',
-        record: { ...binding, source: NATIVE_USAGE_SOURCE, producedAt: new Date().toISOString() },
+        record: { ...binding, source: NATIVE_USAGE_SOURCE, producedAt },
       });
+      return producedAt;
     });
+    await this.appendEvents(event.id, binding.revision, [
+      this.toEvent(event.id, producedAt, 'session.user_event_processed', {
+        ...userEventProcessedPayload(event.id),
+      }),
+      this.toEvent(event.id, producedAt, 'session.status_running', {}),
+    ]);
   }
 
   async stage(checkpoint: ResourceCheckpoint, digest: string): Promise<void> {
@@ -291,36 +306,52 @@ export class NativeCompletionCoordinator {
     revision: string,
     acknowledge?: NativeAcknowledgement,
   ): Promise<void> {
-    const [row] = await this.options.db.select().from(receipts).where(this.scope(turnId));
-    if (!row || !['prepared', 'completed'].includes(row.phase))
-      throw new Error('Native completion is not prepared');
-    const record = row.record as ReceiptRecord;
-    const checkpoint = parseResourceCheckpoint(record.checkpoint);
-    const completion = checkpoint.completion;
-    if (
-      !completion ||
-      !nativeCompletionIsComplete(completion) ||
-      record.digest !== resourceCheckpointDigest(checkpoint) ||
-      record.revision !== revision
-    )
-      throw new Error('Native prepared receipt is invalid');
-    await this.locked(revision, async () => {});
-    await this.replayEvents(completion, revision, record.producedAt);
+    const { phase, completion, finishedAt } = await this.locked(revision, async (tx) => {
+      const [row] = await tx.select().from(receipts).where(this.scope(turnId));
+      if (!row || !['prepared', 'completed'].includes(row.phase))
+        throw new Error('Native completion is not prepared');
+      const record = row.record as ReceiptRecord;
+      const checkpoint = parseResourceCheckpoint(record.checkpoint);
+      const completion = checkpoint.completion;
+      if (
+        !completion ||
+        !nativeCompletionIsComplete(completion) ||
+        record.digest !== resourceCheckpointDigest(checkpoint) ||
+        record.revision !== revision
+      )
+        throw new Error('Native prepared receipt is invalid');
+      const finishedAt = record.finishedAt ?? new Date().toISOString();
+      if (record.finishedAt === undefined)
+        await tx
+          .update(receipts)
+          .set({ record: { ...record, finishedAt } })
+          .where(this.scope(turnId));
+      return { phase: row.phase, completion, finishedAt };
+    });
+    await this.replayEvents(completion, revision, finishedAt);
     await acknowledge?.('prepared');
-    if (row.phase !== 'completed') {
+    if (phase !== 'completed') {
       if (completion.outcome !== 'success')
-        await this.appendOnce(turnId, revision, record.producedAt, 'agent.error', {
-          message:
-            completion.error ??
-            (completion.outcome === 'interrupted' ? 'Turn interrupted' : 'Turn failed'),
-        });
-      await this.appendOnce(turnId, revision, record.producedAt, 'agent.turn_completed', {
+        await this.appendOnce(
+          turnId,
+          revision,
+          finishedAt,
+          'session.error',
+          sessionErrorPayload({
+            type: completion.outcome === 'interrupted' ? 'interrupted' : 'api_error',
+            message:
+              completion.error ??
+              (completion.outcome === 'interrupted' ? 'Turn interrupted' : 'Turn failed'),
+            willRetry: false,
+          }),
+        );
+      await this.appendOnce(turnId, revision, finishedAt, 'session.status_idle', {
+        ...sessionIdlePayload(completion.outcome === 'failed' ? 'retries_exhausted' : 'end_turn'),
+      });
+      await this.appendOnce(turnId, revision, finishedAt, 'agent.turn_completed', {
         turn_event_id: turnId,
       });
-      await this.appendOnce(turnId, revision, record.producedAt, 'session.user_event_processed', {
-        ...userEventProcessedPayload(turnId),
-      });
-      await this.appendOnce(turnId, revision, record.producedAt, 'session.user_event_completed', {
+      await this.appendOnce(turnId, revision, finishedAt, 'session.user_event_completed', {
         ...userEventProcessedPayload(turnId),
       });
       await this.locked(revision, async (tx) => {
@@ -474,13 +505,14 @@ export class NativeCompletionCoordinator {
             };
             if (payload.source_event_id === turnId) {
               ids.add(event.id);
-              if (ids.size > 10004) throw new Error('Native event replay exceeds limits');
+              if (ids.size > NATIVE_REPLAY_EVENT_LIMIT)
+                throw new Error('Native event replay exceeds limits');
             }
           }
           this.knownEvents = { turnId, ids };
         }
         const missing = events.filter((event) => !this.knownEvents!.ids.has(event.id));
-        if (this.knownEvents.ids.size + missing.length > 10004)
+        if (this.knownEvents.ids.size + missing.length > NATIVE_REPLAY_EVENT_LIMIT)
           throw new Error('Native event replay exceeds limits');
         let batch: Event[] = [];
         let bytes = 0;

@@ -109,6 +109,10 @@ submission. Ordinary public event paths are projected to logical sandbox paths;
 the agent retains executable paths and authorized Orca mount extensions carry
 `resolved_path`. Private control and reporting files are outside File tool roots.
 
+Before submitting a native user turn, Registry persists its running receipt,
+`session.user_event_processed` acceptance marker and `session.status_running`.
+Retries reconcile the same event IDs before allowing execution.
+
 After all admitted file tools settle, the runner retains the sealed report set and
 outcome, freezes changed outputs privately, and holds terminal events and the next
 turn. Registry commits Files, output events and usage before preparing a durable
@@ -119,6 +123,12 @@ interrupted turns use the same ordering. Pi 0.87.1's native `error` settlement m
 a failed completion while preserving whether each usage report is complete.
 Missing usage or lost unfrozen outputs remain explicitly incomplete and block
 subsequent turns for operator recovery.
+Complete turns close with `session.status_idle` before `agent.turn_completed` and
+the internal completion marker. Failed and interrupted completions emit a
+non-retryable `session.error`; failed turns use the `retries_exhausted` idle reason,
+while successful and interrupted turns use `end_turn`. The receipt retains a
+separate finish timestamp so terminal event IDs and timestamps survive ACK loss
+and owner replacement without reusing the acceptance time.
 
 ### Native capability upgrade and rollback
 
@@ -131,6 +141,11 @@ only after verified executable placement; failed initial placement does not clai
 An existing authority is taken over before receipt reconciliation and stays selected
 even if replacement preparation fails. The persisted authority survives reconnect and rejects internal usage writes, including shared-token writes.
 An unrestricted mixed Registry deployment is not a safe authority transition.
+For a Registry upgrade from the completion-only lifecycle, pause new native turn
+admission and drain running/prepared turns on the previous writer before switching
+writers. The canonical lifecycle starts at turn admission; finalizing an old
+receipt on the new writer does not reconstruct its missing acceptance events.
+Sessions with incomplete evidence remain blocked for operator recovery.
 
 For rollback, stop new turn admission, reconcile prepared receipts and outstanding
 File/report commits, and retain unacknowledged checkpoints and incomplete evidence.

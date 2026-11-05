@@ -51,6 +51,7 @@ import { registerSessionHandlers } from '../../../session-runner/src/register-ha
 import { RouteDispatcher } from '../../../session-runner/src/tunnel/request-dispatch.js';
 import { serveTunnel } from '../../../session-runner/src/tunnel/serve.js';
 import { FakeRegistryRunnerTunnel } from '../../../session-runner/test/unit/support/fake-registry-runner-tunnel.js';
+import { projectCanonicalTurns } from '../../../observability-exporter/src/projector.js';
 
 // Resolve the controlled installation in Node, whose import.meta.resolve Vitest does not emulate.
 vi.mock('../../../../packages/pi-harness/dist/index.js', async () => {
@@ -252,6 +253,156 @@ async function fixture(begin = true, claim = true) {
   };
 }
 
+it.each([0, 1, 2])(
+  'persists acceptance before execution and reconciles a lost begin append ACK (%s)',
+  async (committedPrefix) => {
+    const f = await fixture(false);
+    f.append.mockImplementationOnce(async (_w, _s, batch) => {
+      f.events.push(...batch.slice(0, committedPrefix));
+      throw new Error('begin append ACK lost');
+    });
+    await expect(f.coordinator.begin(f.event, f.binding)).rejects.toThrow('begin append ACK lost');
+    expect((await f.row()).phase).toBe('running');
+    const next = f.replace();
+    await next.claim(f.binding);
+    await next.begin(f.event, f.binding);
+    const accepted = f.events.map((event) => ({ ...event, payload: Buffer.from(event.payload) }));
+    await next.begin(f.event, f.binding);
+    expect(f.events).toEqual(accepted);
+    expect(f.events.map((event) => event.kind)).toEqual([
+      'session.user_event_processed',
+      'session.status_running',
+    ]);
+    expect(new Set(f.events.map((event) => event.id)).size).toBe(2);
+  },
+);
+
+it.each(['prepared', 'completed'] as const)(
+  'projects two native turns after a lost %s ACK with stable lifecycle timestamps',
+  async (lostPhase) => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+      const f = await fixture();
+      const transcript = [f.event, ...f.events];
+      f.append.mockImplementation(async (_w, _s, batch) => {
+        f.events.push(...batch);
+        transcript.push(...batch);
+        return [];
+      });
+      const startedAt = new Date().toISOString();
+      vi.setSystemTime(new Date('2026-01-01T00:00:05Z'));
+      f.checkpoint.completion!.events = [
+        { id: newId('evt'), type: 'agent.message', content: [{ type: 'text', text: 'answer' }] },
+      ];
+      await f.coordinator.prepare(f.checkpoint, resourceCheckpointDigest(f.checkpoint));
+      await expect(
+        f.coordinator.finish(f.event.id, f.binding.revision, async (phase) => {
+          if (phase === lostPhase) throw new Error('completion ACK lost');
+        }),
+      ).rejects.toThrow('completion ACK lost');
+      const persisted = f.events.map((event) => ({
+        ...event,
+        payload: Buffer.from(event.payload),
+      }));
+      vi.setSystemTime(new Date('2026-01-01T00:00:10Z'));
+      const next = f.replace();
+      await next.claim(f.binding);
+      await next.finish(f.event.id, f.binding.revision);
+      expect(f.events.slice(0, persisted.length)).toEqual(persisted);
+      const second = { ...f.event, id: newId('evt'), producedAt: new Date().toISOString() };
+      transcript.push(second);
+      await next.begin(second, f.binding);
+      const checkpoint = structuredClone(f.checkpoint);
+      checkpoint.checkpoint_id = 'rchk_second';
+      checkpoint.completion!.turn_id = second.id;
+      checkpoint.completion!.events = [];
+      vi.setSystemTime(new Date('2026-01-01T00:00:15Z'));
+      await next.prepare(checkpoint, resourceCheckpointDigest(checkpoint));
+      await next.finish(second.id, f.binding.revision);
+      const traces = projectCanonicalTurns(
+        transcript.map((event, index) => ({ ...event, seq: index + 1 })),
+      );
+      expect(traces.map((trace) => trace.anchorEventId)).toEqual([f.event.id, second.id]);
+      expect(traces.map((trace) => trace.root.status)).toEqual(['ok', 'ok']);
+      expect(f.events.find((event) => event.kind === 'session.status_running')?.producedAt).toBe(
+        startedAt,
+      );
+      expect(f.events.find((event) => event.kind === 'session.status_idle')?.producedAt).toBe(
+        '2026-01-01T00:00:05.000Z',
+      );
+      expect(new Set(f.events.map((event) => event.id)).size).toBe(f.events.length);
+      expect((await f.session()).usageInputTokens).toBe(60);
+    } finally {
+      vi.useRealTimers();
+    }
+  },
+);
+
+it.each(['failed', 'interrupted'] as const)(
+  'closes a %s native turn as a canonical error',
+  async (outcome) => {
+    const f = await fixture();
+    f.checkpoint.completion!.outcome = outcome;
+    await f.coordinator.prepare(f.checkpoint, resourceCheckpointDigest(f.checkpoint));
+    await f.coordinator.finish(f.event.id, f.binding.revision);
+    const traces = projectCanonicalTurns(
+      [f.event, ...f.events].map((event, index) => ({ ...event, seq: index + 1 })),
+    );
+    expect(traces).toHaveLength(1);
+    expect(traces[0]!.root.status).toBe('error');
+    expect(f.events.map((event) => event.kind).slice(2)).toEqual([
+      'session.error',
+      'session.status_idle',
+      'agent.turn_completed',
+      'session.user_event_completed',
+    ]);
+    expect((await f.row()).phase).toBe('completed');
+  },
+);
+
+it('fences a stale finish behind a replacement owner without changing its terminal timestamp', async () => {
+  const f = await fixture();
+  await f.coordinator.prepare(f.checkpoint, resourceCheckpointDigest(f.checkpoint));
+  let pause = false;
+  let release!: () => void;
+  let entered!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const waiting = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const old = f.replace({
+    isCurrent: async () => {
+      if (pause) {
+        entered();
+        await gate;
+      }
+      return true;
+    },
+  });
+  await old.claim(f.binding);
+  pause = true;
+  const stale = expect(old.finish(f.event.id, f.binding.revision)).rejects.toThrow('superseded');
+  await waiting;
+  try {
+    const next = f.replace();
+    await next.claim(f.binding);
+    await next.finish(f.event.id, f.binding.revision);
+    const record = (await f.row()).record;
+    const terminal = f.events.filter((event) => event.kind === 'session.status_idle');
+    release();
+    await stale;
+    expect((await f.row()).record).toEqual(record);
+    expect(terminal).toHaveLength(1);
+    expect(f.events.filter((event) => event.kind === 'session.status_idle')).toEqual(terminal);
+  } finally {
+    release();
+    await stale;
+  }
+});
+
 it('rejects a shared usage writer that passed the outer check while native authority was uncommitted', async () => {
   const f = await fixture(false, false);
   expect(await f.coordinator.hasAuthority()).toBe(false);
@@ -315,46 +466,49 @@ it('rejects a shared usage writer that passed the outer check while native autho
   }
 });
 
-it('replays 10,000 stable events with one transcript scan and bounded lock transactions, including concurrent finish', async () => {
-  const f = await fixture();
-  f.checkpoint.completion!.events = Array.from({ length: 10000 }, (_, index) => ({
-    id: 'evt_long_' + index,
-    type: 'agent.message',
-    content: [],
-  }));
-  await f.coordinator.prepare(f.checkpoint, resourceCheckpointDigest(f.checkpoint));
-  vi.mocked(f.store.read).mockClear();
-  const transactions = vi.spyOn(db, 'transaction');
-  const batchBytes: number[] = [];
-  f.append.mockImplementation(async (_w, _s, batch) => {
-    batchBytes.push(await checkedBatchBytes(batch));
-    f.events.push(...batch);
-    return [];
-  });
-  try {
-    await Promise.all([
-      f.coordinator.finish(f.event.id, f.binding.revision),
-      f.coordinator.finish(f.event.id, f.binding.revision),
-    ]);
-    expect(f.store.read).toHaveBeenCalledTimes(1);
-    expect(f.append.mock.calls.length).toBeGreaterThan(4);
-    expect(f.append.mock.calls.length).toBeLessThanOrEqual(64);
-    expect(Math.max(...batchBytes)).toBeLessThanOrEqual(BROKER_BATCH_BYTES);
-    expect(transactions.mock.calls.length).toBeLessThanOrEqual(10);
-    expect(f.events).toHaveLength(10003);
-    expect(new Set(f.events.map((event) => event.id)).size).toBe(10003);
-    expect((await f.row()).phase).toBe('completed');
-  } finally {
-    transactions.mockRestore();
-  }
-});
+it.each(['success', 'failed'] as const)(
+  'replays 10,000 stable events with one transcript scan and bounded lock transactions, including concurrent finish (%s)',
+  async (outcome) => {
+    const f = await fixture();
+    f.checkpoint.completion!.outcome = outcome;
+    f.checkpoint.completion!.events = Array.from({ length: 10000 }, (_, index) => ({
+      id: 'evt_long_' + index,
+      type: 'agent.message',
+      content: [],
+    }));
+    await f.coordinator.prepare(f.checkpoint, resourceCheckpointDigest(f.checkpoint));
+    const transactions = vi.spyOn(db, 'transaction');
+    const batchBytes: number[] = [];
+    f.append.mockImplementation(async (_w, _s, batch) => {
+      batchBytes.push(await checkedBatchBytes(batch));
+      f.events.push(...batch);
+      return [];
+    });
+    try {
+      await Promise.all([
+        f.coordinator.finish(f.event.id, f.binding.revision),
+        f.coordinator.finish(f.event.id, f.binding.revision),
+      ]);
+      expect(f.store.read).toHaveBeenCalledTimes(1);
+      expect(f.append.mock.calls.length).toBeGreaterThan(4);
+      expect(f.append.mock.calls.length).toBeLessThanOrEqual(64);
+      expect(Math.max(...batchBytes)).toBeLessThanOrEqual(BROKER_BATCH_BYTES);
+      expect(transactions.mock.calls.length).toBeLessThanOrEqual(10);
+      const count = outcome === 'success' ? 10005 : 10006;
+      expect(f.events).toHaveLength(count);
+      expect(new Set(f.events.map((event) => event.id)).size).toBe(count);
+      expect((await f.row()).phase).toBe('completed');
+    } finally {
+      transactions.mockRestore();
+    }
+  },
+);
 
 it('splits replay larger than the Kafka batch limit while preserving order and one history scan', async () => {
   const f = await fixture();
   const events = replayEvents(2000);
   f.checkpoint.completion!.events = events;
   await f.coordinator.prepare(f.checkpoint, resourceCheckpointDigest(f.checkpoint));
-  vi.mocked(f.store.read).mockClear();
   const batchBytes: number[] = [];
   f.append.mockImplementation(async (_w, _s, batch) => {
     batchBytes.push(await checkedBatchBytes(batch));
@@ -365,13 +519,13 @@ it('splits replay larger than the Kafka batch limit while preserving order and o
   await f.coordinator.finish(f.event.id, f.binding.revision, async (phase) => {
     phases.push(phase);
     if (phase === 'prepared')
-      expect(f.events.map((event) => event.id)).toEqual(events.map((event) => event.id));
+      expect(f.events.slice(2).map((event) => event.id)).toEqual(events.map((event) => event.id));
   });
   expect(f.store.read).toHaveBeenCalledTimes(1);
   expect(batchBytes.length).toBeGreaterThan(4);
   expect(batchBytes.reduce((total, bytes) => total + bytes, 0)).toBeGreaterThan(BROKER_BATCH_BYTES);
   expect(Math.max(...batchBytes)).toBeLessThanOrEqual(BROKER_BATCH_BYTES);
-  expect(f.events.slice(0, events.length).map((event) => event.id)).toEqual(
+  expect(f.events.slice(2, events.length + 2).map((event) => event.id)).toEqual(
     events.map((event) => event.id),
   );
   expect(phases).toEqual(['prepared', 'completed']);
@@ -385,7 +539,6 @@ it.each([false, true])(
     const events = replayEvents(2000);
     f.checkpoint.completion!.events = events;
     await f.coordinator.prepare(f.checkpoint, resourceCheckpointDigest(f.checkpoint));
-    vi.mocked(f.store.read).mockClear();
     let appends = 0;
     f.append.mockImplementation(async (_w, _s, batch) => {
       await checkedBatchBytes(batch);
@@ -400,7 +553,7 @@ it.each([false, true])(
     await expect(f.coordinator.finish(f.event.id, f.binding.revision, ack)).rejects.toThrow(
       'middle chunk ACK unavailable',
     );
-    expect(f.events.length).toBeGreaterThan(0);
+    expect(f.events.length).toBeGreaterThan(2);
     expect(f.events.length).toBeLessThan(events.length);
     expect(ack).not.toHaveBeenCalled();
     expect((await f.row()).phase).toBe('prepared');
@@ -408,10 +561,10 @@ it.each([false, true])(
     const callsBeforeRetry = f.append.mock.calls.length;
     await f.coordinator.finish(f.event.id, f.binding.revision, ack);
     expect(f.store.read).toHaveBeenCalledTimes(2);
-    expect(f.events.slice(0, events.length).map((event) => event.id)).toEqual(
+    expect(f.events.slice(2, events.length + 2).map((event) => event.id)).toEqual(
       events.map((event) => event.id),
     );
-    expect(new Set(f.events.map((event) => event.id)).size).toBe(events.length + 3);
+    expect(new Set(f.events.map((event) => event.id)).size).toBe(events.length + 5);
     const retriedIds = f.append.mock.calls
       .slice(callsBeforeRetry)
       .flatMap(([, , batch]) => batch.map((event) => event.id));
@@ -426,7 +579,7 @@ it('fences every replay chunk and lets a replacement reconcile the already commi
   const events = replayEvents(2000);
   f.checkpoint.completion!.events = events;
   await f.coordinator.prepare(f.checkpoint, resourceCheckpointDigest(f.checkpoint));
-  vi.mocked(f.store.read).mockClear();
+  f.append.mockClear();
   f.append.mockImplementation(async (_w, _s, batch) => {
     await checkedBatchBytes(batch);
     f.events.push(...batch);
@@ -438,7 +591,7 @@ it('fences every replay chunk and lets a replacement reconcile the already commi
     'generation retired',
   );
   expect(f.append).toHaveBeenCalledTimes(1);
-  expect(f.events.length).toBeGreaterThan(0);
+  expect(f.events.length).toBeGreaterThan(2);
   expect(f.events.length).toBeLessThan(events.length);
   expect(ack).not.toHaveBeenCalled();
   expect((await f.row()).phase).toBe('prepared');
@@ -446,10 +599,10 @@ it('fences every replay chunk and lets a replacement reconcile the already commi
   await replacement.claim(f.binding);
   await replacement.finish(f.event.id, f.binding.revision, ack);
   expect(f.store.read).toHaveBeenCalledTimes(2);
-  expect(f.events.slice(0, events.length).map((event) => event.id)).toEqual(
+  expect(f.events.slice(2, events.length + 2).map((event) => event.id)).toEqual(
     events.map((event) => event.id),
   );
-  expect(new Set(f.events.map((event) => event.id)).size).toBe(events.length + 3);
+  expect(new Set(f.events.map((event) => event.id)).size).toBe(events.length + 5);
   expect((await f.row()).phase).toBe('completed');
 });
 
@@ -470,15 +623,15 @@ it.each([900, 1100])(
         'Kafka record batch exceeds 1 MiB',
       );
       expect(ack).not.toHaveBeenCalled();
-      expect(f.events).toEqual([]);
+      expect(f.events.slice(2)).toEqual([]);
       expect((await f.row()).phase).toBe('prepared');
       await expect(
         f.coordinator.begin({ ...f.event, id: newId('evt') }, f.binding),
       ).rejects.toThrow('blocks');
     } else {
       await f.coordinator.finish(f.event.id, f.binding.revision, ack);
-      expect(f.events[0]!.payload.byteLength).toBeGreaterThan(kib * 1024);
-      expect(JSON.parse(Buffer.from(f.events[0]!.payload).toString()).content[0].text).toHaveLength(
+      expect(f.events[2]!.payload.byteLength).toBeGreaterThan(kib * 1024);
+      expect(JSON.parse(Buffer.from(f.events[2]!.payload).toString()).content[0].text).toHaveLength(
         kib * 1024,
       );
       expect((await f.row()).phase).toBe('completed');
@@ -489,13 +642,14 @@ it.each([900, 1100])(
 it('refuses a broker append if its generation retires during the initial ID scan', async () => {
   const f = await fixture();
   await f.coordinator.prepare(f.checkpoint, resourceCheckpointDigest(f.checkpoint));
+  const next = f.replace();
+  await next.claim(f.binding);
+  f.append.mockClear();
   vi.mocked(f.store.read).mockImplementationOnce(async function* () {
     f.retire();
     yield* [];
   });
-  await expect(f.coordinator.finish(f.event.id, f.binding.revision)).rejects.toThrow(
-    'generation retired',
-  );
+  await expect(next.finish(f.event.id, f.binding.revision)).rejects.toThrow('generation retired');
   expect(f.append).not.toHaveBeenCalled();
   expect((await f.row()).phase).toBe('prepared');
 });
@@ -507,7 +661,6 @@ it('serializes concurrent finish after a lost append ACK and rescans only on amb
     f.events.push(...batch);
     throw new Error('lost append ACK');
   });
-  vi.mocked(f.store.read).mockClear();
   const results = await Promise.allSettled([
     f.coordinator.finish(f.event.id, f.binding.revision),
     f.coordinator.finish(f.event.id, f.binding.revision),
@@ -562,13 +715,13 @@ it('commits both stable reports once before no-output completion becomes visible
   expect(await hasNativeUsageAuthority(db, workspaceId, f.sessionId)).toBe(true);
   await f.coordinator.stage(f.checkpoint, digest);
   await f.coordinator.prepare(f.checkpoint, digest);
-  expect(f.events).toEqual([]);
+  expect(f.events.slice(2)).toEqual([]);
   expect((await f.row()).phase).toBe('prepared');
   expect((await f.session()).usageInputTokens).toBe(30);
   const phases: string[] = [];
   await f.coordinator.finish(f.event.id, f.binding.revision, async (phase) => {
     phases.push(phase);
-    if (phase === 'prepared') expect(f.events).toEqual([]);
+    if (phase === 'prepared') expect(f.events.slice(2)).toEqual([]);
     else expect(f.events.some((e) => e.kind === 'agent.turn_completed')).toBe(true);
   });
   await f.coordinator.prepare(f.checkpoint, digest);
@@ -609,7 +762,7 @@ it.each([
     ).rejects.toThrow('lost session ownership');
     expect((await f.row()).phase).toBe('running');
     expect((await f.session()).usageInputTokens).toBe(0);
-    expect(f.events).toEqual([]);
+    expect(f.events.slice(2)).toEqual([]);
   },
 );
 
@@ -680,9 +833,14 @@ it('keeps committed partial usage but never ACKs or completes missing report evi
     'not prepared',
   );
   expect(f.events.some((e) => e.kind === 'agent.turn_completed')).toBe(false);
-  await expect(f.coordinator.begin({ ...f.event, id: newId('evt') }, f.binding)).rejects.toThrow(
-    'blocks',
-  );
+  const queued = { ...f.event, id: newId('evt') };
+  await expect(f.coordinator.begin(queued, f.binding)).rejects.toThrow('blocks');
+  expect(
+    projectCanonicalTurns(
+      [f.event, ...f.events, queued].map((event, index) => ({ ...event, seq: index + 1 })),
+    ),
+  ).toEqual([]);
+  expect(f.events.filter((event) => event.kind === 'session.user_event_processed')).toHaveLength(1);
 });
 
 it('marks process loss incomplete and rejects replay on another execution', async () => {
@@ -695,22 +853,15 @@ it('marks process loss incomplete and rejects replay on another execution', asyn
   await expect(next.markLost(f.event.id, f.binding.revision)).rejects.toThrow('operator recovery');
   expect((await f.row()).phase).toBe('incomplete');
   expect(f.events.some((e) => e.kind === 'agent.turn_completed')).toBe(false);
+  const queued = { ...f.event, id: newId('evt') };
+  await expect(next.begin(queued, f.binding)).rejects.toThrow('blocks');
+  expect(
+    projectCanonicalTurns(
+      [f.event, ...f.events, queued].map((event, index) => ({ ...event, seq: index + 1 })),
+    ),
+  ).toEqual([]);
+  expect(f.events.filter((event) => event.kind === 'session.user_event_processed')).toHaveLength(1);
 });
-
-it.each(['failed', 'interrupted'] as const)(
-  'preserves %s instead of publishing a clean success',
-  async (outcome) => {
-    const f = await fixture();
-    f.checkpoint.completion!.outcome = outcome;
-    await f.coordinator.prepare(f.checkpoint, resourceCheckpointDigest(f.checkpoint));
-    await f.coordinator.finish(f.event.id, f.binding.revision);
-    expect(f.events.map((e) => e.kind).slice(0, 2)).toEqual([
-      'agent.error',
-      'agent.turn_completed',
-    ]);
-    expect((await f.row()).phase).toBe('completed');
-  },
-);
 
 it('repairs missing public events before ACK with their live IDs and deduplicates a lost append ACK', async () => {
   const f = await fixture();
@@ -730,12 +881,16 @@ it('repairs missing public events before ACK with their live IDs and deduplicate
   await next.claim(f.binding);
   await next.finish(f.event.id, f.binding.revision, async (phase) => {
     if (phase === 'prepared')
-      expect(f.events.map((event) => event.id)).toEqual(['evt_live_approval', 'evt_live_answer']);
+      expect(f.events.slice(2).map((event) => event.id)).toEqual([
+        'evt_live_approval',
+        'evt_live_answer',
+      ]);
   });
   expect(f.events.filter((event) => event.id === 'evt_live_approval')).toHaveLength(1);
-  expect(f.events.map((event) => event.kind).slice(0, 3)).toEqual([
+  expect(f.events.map((event) => event.kind).slice(2, 6)).toEqual([
     'agent.requires_action',
     'agent.message',
+    'session.status_idle',
     'agent.turn_completed',
   ]);
 });
@@ -894,7 +1049,7 @@ it.each([false, true, 'missing', 'incomplete'] as const)(
       await delivery.deliver();
       expect(f.events.map((event) => event.id)).toEqual(ids);
       expect(f.events.filter((event) => event.kind === 'agent.turn_completed')).toHaveLength(1);
-      if (output) expect(f.events[0]!.kind).toBe('session.output_indexed');
+      if (output) expect(f.events[2]!.kind).toBe('session.output_indexed');
       await f.coordinator.begin({ ...f.event, id: newId('evt') }, f.binding);
     } finally {
       await files.close();
@@ -1179,6 +1334,7 @@ it
       };
       await request('/v1/runner/snapshot', snapshot);
       const configPath = join(inputPath, '../../.pi-agent-home/models.json');
+      await f.store.append(workspaceId, f.sessionId, [f.event]);
       await delivery.beginTurn(f.event);
       await delivery.publishMounted();
       expect(
@@ -1223,7 +1379,7 @@ it
       expect((await f.session()).usageOutputTokens).toBe(21);
       expect((await f.row()).phase).toBe('completed');
       expect(f.events.findIndex((event) => event.kind === 'session.output_indexed')).toBeLessThan(
-        f.events.findIndex((event) => event.kind === 'agent.turn_completed'),
+        f.events.findIndex((event) => event.kind === 'session.status_idle'),
       );
       await delivery.commit(completion.checkpoint_id, completion.manifest_sha256);
       expect((await f.session()).usageInputTokens).toBe(39);
@@ -1253,6 +1409,7 @@ it
         execution_id: status.execution_id,
         placement_id: status.placement_id,
       });
+      await f.store.append(workspaceId, f.sessionId, [nextEvent]);
       await delivery.beginTurn(nextEvent);
       const firstTurnCalls = calls;
       const second = await runner.request({
@@ -1284,6 +1441,11 @@ it
       expect(modelErrors).toEqual([]);
       expect((await f.session()).usageInputTokens).toBe(52);
       expect(f.events.filter((event) => event.kind === 'agent.turn_completed')).toHaveLength(2);
+      const traces = projectCanonicalTurns(
+        f.events.map((event, index) => ({ ...event, seq: index + 1 })),
+      );
+      expect(traces.map((trace) => trace.anchorEventId)).toEqual([f.event.id, nextEvent.id]);
+      expect(traces.map((trace) => trace.root.status)).toEqual(['ok', 'ok']);
     } finally {
       acquireSpy.mockRestore();
       await tunnel.stop();
