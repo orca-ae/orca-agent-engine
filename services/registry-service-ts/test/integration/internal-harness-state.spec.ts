@@ -32,14 +32,20 @@ import {
   STUB_SSE_CONFIG,
 } from './setup.js';
 
-const describeSdk = describe.each(['codex_sdk', 'pi_sdk'] as const);
-describeSdk('private %s checkpoint persistence', (sdkHarness) => {
+const describeSdk = describe.each([
+  ['codex_sdk', undefined],
+  ['pi_sdk', '0.87.0'],
+  ['pi_sdk', '0.87.1'],
+  ['pi_sdk', '1.0.4'],
+  ['pi_sdk', '1.5.0'],
+] as const);
+describeSdk('private %s checkpoint persistence (%s)', (sdkHarness, sdkVersion) => {
   const checkpoint = (text: string) =>
     sdkHarness === 'pi_sdk'
       ? {
           version: 1,
           format: 'pi_sdk',
-          sdkVersion: '0.87.0',
+          sdkVersion,
           threadId: 'thread-123',
           instructionsSha256: 'a'.repeat(64),
           files: { 'session.json': Buffer.from(text).toString('base64') },
@@ -322,7 +328,10 @@ describeSdk('private %s checkpoint persistence', (sdkHarness) => {
       pending = request;
       // The route read revision7 and is ready to update while the execution
       // transaction still owns the row. Its CAS is evaluated after that commits.
-      await vi.waitFor(() => expect(update).toHaveBeenCalledWith(sessions));
+      await vi.waitFor(
+        () => expect(update.mock.calls.some(([table]) => table === sessions)).toBe(true),
+        { timeout: 10_000 },
+      );
       await connection.query('COMMIT');
       expect((await request).statusCode).toBe(409);
       const [current] = await db.select().from(sessions).where(eq(sessions.id, sessionId));

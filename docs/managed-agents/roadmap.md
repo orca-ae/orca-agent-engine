@@ -1102,7 +1102,7 @@ harness on the actual E2B or OpenSandbox deployment.
 ## Pi SDK extensions
 
 `pi_sdk` ships cloud separate, cloud shared colocated and self-hosted colocated
-execution with the native Pi 0.87.1 SDK and its admitted static API-key model catalog. The older `pi`
+execution with the native Pi 1.5.0 SDK and its admitted static API-key model catalog. The older `pi`
 harness remains the separate CLI RPC integration.
 
 - **Native Pi Gateway release:** Pi's isolated native route requires a Gateway build

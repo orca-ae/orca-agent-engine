@@ -11,12 +11,14 @@ export function nativePiInstallation(): { cli: string; readPaths: string[] } {
   const [major, minor] = process.versions.node.split('.').map(Number);
   if (major !== 22 || minor! < 21)
     throw new Error('Native completion requires Node 22.21 or newer Node 22');
-  const main = fileURLToPath(import.meta.resolve('@earendil-works/pi-coding-agent'));
+  const main = fileURLToPath(import.meta.resolve('@earendil-works/pi-coding-agent-legacy'));
   const root = dirname(dirname(realpathSync(main)));
   if (JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version !== '0.87.1')
     throw new Error('Native completion requires the controlled Pi 0.87.1 package');
   const cli = realpathSync(join(root, 'dist/cli.js'));
-  const api = fileURLToPath(import.meta.resolve('@earendil-works/pi-ai/api/anthropic-messages'));
+  const api = fileURLToPath(
+    import.meta.resolve('@earendil-works/pi-ai-legacy/api/anthropic-messages'),
+  );
   let cliApi: string | undefined;
   for (const path of createRequire(cli).resolve.paths('@earendil-works/pi-ai') ?? []) {
     try {

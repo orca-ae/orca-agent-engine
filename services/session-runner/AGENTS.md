@@ -48,7 +48,7 @@ runner shell and the credential-free snapshot selects the harness.
 | `claude`                | in-process Claude Agent SDK   | lean, one `query()` per turn                                             |
 | `claude-sdk-persistent` | in-process Claude Agent SDK   | long-lived session; the only provider honoring a per-turn model override |
 | `claude-code`           | native CLI over stream-json   | headless `claude` as a long-lived child                                  |
-| `pi-sdk`                | native Pi SDK subprocess      | `@earendil-works/pi-coding-agent` 0.87.0; private native session history |
+| `pi-sdk`                | native Pi SDK subprocess      | `@earendil-works/pi-coding-agent` 1.5.0, private native session history  |
 | `codex-sdk`             | native Codex SDK subprocess   | `@openai/codex-sdk` 0.154.0; native persisted thread history             |
 | `codex`                 | native CLI over JSON-RPC      | `codex app-server`                                                       |
 | `cursor`                | native CLI over stream-json   | `cursor-agent`                                                           |

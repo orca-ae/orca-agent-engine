@@ -49,7 +49,7 @@ export function piProviderFetch(options: PiTransportOptions): typeof fetch {
   return validatedProviderFetch(options.api, send);
 }
 
-/** Pi 0.87's Google SDK rejects custom fetch. This private loopback bridge gives
+/** Pi's Google SDK rejects custom fetch. This private loopback bridge gives
  * it the same transport and wire-usage validation without global fetch mutation. */
 export class PiGoogleTransport {
   private readonly token = randomUUID();

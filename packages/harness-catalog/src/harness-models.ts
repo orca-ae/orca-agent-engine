@@ -14,7 +14,7 @@ import dshCatalog from './dsh-models.json' with { type: 'json' };
 // codex-rs/models-manager/models.json at rust-v0.154.0 (API-supported entries).
 export const CODEX_SDK_MODELS: Readonly<Record<string, readonly string[]>> = codexModels;
 
-/** Pi 0.87.0's bundled models, with existing Orca OpenAI aliases retained. */
+/** Pi 1.5.0's models, with previously admitted definitions and Orca OpenAI aliases retained. */
 export const PI_SDK_MODELS: Readonly<Record<string, Readonly<Record<string, readonly string[]>>>> =
   {
     ...piModels,

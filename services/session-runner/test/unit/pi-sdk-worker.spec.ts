@@ -8,6 +8,7 @@ import { InMemorySandboxRuntime } from '@orca/sandbox-runtime';
 import { CodexSdkHarness } from '../../src/harness/codex-sdk/index.js';
 import type { AgentEvent, ToolConfirmer } from '../../src/harness/agent-harness.js';
 import type { SdkCheckpoint } from '@orca/sdk-harness';
+import { legacyPiCheckpoint } from '../../../../packages/pi-harness/test/support/legacy-checkpoint.js';
 import {
   MODELS,
   type TestProvider,
@@ -57,7 +58,8 @@ async function start(
       model_provider: options.provider ?? 'openai',
       model_id: MODELS[options.provider ?? 'openai'],
       allowed_tool_names: ['write'],
-      system: 'Use managed tools.',
+      system:
+        options.checkpoint?.sdkVersion === '0.87.1' ? 'Managed tools only' : 'Use managed tools.',
     },
     toolPermissions: { policyFor: () => 'always_ask' },
     confirmTool:
@@ -71,6 +73,26 @@ describe.each(['openai', 'anthropic', 'deepseek', 'google', 'zai'] as const)(
   (provider) => {
     const startProvider = (options: Parameters<typeof start>[0] = {}) =>
       start({ ...options, provider });
+    it('restores a 0.87.1 checkpoint in the built 1.5.0 subprocess and confirms a new tool', async () => {
+      const checkpoint = legacyPiCheckpoint(provider);
+      const confirm = vi.fn(async (_name: string, input: Record<string, unknown>) => ({
+        behavior: 'allow' as const,
+        updatedInput: input,
+      }));
+      const h = await startProvider({ checkpoint, confirm });
+      await h.harness.submit(message);
+      expect(h.events.filter((event) => event.kind === 'agent.error')).toEqual([]);
+      expect(confirm).toHaveBeenCalledOnce();
+      expect((await h.sandbox.files.read('proof.txt')).toString()).toBe('proof');
+      expect(JSON.stringify(h.api.requests[0])).toContain('Remember my legacy write');
+      expect(JSON.stringify(h.api.requests[0])).toContain('Legacy write approved');
+      expect(
+        h.events.find((event) => event.kind === 'orca.harness_checkpoint')?.payload,
+      ).toMatchObject({
+        provider: 'pi-sdk',
+        state: { sdkVersion: '1.5.0', threadId: checkpoint.threadId },
+      });
+    }, 30000);
     it('gates tool writes, emits usage and a private checkpoint, then resumes in a new process', async () => {
       const first = await startProvider();
       await first.harness.submit(message);

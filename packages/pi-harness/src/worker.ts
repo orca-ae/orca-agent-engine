@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { piProviderFetch, PiGoogleTransport } from './transport.js';
+import { legacyPiModel } from './legacy-models.js';
 import { randomUUID } from 'node:crypto';
 import {
   createAgentSession,
@@ -20,6 +21,7 @@ import {
   type Model,
   type Api,
 } from '@earendil-works/pi-ai';
+import { anthropicMessagesApi } from '@earendil-works/pi-ai/api/anthropic-messages.lazy';
 import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 import type { TSchema } from 'typebox';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
@@ -198,8 +200,9 @@ export class PiSdkWorker implements SdkWorker {
             ? 'medium'
             : (piModelEfforts(input.modelProvider ?? 'openai', input.model)?.[0] ??
               'off')))) as ThinkingLevel,
+      // SDK tool selectors interpret wildcards and +/- modifiers. The empty
+      // resource loader and builtin suppression enable only the custom tools.
       noTools: 'builtin',
-      tools: customTools.map((tool) => tool.name),
       customTools,
       resourceLoader,
       sessionManager: SessionManager.inMemory(input.root, undefined, restored?.entries),
@@ -237,7 +240,8 @@ export class PiSdkWorker implements SdkWorker {
     const provider = input.modelProvider ?? 'openai';
     const native = this.runtime!.getProvider(provider);
     if (!native?.auth.apiKey) throw new Error('Pi provider requires static API-key support');
-    const known = this.runtime!.getModel(provider, input.model);
+    const known =
+      legacyPiModel(provider, input.model) ?? this.runtime!.getModel(provider, input.model);
     const legacyEfforts = provider === 'openai' ? CODEX_SDK_MODELS[input.model] : undefined;
     const api = piModelApi(provider, input.model)!;
     const model: Model<Api> = {
@@ -252,6 +256,11 @@ export class PiSdkWorker implements SdkWorker {
         baseUrl: 'https://api.openai.com/v1',
       }),
       api,
+      // Managed Agent versions pin one effort for the whole Session. Keep it
+      // in reasoning.effort on the existing Responses/Gateway contract.
+      ...(api === 'openai-responses'
+        ? { compat: { ...known?.compat, supportsMidConvoEffort: false } }
+        : {}),
       ...(legacyEfforts
         ? {
             thinkingLevelMap: {
@@ -279,8 +288,11 @@ export class PiSdkWorker implements SdkWorker {
       }));
       await this.googleTransport.start();
     }
-    // Preserve the official provider's dispatch, compatibility flags and model API.
-    // Replace only auth: no ambient env, credential files, OAuth or catalog refresh.
+    // Pi 1.5 switched Kimi to Chat Completions. Previously admitted Kimi
+    // models still use the official Messages adapter with their pinned URL.
+    const streams =
+      provider === 'kimi-coding' && api === 'anthropic-messages' ? anthropicMessagesApi() : native;
+    // Use explicit credentials without ambient env, files, OAuth or catalog refresh.
     this.runtime!.registerNativeProvider({
       id: native.id,
       name: native.name,
@@ -309,8 +321,8 @@ export class PiSdkWorker implements SdkWorker {
           }),
         },
       },
-      stream: native.stream.bind(native),
-      streamSimple: native.streamSimple.bind(native),
+      stream: streams.stream.bind(streams),
+      streamSimple: streams.streamSimple.bind(streams),
     });
   }
 

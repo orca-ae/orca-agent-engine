@@ -931,7 +931,7 @@ See [harness-server](services/harness-server.md) for the persistence boundaries.
 
 `pi_sdk` follows the same three execution paths as `codex_sdk`: cloud separate,
 cloud colocated through the shared sandbox-harness image, and self-hosted colocated
-through session-runner. It embeds Pi 0.87.1 with only managed tools and exports
+through session-runner. It embeds Pi 1.5.0 with only managed tools and exports
 private native checkpoints. The existing `pi` CLI provider remains a distinct
 harness. See [Pi SDK](libraries/pi-harness.md) for selection, credentials,
 accounting and recovery.

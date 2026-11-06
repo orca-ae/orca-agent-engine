@@ -58,6 +58,9 @@ it('runs the installed Pi SDK with only managed tools and restores native histor
   expect(events.filter((event) => event.type === 'failure')).toEqual([]);
   expect(events.some((event) => event.type === 'tool_call')).toBe(true);
   expect(api.requests).toHaveLength(2);
+  expect((api.requests[0]!.tools as Array<{ name: string }>).map(({ name }) => name)).toEqual([
+    'write',
+  ]);
   const cp = events.find((event) => event.type === 'checkpoint');
   expect(cp?.type).toBe('checkpoint');
   if (cp?.type !== 'checkpoint') throw new Error('checkpoint missing');
@@ -104,6 +107,21 @@ async function plainWorker(
   return { api, events, worker, start };
 }
 
+it('keeps managed tool names literal in the model request', async () => {
+  const h = await plainWorker(
+    {},
+    {
+      tools: ['-lookup', 'lookup'].map((name) => ({ name, inputSchema: { type: 'object' } })),
+    },
+  );
+  await h.worker.handle({ type: 'submit', text: 'List the managed tools' });
+  expect(h.events.filter((event) => event.type === 'failure')).toEqual([]);
+  expect(h.api.requests[0]?.tools).toEqual([
+    expect.objectContaining({ name: '-lookup' }),
+    expect.objectContaining({ name: 'lookup' }),
+  ]);
+});
+
 it('rotates credentials and endpoint without losing native conversation history', async () => {
   const h = await plainWorker();
   await h.worker.handle({ type: 'submit', text: 'Remember the private proof' });
@@ -147,7 +165,7 @@ it('restores an approved instruction transition and rejects a different model or
   const event = h.events.find((event) => event.type === 'checkpoint');
   if (event?.type !== 'checkpoint') throw new Error('checkpoint missing');
   const original = event.checkpoint;
-  expect(original.sdkVersion).toBe('0.87.1');
+  expect(original.sdkVersion).toBe('1.5.0');
   expect(() => decodePiCheckpoint({ ...original, sdkVersion: '0.87.0' })).not.toThrow();
   const system = 'Managed instructions with an updated Skill catalog';
   expect(() => transitionPiCheckpointInstructions(original, system, () => false)).toThrow(
@@ -184,7 +202,7 @@ it('restores an approved instruction transition and rejects a different model or
   ).toThrow();
 }, 20000);
 
-it('rejects a retired 0.87.0 checkpoint model with a migration error while restoring supported models', async () => {
+it('restores supported 0.87.0 checkpoints and explains unavailable models', async () => {
   const h = await plainWorker();
   await h.worker.handle({ type: 'submit', text: 'Keep this conversation' });
   const event = h.events.find((entry) => entry.type === 'checkpoint');
@@ -195,27 +213,30 @@ it('rejects a retired 0.87.0 checkpoint model with a migration error while resto
   await resumed.handle({ ...h.start, checkpoint: supportedLegacy });
 
   const history = decodePiCheckpoint(event.checkpoint);
-  const retiredLegacy = {
+  const modelProvider = 'opencode';
+  const unavailableModel = 'orca-test-unavailable-model';
+  const unavailableLegacy = {
     ...supportedLegacy,
     files: {
       'session.json': Buffer.from(
-        JSON.stringify({ ...history, modelProvider: 'opencode', model: 'mimo-v2.5-free' }),
+        JSON.stringify({ ...history, modelProvider, model: unavailableModel }),
       ).toString('base64'),
     },
   };
-  const retiredError =
-    /Pi 0\.87\.0 checkpoint model 'opencode\/mimo-v2\.5-free' is unavailable in Pi 0\.87\.1; start a new session/;
-  expect(() => decodePiCheckpoint(retiredLegacy)).toThrow(retiredError);
+  const migrationError =
+    `Pi 0.87.0 checkpoint model '${modelProvider}/${unavailableModel}' is unavailable in Pi 1.5.0` +
+    '; start a new session';
+  expect(() => decodePiCheckpoint(unavailableLegacy)).toThrow(migrationError);
   const rejected = new PiSdkWorker(() => {});
   cleanup.push(() => rejected.close());
   await expect(
     rejected.handle({
       ...h.start,
-      modelProvider: 'opencode',
-      model: 'mimo-v2.5-free',
-      checkpoint: retiredLegacy,
+      modelProvider,
+      model: unavailableModel,
+      checkpoint: unavailableLegacy,
     }),
-  ).rejects.toThrow(retiredError);
+  ).rejects.toThrow(migrationError);
 }, 20000);
 
 it.each([undefined, 'low', 'high', 'xhigh', 'max', 'ultra'])(
@@ -225,6 +246,9 @@ it.each([undefined, 'low', 'high', 'xhigh', 'max', 'ultra'])(
     await h.worker.handle({ type: 'submit', text: 'hello' });
     expect(h.events.filter((event) => event.type === 'failure')).toEqual([]);
     expect(h.api.requests[0]?.reasoning).toMatchObject({ effort: effort ?? 'medium' });
+    expect(h.api.requests[0]?.input).not.toContainEqual(
+      expect.objectContaining({ type: 'configuration_update' }),
+    );
   },
   20000,
 );

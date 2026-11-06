@@ -13,6 +13,12 @@ export interface PiHistory {
   system: string;
   entries: FileEntry[];
 }
+
+/**
+ * Decode the canonical `session.json` payload and validate it for replay.
+ * History must use an admitted model and match the checkpoint's thread ID and
+ * instruction digest. Parent entries must appear before their children.
+ */
 export function decodePiCheckpoint(checkpoint: SdkCheckpoint): PiHistory {
   validatePiCheckpoint(checkpoint);
   const bytes = Buffer.from(checkpoint.files['session.json']!, 'base64');
@@ -23,7 +29,7 @@ export function decodePiCheckpoint(checkpoint: SdkCheckpoint): PiHistory {
   const supportedModel = typeof history.model === 'string' && piModelApi(provider, history.model);
   if (checkpoint.sdkVersion === '0.87.0' && !supportedModel && typeof history.model === 'string')
     throw new Error(
-      `Pi 0.87.0 checkpoint model '${provider}/${history.model}' is unavailable in Pi 0.87.1; start a new session with a supported model`,
+      `Pi 0.87.0 checkpoint model '${provider}/${history.model}' is unavailable in Pi 1.5.0; start a new session with a supported model`,
     );
   if (
     typeof history.model !== 'string' ||
@@ -54,7 +60,7 @@ export function capturePiCheckpoint(threadId: string, history: PiHistory): SdkCh
   const checkpoint: SdkCheckpoint = {
     version: 1,
     format: 'pi_sdk',
-    sdkVersion: '0.87.1',
+    sdkVersion: '1.5.0',
     threadId,
     instructionsSha256: digest(history.system),
     files: { 'session.json': Buffer.from(JSON.stringify(history)).toString('base64') },

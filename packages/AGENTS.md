@@ -8,7 +8,7 @@ via `workspace:*` and call Kafka / Postgres / S3 **in-process**.
 If you find yourself adding an HTTP listener, a `main.ts`, or a Dockerfile to a package here, that is
 the signal you are in the wrong directory. `codex-harness` has one transport-specific exception:
 its SDK worker embeds a token-authenticated loopback MCP relay for the child CLI.
-`pi-harness` has the equivalent private transport exception for Pi 0.87's Google adapter,
+`pi-harness` has the equivalent private transport exception for Pi's Google adapter,
 which rejects custom fetch: its token-authenticated loopback bridge forwards model
 traffic through managed transport and validates raw usage. The relay is
 private to one worker, has no service endpoint, and closes with the worker; the library has no
@@ -58,6 +58,20 @@ library does today — anything not built goes in
 5. **`test/unit/` mirrors `src/`.** Integration tests go in `test/integration/` and need the dev
    compose stack (`make dev-up`).
 6. **Rebuild after touching shared types:** `pnpm -r build`, so cross-package consumers stay green.
+
+## Pi SDK version pins
+
+Update the three Pi SDK pins in `pi-harness/package.json` together, then regenerate
+`pnpm-lock.yaml` and the Pi catalog. The managed SDK's published dependencies pin
+its companion packages to the same version. If a future release needs an
+override, scope it to the managed SDK's parent and version. The `-legacy` aliases
+for the controlled CLI and DSH's Pi AI dependency have separate pins.
+
+The [Pi harness reference](../docs/managed-agents/libraries/pi-harness.md#regenerating-the-compatibility-definitions)
+documents how to regenerate and verify the retained model definitions. On SDK
+upgrades, verify that `@earendil-works/pi-ai/api/anthropic-messages.lazy` exports
+`anthropicMessagesApi` and run `pi-harness/test/unit/legacy-models.spec.ts` to
+check the retained Kimi Coding Messages route.
 
 ## Commands
 
