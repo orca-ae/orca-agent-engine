@@ -16,6 +16,7 @@ const apis = new Set([
 const excluded = new Set([
   'amazon-bedrock',
   'azure-openai-responses',
+  'azure',
   'cloudflare-ai-gateway',
   'cloudflare-workers-ai',
   'github-copilot',
@@ -26,7 +27,8 @@ const excluded = new Set([
 ]);
 const models = {},
   protocols = {};
-for (const provider of builtinModels().getProviders()) {
+const nativeModels = builtinModels();
+for (const provider of nativeModels.getProviders()) {
   if (excluded.has(provider.id) || !provider.auth.apiKey) continue;
   models[provider.id] = {};
   protocols[provider.id] = {};
@@ -40,6 +42,29 @@ for (const provider of builtinModels().getProviders()) {
   if (!Object.keys(models[provider.id]).length) {
     delete models[provider.id];
     delete protocols[provider.id];
+  }
+}
+// Preserve the native definitions admitted before the SDK upgrade. A catalog
+// refresh must not make a persisted Session's pinned model impossible to resume.
+const legacyModels = JSON.parse(
+  readFileSync(new URL('../src/legacy-models.json', import.meta.url), 'utf8'),
+);
+for (const [provider, catalog] of Object.entries(legacyModels)) {
+  for (const model of Object.values(catalog)) {
+    const efforts = getSupportedThinkingLevels(model).filter(
+      (l) => !['off', 'minimal'].includes(l),
+    );
+    if (
+      protocols[provider]?.[model.id] === model.api &&
+      nativeModels.getModel(provider, model.id)?.baseUrl.replace(/\/$/, '') ===
+        model.baseUrl.replace(/\/$/, '') &&
+      JSON.stringify(models[provider]?.[model.id]) === JSON.stringify(efforts)
+    )
+      throw new Error(`Redundant Pi compatibility model: ${provider}/${model.id}`);
+    if (!apis.has(model.api) || excluded.has(provider))
+      throw new Error('Unsupported Pi compatibility model');
+    (models[provider] ??= {})[model.id] = efforts;
+    (protocols[provider] ??= {})[model.id] = model.api;
   }
 }
 for (const [name, data] of Object.entries({

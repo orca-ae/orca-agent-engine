@@ -1,7 +1,7 @@
 // Copyright The Orca Authors
 // SPDX-License-Identifier: Apache-2.0
 
-/** Pi 0.87 history stays private and has a distinct wire tag from Codex rollouts. */
+/** Pi native history stays private and has a distinct wire tag from Codex rollouts. */
 export function validatePiCheckpoint(state: unknown): void {
   if (!state || typeof state !== 'object' || Array.isArray(state))
     throw new Error('invalid Pi checkpoint');
@@ -9,7 +9,10 @@ export function validatePiCheckpoint(state: unknown): void {
   if (
     value.version !== 1 ||
     value.format !== 'pi_sdk' ||
-    (value.sdkVersion !== '0.87.0' && value.sdkVersion !== '0.87.1') ||
+    (value.sdkVersion !== '0.87.0' &&
+      value.sdkVersion !== '0.87.1' &&
+      value.sdkVersion !== '1.0.4' &&
+      value.sdkVersion !== '1.5.0') ||
     typeof value.threadId !== 'string' ||
     !/^[a-zA-Z0-9-]{1,128}$/.test(value.threadId) ||
     typeof value.instructionsSha256 !== 'string' ||
