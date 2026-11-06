@@ -1,7 +1,11 @@
 // Copyright The Orca Authors
 // SPDX-License-Identifier: Apache-2.0
 
-/** Pi native history stays private and has a distinct wire tag from Codex rollouts. */
+/**
+ * Validate the private Pi envelope before persistence, including older SDK tags
+ * and the decoded size limit for `session.json`. The worker validates the native
+ * history inside that file before use.
+ */
 export function validatePiCheckpoint(state: unknown): void {
   if (!state || typeof state !== 'object' || Array.isArray(state))
     throw new Error('invalid Pi checkpoint');

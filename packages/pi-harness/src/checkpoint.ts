@@ -13,6 +13,12 @@ export interface PiHistory {
   system: string;
   entries: FileEntry[];
 }
+
+/**
+ * Decode the canonical `session.json` payload and validate it for replay.
+ * History must use an admitted model and match the checkpoint's thread ID and
+ * instruction digest. Parent entries must appear before their children.
+ */
 export function decodePiCheckpoint(checkpoint: SdkCheckpoint): PiHistory {
   validatePiCheckpoint(checkpoint);
   const bytes = Buffer.from(checkpoint.files['session.json']!, 'base64');
