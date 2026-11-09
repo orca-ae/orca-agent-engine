@@ -2,8 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { expect, it } from 'vitest';
-import { generateSummaryWithUsage } from '@earendil-works/pi-coding-agent';
-import { retryAssistantCall, normalizeContext, type Model, type Api } from '@earendil-works/pi-ai';
+import { generateSummaryWithUsage } from '@earendil-works/pi-coding-agent-legacy';
+import {
+  retryAssistantCall,
+  normalizeContext,
+  type Model,
+  type Api,
+} from '@earendil-works/pi-ai-legacy';
 import { nativePiReportingStream, type NativePiReport } from '../../src/native-reporting.js';
 
 const model: Model<Api> = {
@@ -69,7 +74,7 @@ it('retains distinct real provider attempts before the published retry helper di
   );
   const result = await retryAssistantCall(
     () => stream(model, context, { apiKey: 'fixture', maxRetries: 5 }).result(),
-    { enabled: true, maxRetries: 1, baseDelayMs: 1, maxDelayMs: 1 },
+    { enabled: true, maxRetries: 1, baseDelayMs: 1 },
     undefined,
   );
   expect(result.stopReason, JSON.stringify({ result, reports, requests })).toBe('stop');
@@ -136,7 +141,7 @@ it('captures internal compaction attempts through the pinned Pi summarization he
     'off',
     stream,
     undefined,
-    { enabled: true, maxRetries: 1, baseDelayMs: 1, maxDelayMs: 1 },
+    { enabled: true, maxRetries: 1, baseDelayMs: 1 },
   );
   expect(result.text).toBe('fixture summary');
   expect(requests).toBe(2);

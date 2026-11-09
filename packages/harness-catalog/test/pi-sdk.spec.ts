@@ -72,13 +72,13 @@ describe('managed Pi selection and checkpoint admission', () => {
   });
   it('prevents cross-provider history and path injection', () => {
     expect(() => validateSdkCheckpoint(checkpoint, 'pi_sdk')).not.toThrow();
-    expect(() =>
-      validateSdkCheckpoint({ ...checkpoint, sdkVersion: '0.87.1' }, 'pi_sdk'),
-    ).not.toThrow();
+    for (const sdkVersion of ['0.87.1', '1.0.4', '1.5.0'])
+      expect(() => validateSdkCheckpoint({ ...checkpoint, sdkVersion }, 'pi_sdk')).not.toThrow();
     for (const harness of ['codex_sdk', 'claude_code'])
       expect(() => validateSdkCheckpoint(checkpoint, harness)).toThrow();
     for (const bad of [
       { ...checkpoint, sdkVersion: 'unknown' },
+      { ...checkpoint, sdkVersion: '1.0.0' },
       { ...checkpoint, files: { '../auth.json': 'e30=' } },
       { ...checkpoint, instructionsSha256: '' },
       { ...checkpoint, files: { 'session.json': 'invalid' } },

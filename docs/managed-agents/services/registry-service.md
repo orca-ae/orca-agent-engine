@@ -2201,7 +2201,7 @@ retry failed reads with bounded backoff; stopping the bridge cancels that wait.
 `pi_sdk` uses the same execution ownership, protocol-specific gateway credentials, durable
 turn receipts, usage ledger and request-budget enforcement as `codex_sdk` in both
 cloud modes and self-hosted colocated mode. Native history is stored only in
-`session_harness_states`. The checkpoint format (`pi_sdk`, SDK 0.87.0 or 0.87.1) is checked
+`session_harness_states`. The checkpoint format (`pi_sdk`, SDK 0.87.0, 0.87.1, 1.0.4 or 1.5.0) is checked
 against the Session-pinned Agent selection; Codex and Pi histories cannot be exchanged.
 The private envelope and pending-usage key retain their historical Codex names for
 compatibility. See [Pi SDK runtime](../libraries/pi-harness.md).

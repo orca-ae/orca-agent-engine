@@ -2,14 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { randomUUID } from 'node:crypto';
-import { streamSimple } from '@earendil-works/pi-ai/api/anthropic-messages';
+import { streamSimple } from '@earendil-works/pi-ai-legacy/api/anthropic-messages';
 import {
   createAssistantMessageEventStream,
   type Api,
   type Model,
   type SimpleStreamOptions,
   type TranscriptContext,
-} from '@earendil-works/pi-ai';
+} from '@earendil-works/pi-ai-legacy';
 import { validatedProviderFetch, type SdkTerminalUsage } from '@orca/sdk-harness';
 
 export interface NativePiReport {

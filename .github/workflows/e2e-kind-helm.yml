@@ -178,7 +178,8 @@ jobs:
       && needs.changes.outputs.kind != 'false'
       && (github.event_name != 'pull_request'
           || contains(github.event.pull_request.labels.*.name, 'run-e2e')) }}
-    runs-on: ubuntu-latest
+    # Match the archive format used by the Kind job's Docker image store.
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -248,7 +249,8 @@ jobs:
     needs:
       - static-validation
       - build-image
-    runs-on: ubuntu-latest
+    # Kind v0.24 cannot import some archives from Docker 29's containerd image store.
+    runs-on: ubuntu-24.04
     timeout-minutes: 75
     env:
       KIND_CLUSTER_NAME: orca-kind-helm-e2e

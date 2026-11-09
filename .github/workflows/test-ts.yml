@@ -51,7 +51,8 @@ jobs:
     # Unset output (filter broke) therefore runs the suite, same fail-open rule
     # the script itself follows.
     if: ${{ !cancelled() && needs.changes.outputs.ts != 'false' }}
-    runs-on: ubuntu-latest
+    # The local sandbox probes hit a nested user namespace failure on Ubuntu 26.04.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -143,7 +144,8 @@ jobs:
       - run: pnpm format:check
 
   integration:
-    runs-on: ubuntu-latest
+    # Use the same sandbox-runtime and bubblewrap environment as the unit job.
+    runs-on: ubuntu-24.04
     needs: [changes, test]
     # Fail-open like `test` above, but `needs.test.result` has to be asserted
     # explicitly: `!cancelled()` overrides the implicit "skip me if a need
