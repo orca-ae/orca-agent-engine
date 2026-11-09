@@ -18,6 +18,7 @@ import { RUNNER_SESSION_HEADER } from '../tunnel/session-event-bridge.js';
 import { SessionResourcesDelivery } from '../tunnel/session-resources-delivery.js';
 import { loadSessionExecutionOwner, loadSessionHarnessBinding } from './session-harness-binding.js';
 import { prepareExecution } from './prepare-execution.js';
+import type { SandboxEgressService } from './sandbox-egress.js';
 import {
   prepareRunnerGitSnapshot,
   prepareRunnerResources,
@@ -34,6 +35,7 @@ export function buildRunnerResourcesFactory(deps: {
   registryLocalBaseUrl?: string;
   gatewayRegistryUsageEnabled?: boolean;
   snapshotProvider?: SnapshotProvider;
+  sandboxEgress?: SandboxEgressService;
 }): ManagedRunnerResourcesFactory {
   return async (context) => {
     const { workspaceId, sessionId, runnerId, registry } = context;
@@ -56,6 +58,12 @@ export function buildRunnerResourcesFactory(deps: {
       session.agentVersion,
     );
     const native = selection.harness === 'pi' && selection.mode === 'colocated';
+    const controlledEgress =
+      deps.sandboxEgress && (await deps.sandboxEgress.appliesToSession(workspaceId, sessionId));
+    if (controlledEgress && !native)
+      throw new Error(
+        'sandbox egress supports only managed native Pi File placement on the Registry-owned path',
+      );
     if (
       (!native && selection.harness !== 'codex_sdk' && selection.harness !== 'pi_sdk') ||
       selection.mode !== 'colocated'
@@ -65,6 +73,7 @@ export function buildRunnerResourcesFactory(deps: {
       throw new Error('runner session binding is no longer assigned');
     const prepare = () =>
       prepareExecution({
+        sandboxNetworkEnabled: !!deps.sandboxEgress,
         db: deps.db,
         fileStore: deps.fileStore,
         workspaceId,
@@ -105,17 +114,38 @@ export function buildRunnerResourcesFactory(deps: {
       return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown;
     };
     if (native) {
+      let egressGrant: Awaited<ReturnType<SandboxEgressService['issueRunnerEgress']>> | undefined;
+      const sandboxEgress = async () => {
+        if (
+          !deps.sandboxEgress ||
+          !(await deps.sandboxEgress.appliesToSession(workspaceId, sessionId))
+        )
+          return undefined;
+        egressGrant ??= await deps.sandboxEgress.issueRunnerEgress(
+          workspaceId,
+          sessionId,
+          runnerId,
+        );
+        await deps.sandboxEgress.assertCurrentGrant(
+          workspaceId,
+          sessionId,
+          egressGrant.binding_id,
+          egressGrant.generation,
+        );
+        return egressGrant;
+      };
       const snapshot = await deps.snapshotProvider?.resolve(sessionId);
       const retainedAuthority = await hasNativeUsageAuthority(deps.db, workspaceId, sessionId);
       if (!snapshot || !supportsNativeFileCompletion(snapshot)) {
-        if (retainedAuthority)
+        if (retainedAuthority || controlledEgress)
           throw new Error('Native usage authority cannot downgrade to an unsupported tool surface');
         return null;
       }
       const statusValue = await request('/v1/runner/resources', { type: 'status' });
       const status = nativeStatus(statusValue);
       if (!status) {
-        if (retainedAuthority) throw new Error('Native completion runner cannot be downgraded');
+        if (retainedAuthority || controlledEgress)
+          throw new Error('Native completion runner cannot be downgraded');
         return null;
       }
       const isCurrent = async (revision: string) =>
@@ -132,6 +162,22 @@ export function buildRunnerResourcesFactory(deps: {
         isCurrent,
       });
       return new SessionResourcesDelivery({
+        onPreparationFailure: async (grant) => {
+          const failed = grant ?? egressGrant;
+          if (failed && deps.sandboxEgress) {
+            await deps.sandboxEgress.revokeEgress(
+              workspaceId,
+              sessionId,
+              failed.binding_id,
+              failed.generation,
+            );
+            if (
+              egressGrant?.binding_id === failed.binding_id &&
+              egressGrant.generation === failed.generation
+            )
+              egressGrant = undefined;
+          }
+        },
         workspaceId,
         sessionId,
         fileStore: deps.fileStore,
@@ -151,6 +197,7 @@ export function buildRunnerResourcesFactory(deps: {
           if (!currentSnapshot || !supportsNativeFileCompletion(currentSnapshot))
             throw new Error('Native file-only surface changed');
           const prepared = await prepare();
+          const egress = await sandboxEgress();
           const revision = runnerResourceRevision(prepared);
           const files = await prepareRunnerResources(
             {
@@ -166,6 +213,7 @@ export function buildRunnerResourcesFactory(deps: {
           );
           return {
             ...files,
+            ...(egress ? { sessionEgress: egress } : {}),
             manifest: { ...files.manifest, revision },
             networkAllowedDomains: [],
             networkUnrestricted: false,

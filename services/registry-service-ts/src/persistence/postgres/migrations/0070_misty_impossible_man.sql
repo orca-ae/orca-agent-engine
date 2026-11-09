@@ -1,0 +1,1 @@
+ALTER TABLE "environments" ADD COLUMN "cloud_sandbox_handle_id" text;

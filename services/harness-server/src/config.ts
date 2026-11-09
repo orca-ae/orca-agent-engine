@@ -3,6 +3,11 @@
 
 import { readPiProviderCredentials, type PiProviderCredentials } from '@orca/pi-harness';
 import fs from 'node:fs';
+import {
+  buildSandboxNetworkEnvironment,
+  SANDBOX_NETWORK_TRUST_PATH,
+  type SandboxEgressConfig,
+} from '@orca/sandbox-runtime';
 import type { ConnectionOptions as TlsConnectionOptions } from 'node:tls';
 import {
   validateTopicPrefix,
@@ -100,6 +105,7 @@ export interface ServiceConfig {
   dogwoodDispatchClockErrorBoundMs?: number;
   /** Mesh-internal registry base URL used for every Harness control-plane call. */
   registryInternalBaseUrl: string;
+  sandboxEgress?: SandboxEgressConfig;
   /** Static internal token for non-Kubernetes deployments. */
   internalServiceToken: string | undefined;
   /** Static token file or projected ServiceAccount JWT, reread for every request. */
@@ -541,6 +547,35 @@ function normalizeS3KeyPrefix(raw: string | undefined): string {
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServiceConfig {
   const s3KeyPrefix = normalizeS3KeyPrefix(env['S3_KEY_PREFIX']);
   const sandboxRuntime = parseSandboxRuntime(env['SANDBOX_RUNTIME']);
+  let sandboxEgress: SandboxEgressConfig | undefined;
+  if (parseBoolean(env['SANDBOX_EGRESS_ENABLED'], false)) {
+    if (sandboxRuntime !== 'opensandbox')
+      throw new Error('SANDBOX_EGRESS_ENABLED requires OpenSandbox');
+    const proxyUrl = env['SANDBOX_EGRESS_PROXY_URL'] ?? '';
+    const internalBypass: unknown = JSON.parse(env['SANDBOX_EGRESS_INTERNAL_BYPASS'] ?? '[]');
+    if (
+      !Array.isArray(internalBypass) ||
+      !internalBypass.every((host) => typeof host === 'string')
+    ) {
+      throw new Error('SANDBOX_EGRESS_INTERNAL_BYPASS requires a JSON string array');
+    }
+    const owner = {
+      namespace: env['SANDBOX_EGRESS_OWNER_POD_NAMESPACE'] ?? '',
+      name: env['SANDBOX_EGRESS_OWNER_POD_NAME'] ?? '',
+      uid: env['SANDBOX_EGRESS_OWNER_POD_UID'] ?? '',
+    };
+    if (!owner.namespace || !owner.name || !owner.uid)
+      throw new Error('sandbox egress requires downward Pod identity');
+    buildSandboxNetworkEnvironment({
+      binding_id: 'validation-only',
+      generation: 'validation-only',
+      proxy_url: proxyUrl,
+      proxy_capability: 'validation-only',
+      ca_bundle_path: SANDBOX_NETWORK_TRUST_PATH,
+      internal_bypass: internalBypass,
+    });
+    sandboxEgress = { proxyUrl, internalBypass, owner };
+  }
   const transcriptStoreBackend = parseTranscriptStoreBackend(env['TRANSCRIPT_STORE_BACKEND']);
   const kafka = parseKafkaConfig(env);
   const kafkaTopicPrefix = parseKafkaTopicPrefix(env);
@@ -600,6 +635,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServiceConfig 
       : {}),
     anthropicModelDefault: env['ANTHROPIC_MODEL_DEFAULT'] ?? 'claude-sonnet-4-5-20250929',
     registryInternalBaseUrl: env['REGISTRY_INTERNAL_BASE_URL'] ?? 'http://localhost:8081',
+    ...(sandboxEgress ? { sandboxEgress } : {}),
     internalServiceToken: optionalEnv(env, 'INTERNAL_SERVICE_TOKEN'),
     internalServiceTokenFile: optionalEnv(env, 'INTERNAL_SERVICE_TOKEN_FILE'),
     gatewayMcpUrl: env['AI_GATEWAY_URL'] ?? 'http://localhost:8090',

@@ -3,7 +3,7 @@
 
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -34,8 +34,15 @@ function fixture(t) {
     'docker',
     `
     printf '%s\\n' "$*" >> "$TEST_DIR/docker.log"
-    if [[ "$1 $2" == 'image save' ]]; then
-      cat "$TEST_DIR/archive"
+    if [[ "$1 $2" == 'image inspect' ]]; then
+      [[ "\${FAIL_INSPECT:-0}" != 1 ]] || exit 20
+      printf 'linux/amd64\\n'
+    elif [[ "$1 $2" == 'image save' ]]; then
+      if [[ "\${5:-}" == --output ]]; then
+        cp "$TEST_DIR/archive" "$6"
+      else
+        cat "$TEST_DIR/archive"
+      fi
       [[ "\${FAIL_SAVE:-0}" != 1 ]] || exit 18
     elif [[ "$1 $2" == 'exec --privileged' ]]; then
       cat > "$TEST_DIR/$4.bytes"
@@ -82,7 +89,9 @@ test('streams unchanged binary bytes to every node with a bounded import and no 
     assert.deepEqual(readFileSync(join(dir, `${node}.bytes`)), bytes);
   }
   const calls = readFileSync(join(dir, 'docker.log'), 'utf8');
-  assert.match(calls, /images import --all-platforms --digests --snapshotter=overlayfs -/);
+  assert.match(calls, /image save --platform linux\/amd64 image:test/);
+  assert.match(calls, /images import --platform linux\/amd64 --snapshotter=overlayfs -/);
+  assert.doesNotMatch(calls, /--all-platforms|--digests/);
   assert.doesNotMatch(calls, /--output| -o | -t /);
   assert.match(readFileSync(join(dir, 'timeout.log'), 'utf8'), /--signal=TERM --kill-after=30s 8m/);
 });
@@ -91,6 +100,7 @@ for (const [failure, code] of [
   ['FAIL_SAVE', 18],
   ['FAIL_IMPORT', 19],
   ['FAIL_DISCOVERY', 17],
+  ['FAIL_INSPECT', 20],
   ['EMPTY_NODES', 1],
 ]) {
   test(`propagates ${failure}, retries and fails with diagnostics`, (t) => {
@@ -103,14 +113,32 @@ for (const [failure, code] of [
   });
 }
 
-test('retains the ordinary kind loader when streaming is disabled', (t) => {
+test('loads a single-platform archive and removes it when streaming is disabled', (t) => {
   const { dir, run } = fixture(t);
   assert.equal(run({ KIND_IMAGE_LOAD_STREAM: '0' }).status, 0);
-  assert.equal(
-    readFileSync(join(dir, 'kind.log'), 'utf8').trim(),
-    'load docker-image image:test --name cluster',
-  );
+  for (const node of ['cluster-control-plane', 'cluster-worker']) {
+    assert.deepEqual(readFileSync(join(dir, `${node}.bytes`)), bytes);
+  }
+  const calls = readFileSync(join(dir, 'docker.log'), 'utf8');
+  assert.equal(existsSync(calls.match(/--output (\S+)/)[1]), false);
+  assert.match(calls, /image save --platform linux\/amd64 --output/);
+  assert.match(calls, /images import --platform linux\/amd64 --snapshotter=overlayfs -/);
+  assert.doesNotMatch(calls, /--all-platforms|--digests/);
 });
+
+for (const [failure, code] of [
+  ['FAIL_SAVE', 18],
+  ['FAIL_IMPORT', 19],
+]) {
+  test(`removes the temporary archive after ${failure}`, (t) => {
+    const { dir, run } = fixture(t);
+    const result = run({ [failure]: '1', KIND_IMAGE_LOAD_STREAM: '0' });
+    assert.equal(result.status, code, result.stderr);
+    const calls = readFileSync(join(dir, 'docker.log'), 'utf8');
+    const archive = calls.match(/--output (\S+)/)[1];
+    assert.equal(existsSync(archive), false);
+  });
+}
 
 test('terminates a stalled streaming pipeline under the real GNU timeout', (t) => {
   const timeout = ['timeout', 'gtimeout'].find((bin) => spawnSync(bin, ['--version']).status === 0);

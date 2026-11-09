@@ -79,6 +79,7 @@ export function retainedDshProfile(
 
 export function requireDshProfileEnvironment(
   environment: { target?: unknown; networking?: unknown } | null,
+  sandboxNetworkEnabled = false,
 ): void {
   const networking = environment?.networking as { type?: unknown } | null | undefined;
   if (
@@ -86,10 +87,12 @@ export function requireDshProfileEnvironment(
     (environment.target !== null &&
       environment.target !== undefined &&
       environment.target !== 'cloud') ||
-    (networking?.type !== undefined && networking.type !== 'unrestricted')
+    (networking?.type !== undefined &&
+      networking.type !== 'unrestricted' &&
+      !(sandboxNetworkEnabled && networking.type === 'limited'))
   )
     throw new DshProfileValidationError(
-      'Custom DSH profiles require a cloud Environment with unrestricted networking',
+      'Custom DSH profiles require a cloud Environment with unrestricted networking or enabled controlled Sandbox networking',
     );
 }
 

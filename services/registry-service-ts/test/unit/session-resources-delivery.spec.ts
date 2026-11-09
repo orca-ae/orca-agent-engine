@@ -31,65 +31,90 @@ const workspaceId = 'ws_resources';
 const sessionId = 'ses_resources';
 const hash = (value: string | Buffer) => createHash('sha256').update(value).digest('hex');
 
-it('reattaches a running native placement without restaging files or losing executable mappings', async () => {
-  const f = await fixture();
-  const binding = { executionId: 'exec_1', placementId: 'placement_1', revision: hash('native') };
-  const manifest: ResourceManifest = { version: 1, revision: binding.revision, resources: [] };
-  const coordinator = {
-    hasAuthority: vi.fn(async () => true),
-    claim: vi.fn(async () => {}),
-    pending: vi.fn(async () => [{ turnId: 'evt_turn', phase: 'running', record: binding }]),
-    begin: vi.fn(async () => {}),
-    markLost: vi.fn(async () => {
-      throw new Error('lost');
-    }),
-  };
-  const request = vi.fn(async (_path: string, body: unknown) => {
-    if (
-      (body as { type: string }).type !== 'pending' &&
-      (body as { type: string }).type !== 'status'
-    )
-      throw new Error('must not reconfigure a running turn');
-    return { checkpoint: null, committed: true, revision: binding.revision };
-  });
-  const delivery = new SessionResourcesDelivery({
-    workspaceId,
-    sessionId,
-    fileStore: f.files,
-    store: f.store,
-    prepare: async () => ({
-      manifest,
-      memoryStores: new Map(),
-      networkAllowedDomains: [],
-      close: async () => {},
-      open: async () => {
-        throw new Error('unused');
-      },
-    }),
-    isCurrent: async () => true,
-    request,
-    native: {
-      coordinator: coordinator as unknown as NativeCompletionCoordinator,
-      probe: async () => ({
-        ...binding,
-        resolvedPaths: {},
-        outputs: '/verified/outputs',
-        turn: { turnId: 'evt_turn', phase: 'running' },
+it.each([false, true])(
+  'reattaches running native placement with current bootstrap=%s',
+  async (withEgress) => {
+    const f = await fixture();
+    const binding = { executionId: 'exec_1', placementId: 'placement_1', revision: hash('native') };
+    const manifest: ResourceManifest = { version: 1, revision: binding.revision, resources: [] };
+    const coordinator = {
+      hasAuthority: vi.fn(async () => true),
+      claim: vi.fn(async () => {}),
+      pending: vi.fn(async () => [{ turnId: 'evt_turn', phase: 'running', record: binding }]),
+      begin: vi.fn(async () => {}),
+      markLost: vi.fn(async () => {
+        throw new Error('lost');
       }),
-    },
-  });
-  expect(await delivery.deliver()).toEqual({ version: 1, revision: binding.revision });
-  expect(await delivery.deliver()).toEqual({ version: 1, revision: binding.revision });
-  expect(delivery.snapshotResources()).toEqual({
-    sandbox_resources: {
-      version: 1,
-      revision: binding.revision,
-      placement_id: binding.placementId,
-    },
-  });
-  expect(coordinator.markLost).not.toHaveBeenCalled();
-  expect(coordinator.claim).toHaveBeenCalledTimes(2);
-});
+    };
+    const request = vi.fn(async (_path: string, body: unknown) => {
+      if (withEgress && (body as { type: string }).type === 'manifest') {
+        expect(body).toMatchObject({
+          session_egress: { generation: 'new-generation' },
+          manifest: { revision: binding.revision },
+        });
+        return { checkpoint: null, committed: true, revision: binding.revision };
+      }
+      if (
+        (body as { type: string }).type !== 'pending' &&
+        (body as { type: string }).type !== 'status'
+      )
+        throw new Error('must not reconfigure a running turn');
+      return { checkpoint: null, committed: true, revision: binding.revision };
+    });
+    const delivery = new SessionResourcesDelivery({
+      workspaceId,
+      sessionId,
+      fileStore: f.files,
+      store: f.store,
+      prepare: async () => ({
+        ...(withEgress
+          ? {
+              sessionEgress: {
+                network_binding_id: 'snb_fixture',
+                binding_id: 'egb_fixture',
+                generation: 'new-generation',
+                proxy_capability: 'capability',
+                placeholders: {},
+              },
+            }
+          : {}),
+        manifest,
+        memoryStores: new Map(),
+        networkAllowedDomains: [],
+        close: async () => {},
+        open: async () => {
+          throw new Error('unused');
+        },
+      }),
+      isCurrent: async () => true,
+      request,
+      native: {
+        coordinator: coordinator as unknown as NativeCompletionCoordinator,
+        probe: async () => ({
+          ...binding,
+          resolvedPaths: {},
+          outputs: '/verified/outputs',
+          turn: { turnId: 'evt_turn', phase: 'running' },
+        }),
+      },
+    });
+    expect(await delivery.deliver()).toEqual({ version: 1, revision: binding.revision });
+    expect(await delivery.deliver()).toEqual({ version: 1, revision: binding.revision });
+    expect(delivery.snapshotResources()).toEqual({
+      sandbox_resources: {
+        version: 1,
+        revision: binding.revision,
+        placement_id: binding.placementId,
+      },
+    });
+    expect(coordinator.markLost).not.toHaveBeenCalled();
+    expect(coordinator.claim).toHaveBeenCalledTimes(2);
+    if (withEgress)
+      expect(
+        request.mock.calls.filter(([, body]) => (body as { type: string }).type === 'manifest'),
+      ).toHaveLength(2);
+  },
+);
 
 it.each([
   [false, false],
@@ -230,8 +255,11 @@ async function fixture() {
   };
   const current = vi.fn(async () => true);
   const prepare = vi.fn(async () => prepared);
-  const create = () =>
+  const create = (
+    onPreparationFailure?: (grant?: PreparedRunnerResources['sessionEgress']) => Promise<void>,
+  ) =>
     new SessionResourcesDelivery({
+      ...(onPreparationFailure ? { onPreparationFailure } : {}),
       workspaceId,
       sessionId,
       fileStore: files,
@@ -298,6 +326,76 @@ async function fixture() {
 }
 
 describe('Registry resource delivery and durable checkpoint ACK', () => {
+  it('captures and deduplicates abort cleanup without retiring a later delivered grant', async () => {
+    const f = await fixture();
+    const first = {
+      network_binding_id: 'snb_fixture',
+      binding_id: 'egb_first',
+      generation: 'first',
+      proxy_capability: 'first-capability',
+      placeholders: {},
+    };
+    const second = {
+      ...first,
+      network_binding_id: 'snb_fixture',
+      binding_id: 'egb_second',
+      generation: 'second',
+    };
+    f.prepared.sessionEgress = first;
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const cleanup = vi.fn(async () => {
+      await held;
+    });
+    const delivery = f.create(cleanup);
+    await delivery.deliver();
+    const abort = delivery.abortPreparation();
+    expect(delivery.abortPreparation()).toBe(abort);
+    f.prepared.sessionEgress = second;
+    await delivery.deliver();
+    release();
+    expect(await abort).toBe(true);
+    expect(cleanup).toHaveBeenCalledTimes(1);
+    expect(cleanup).toHaveBeenCalledWith(first);
+    await expect(delivery.publishMounted()).resolves.toBeUndefined();
+    await expect(delivery.abortPreparation()).resolves.toBe(true);
+    expect(cleanup).toHaveBeenLastCalledWith(second);
+  });
+  it('leaves legacy resource preparation unchanged when there is no egress grant', async () => {
+    const f = await fixture();
+    const cleanup = vi.fn(async () => {});
+    const delivery = f.create(cleanup);
+    await delivery.deliver();
+    expect(await delivery.abortPreparation()).toBe(false);
+    expect(cleanup).not.toHaveBeenCalled();
+  });
+  it('carries sandbox egress bootstrap on manifest delivery', async () => {
+    const f = await fixture();
+    f.prepared.sessionEgress = {
+      network_binding_id: 'snb_fixture',
+      binding_id: 'egb_fixture',
+      generation: 'generation',
+      proxy_capability: 'capability',
+      placeholders: {},
+    };
+    await f.create().deliver();
+    expect(f.request).toHaveBeenCalledWith(
+      RUNNER_RESOURCES_PATH,
+      expect.objectContaining({ type: 'manifest', session_egress: f.prepared.sessionEgress }),
+    );
+  });
+  it('invokes generation-scoped cleanup when preparation or admission fails', async () => {
+    const f = await fixture();
+    const cleanup = vi.fn(async () => {});
+    f.prepare.mockRejectedValueOnce(new Error('prepare failed'));
+    await expect(f.create(cleanup).deliver()).rejects.toThrow('prepare failed');
+    expect(cleanup).toHaveBeenCalledTimes(1);
+    f.current.mockResolvedValueOnce(false);
+    await expect(f.create(cleanup).deliver()).rejects.toThrow();
+    expect(cleanup).toHaveBeenCalledTimes(2);
+  });
   it('refreshes capabilities on every delivery even when the live resource revision is unchanged', async () => {
     const f = await fixture();
     f.prepared.refreshGitCapabilities = vi.fn(async () => []);

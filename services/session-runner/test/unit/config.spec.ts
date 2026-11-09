@@ -29,6 +29,19 @@ function baseEnv(): NodeJS.ProcessEnv {
 }
 
 describe('loadConfig', () => {
+  it('reads the explicit managed egress requirement without inheriting proxy credentials', () => {
+    expect(loadConfig(baseEnv()).sandboxEgressRequired).toBeUndefined();
+    expect(
+      loadConfig({
+        ...baseEnv(),
+        SANDBOX_EGRESS_ENABLED: 'true',
+        HTTPS_PROXY: 'https://secret@proxy.example',
+      }).sandboxEgressRequired,
+    ).toBe(true);
+    expect(() => loadConfig({ ...baseEnv(), SANDBOX_EGRESS_ENABLED: 'invalid' })).toThrow(
+      'true or false',
+    );
+  });
   it('reads the required runner-wiring vars', () => {
     const config = loadConfig(baseEnv());
     expect(config.bindingToken).toBe('binding-token-fixture');

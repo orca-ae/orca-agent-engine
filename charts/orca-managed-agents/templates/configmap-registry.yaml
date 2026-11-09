@@ -7,6 +7,18 @@ metadata:
   labels:
     {{- include "orca-managed-agents.labels" . | nindent 4 }}
 data:
+  {{- if .Values.sandboxEgress.enabled }}
+  SANDBOX_EGRESS_ENABLED: "true"
+  SANDBOX_EGRESS_POLICY_SHA256: {{ include "orca-managed-agents.sandboxEgressSpec" . | sha256sum | quote }}
+  SANDBOX_EGRESS_GITHUB_REST_READ_ENABLED: {{ .Values.sandboxEgress.git.githubRestReadEnabled | quote }}
+  SANDBOX_EGRESS_SANDBOX_NAMESPACE: {{ .Values.sandboxEgress.namespace | quote }}
+  SANDBOX_EGRESS_PROXY_URL: {{ .Values.sandboxEgress.proxyUrl | quote }}
+  {{- $bypass := list }}
+  {{- range .Values.sandboxEgress.internalBypass }}
+  {{- $bypass = append $bypass .host }}
+  {{- end }}
+  SANDBOX_EGRESS_INTERNAL_BYPASS: {{ $bypass | toJson | quote }}
+  {{- end }}
   NODE_ENV: production
   GUARDRAILS_DOGWOOD_ENABLED: {{ .Values.guardrails.dogwood.enabled | quote }}
   AI_GATEWAY_DOGWOOD_ENABLED: {{ .Values.aiGateway.registryGuardrails.dogwood | quote }}

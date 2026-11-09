@@ -83,8 +83,13 @@ try {
 
   const scratch = join(DSH_PROFILE_HOME, '.prepare');
   await mkdir(scratch);
-  // An allowlist excludes runtime credentials, proxy settings and ambient npm configuration.
+  // Only the fixed read-only context can add managed network settings to the clean child.
+  const network =
+    process.env.ORCA_SANDBOX_NETWORK_REQUIRED === '1'
+      ? await (await import('/usr/local/libexec/orca-sandbox-network.mjs')).readNetworkEnvironment()
+      : {};
   const env = {
+    ...network,
     PATH: '/usr/local/bin:/usr/bin:/bin',
     HOME: scratch,
     DSH_HOME: DSH_PROFILE_HOME,

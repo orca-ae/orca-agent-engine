@@ -2,11 +2,62 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { waitUntilOpenSandboxReady } from '../../src/opensandbox-lifecycle.js';
+import {
+  buildOpenSandboxAcquireRequest,
+  waitUntilOpenSandboxReady,
+} from '../../src/opensandbox-lifecycle.js';
 
 afterEach(() => vi.useRealTimers());
 
 describe('OpenSandbox readiness', () => {
+  it('rejects managed gem before provisioning while preserving non-managed gem preparation', () => {
+    const opts = { image: 'trusted', timeoutSeconds: 60, execdAccessToken: 'a'.repeat(64) };
+    expect(() =>
+      buildOpenSandboxAcquireRequest(
+        {
+          sandboxNetwork: { binding_id: 'network', generation: 'one' },
+          packages: { gem: ['rake'] },
+        },
+        opts,
+      ),
+    ).toThrow('RubyGems HTTPS proxy transport');
+    expect(
+      buildOpenSandboxAcquireRequest({ packages: { gem: ['rake'] } }, opts).packagePlan?.packages,
+    ).toEqual({ gem: ['rake'] });
+  });
+  it('carries a strict network registration beside isolated package initialization', () => {
+    const network = { binding_id: 'network', generation: 'one' };
+    const result = buildOpenSandboxAcquireRequest(
+      { sandboxNetwork: network, packages: { apt: ['git'] }, networking: { type: 'restricted' } },
+      { image: 'trusted', timeoutSeconds: 60, execdAccessToken: 'a'.repeat(64) },
+    );
+    expect(result.body.extensions).toHaveProperty('orca.sandbox.network', JSON.stringify(network));
+    expect(result.packagePlan?.packages).toEqual({ apt: ['git'] });
+    expect(result.body.extensions).not.toHaveProperty('orca.sandbox.egress');
+    expect(() =>
+      buildOpenSandboxAcquireRequest(
+        { packages: { apt: ['git'] }, networking: { type: 'restricted' } },
+        { image: 'trusted', timeoutSeconds: 60 },
+      ),
+    ).toThrow('unrestricted');
+  });
+  it('reports bootstrap failure without reading execd or exposing diagnostics', async () => {
+    const ping = vi.fn();
+    await expect(
+      waitUntilOpenSandboxReady({
+        id: 'controlled',
+        ping,
+        getLifecycle: async () => ({
+          status: {
+            state: 'Failed',
+            reason: 'SANDBOX_NETWORK_BOOTSTRAP_FAILED',
+            message: 'private',
+          },
+        }),
+      }),
+    ).rejects.toThrow('preparation failed');
+    expect(ping).not.toHaveBeenCalled();
+  });
   it('bounds package Pod reads to one poll every two seconds and reports failure without logs', async () => {
     vi.useFakeTimers();
     const getLifecycle = vi

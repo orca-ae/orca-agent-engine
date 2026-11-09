@@ -54,6 +54,7 @@ export function dialBackEnv(
   runnerLaunchCommand: readonly string[],
 ): Record<string, string> {
   return {
+    ...(opts.sandboxEgress ? { SANDBOX_EGRESS_ENABLED: 'true' } : {}),
     [REGISTRY_TUNNEL_BASE_URL_ENV_VAR]: opts.registryTunnelUrl,
     [ENVIRONMENT_ID_ENV_VAR]: opts.environmentId,
     [ORCA_ENVIRONMENT_TOKEN_ENV_VAR]: opts.token,

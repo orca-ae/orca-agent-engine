@@ -22,6 +22,13 @@ import { GUARDRAIL_READER_CAPABILITIES, type StateUpdate } from '@orca/guardrail
 import type { Packages } from '../sandbox/sandbox-runtime.js';
 import type { InternalServiceTokenProvider } from '../auth/internal-service-token.js';
 import type { ModelEffort, ModelSpeed } from '../harness/agent-harness.js';
+import {
+  parseSessionEgressGrant,
+  parseSandboxNetworkRequest,
+  type SessionEgressGrant,
+  type SandboxEgressConfig,
+  type SandboxNetworkRequest,
+} from '@orca/sandbox-runtime';
 
 /**
  * Per Anthropic Managed Agents semantics, credentials bind to MCP servers via
@@ -650,6 +657,77 @@ export class RegistryClient {
     }
     const body = (await res.json()) as { token: string; expires_at: number };
     return { token: body.token, expiresAt: body.expires_at };
+  }
+
+  async registerHarnessNetwork(
+    workspaceId: string,
+    sessionId: string,
+    owner: SandboxEgressConfig['owner'],
+  ): Promise<SandboxNetworkRequest> {
+    const response = await this.request(
+      this.sessionBase({ workspaceId, sessionId }) + '/sandbox-networks',
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        redirect: 'error',
+        signal: AbortSignal.timeout(15_000),
+        body: JSON.stringify({ owner }),
+      },
+    );
+    if (!response.ok) throw new Error('sandbox network registration failed: ' + response.status);
+    return parseSandboxNetworkRequest(await response.json());
+  }
+
+  async revokeHarnessNetwork(
+    workspaceId: string,
+    sessionId: string,
+    binding_id: string,
+    generation: string,
+  ): Promise<void> {
+    const response = await this.request(
+      this.sessionBase({ workspaceId, sessionId }) + '/sandbox-networks/revoke',
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        redirect: 'error',
+        signal: AbortSignal.timeout(5_000),
+        body: JSON.stringify({ binding_id, generation }),
+      },
+    );
+    if (!response.ok) throw new Error('sandbox network revocation failed: ' + response.status);
+  }
+
+  async issueSessionEgress(input: {
+    workspaceId: string;
+    sessionId: string;
+    sandboxId: string;
+    owner: SandboxEgressConfig['owner'];
+  }): Promise<SessionEgressGrant> {
+    const response = await this.request(this.sessionBase(input) + '/session-egress/issue', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      redirect: 'error',
+      signal: AbortSignal.timeout(15_000),
+      body: JSON.stringify({ sandbox_id: input.sandboxId, owner: input.owner }),
+    });
+    if (!response.ok) throw new Error('sandbox egress issuance failed: ' + response.status);
+    return parseSessionEgressGrant(await response.json());
+  }
+
+  async revokeSessionEgress(input: {
+    workspaceId: string;
+    sessionId: string;
+    binding_id: string;
+    generation: string;
+  }): Promise<void> {
+    const response = await this.request(this.sessionBase(input) + '/session-egress/revoke', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      redirect: 'error',
+      signal: AbortSignal.timeout(5_000),
+      body: JSON.stringify({ binding_id: input.binding_id, generation: input.generation }),
+    });
+    if (!response.ok) throw new Error('sandbox egress revocation failed: ' + response.status);
   }
 
   /**

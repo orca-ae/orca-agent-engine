@@ -127,6 +127,7 @@ const repoFilesUnder = (dir) =>
  */
 const CONFIG_SOURCES = [
   'packages/dsh-harness/src/plugin.ts',
+  'packages/dsh-harness/profile/prepare.mjs',
   'packages/sdk-harness/src/credentials.ts',
   'packages/pi-harness/src/credentials.ts',
   'services/harness-server/src/config.ts',
@@ -261,6 +262,7 @@ const DOC_FILES = [
   'packages/skill-store/README.md',
   'packages/transcript-store/README.md',
   'packages/harness-catalog/README.md',
+  'packages/sandbox-runtime/README.md',
   // The per-directory agent guides are documentation too — this PR mirrors hard
   // rule 1 into each — and they name eight environment variables between them.
   // Scanning only their sibling READMEs left those mentions unchecked.
@@ -371,6 +373,10 @@ for (const rel of CONFIG_SOURCES) {
  * every directory `SOURCE_DIRS` trusts and these three are excused by name.
  */
 const EXCUSED_SOURCES = new Map([
+  [
+    'packages/sandbox-runtime/bootstrap/network.mjs',
+    'inherits the main process environment and overlays networking from the fixed validated context; bootstrap inputs use argv and the dedicated token file, with no operator environment knobs',
+  ],
   [
     'packages/dsh-harness/src/worker.ts',
     'forwards only PATH to the private DSH process; its home and system prompt are generated worker inputs, not ambient operator configuration',
@@ -605,6 +611,7 @@ const declared = collectDeclared(sources);
  */
 const SOURCE_FLOORS = {
   'packages/dsh-harness/src/plugin.ts': 1,
+  'packages/dsh-harness/profile/prepare.mjs': 1,
   'packages/sdk-harness/src/credentials.ts': 6,
   'packages/pi-harness/src/credentials.ts': 5,
   'services/harness-server/src/config.ts': 76,

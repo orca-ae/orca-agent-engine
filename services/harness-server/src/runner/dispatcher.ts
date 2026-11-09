@@ -2,7 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { randomUUID } from 'node:crypto';
-import { composeSkillsCatalog } from '@orca/sandbox-runtime';
+import {
+  composeSkillsCatalog,
+  prepareSessionEgress,
+  type SandboxEgressConfig,
+  type SessionEgressGrant,
+} from '@orca/sandbox-runtime';
 import {
   DEFAULT_HARNESS_TURN_TIMEOUT_MS,
   type HarnessTurnTimeoutOverrides,
@@ -468,6 +473,7 @@ export interface DispatcherOptions {
    * exercise the chat-only path don't need to plumb HTTP fixtures.
    */
   registry?: RegistryClient;
+  sandboxEgress?: SandboxEgressConfig;
   /** Public ai-gateway MCP URL (each rewritten server points here). */
   gatewayMcpUrl?: string;
   /**
@@ -4721,6 +4727,8 @@ export class Dispatcher {
      * memory-watcher stop and the output indexer.
      */
     let repoCleanupReleases: (() => Promise<void>) | undefined;
+    let egressCleanup: (() => Promise<void>) | undefined;
+    let networkCleanup: (() => Promise<void>) | undefined;
     if (
       this.opts.sandboxRuntime &&
       session &&
@@ -4728,7 +4736,10 @@ export class Dispatcher {
       // runtime without a FileStore stayed sandbox-less. In-sandbox mode must
       // still acquire its harness sandbox, including for memory/repo-only
       // sessions that do not need a FileStore.
-      (selection.mode === 'colocated' || this.opts.fileStore || sessionSkills.length > 0)
+      (selection.mode === 'colocated' ||
+        this.opts.fileStore ||
+        sessionSkills.length > 0 ||
+        this.opts.sandboxEgress)
     ) {
       const runtime = this.opts.sandboxRuntime;
       const fileStore = this.opts.fileStore;
@@ -4812,6 +4823,9 @@ export class Dispatcher {
 
       try {
         setupPhase = sessionSkills.length > 0 ? 'skill_setup' : 'write_policy';
+        if (this.opts.sandboxEgress && prepared?.environment?.image) {
+          throw new Error('sandbox egress requires the trusted platform sandbox image');
+        }
         assertSandboxEnvironmentTrust({
           mode: selection.mode,
           image: prepared?.environment?.image,
@@ -4830,8 +4844,12 @@ export class Dispatcher {
             {
               includeSkillsRoot: sessionSkills.length > 0,
               environmentPackages: Object.keys(environmentSpec.packages ?? {}).length > 0,
-              networkAllowedDomains:
-                repoUrls.length > 0 && this.opts.gitCredsPublicUrl
+              networkAllowedDomains: this.opts.sandboxEgress
+                ? [
+                    new URL(this.opts.sandboxEgress.proxyUrl).hostname,
+                    ...this.opts.sandboxEgress.internalBypass,
+                  ]
+                : repoUrls.length > 0 && this.opts.gitCredsPublicUrl
                   ? networkAllowedDomainsFromUrls([...repoUrls, this.opts.gitCredsPublicUrl])
                   : [],
             },
@@ -4842,7 +4860,11 @@ export class Dispatcher {
           };
         }
 
-        if (selection.mode === 'colocated' && repoResources.length > 0) {
+        if (
+          selection.mode === 'colocated' &&
+          repoResources.length > 0 &&
+          !this.opts.sandboxEgress
+        ) {
           setupPhase = 'repo_setup';
           if (!this.opts.registry || !this.opts.gitCredsPublicUrl) {
             throw new RequiredSetupError(
@@ -4864,6 +4886,27 @@ export class Dispatcher {
         }
 
         setupPhase = 'sandbox_setup';
+        if (this.opts.sandboxEgress) {
+          if (!this.opts.registry) throw new Error('sandbox egress requires Registry');
+          const registry = this.opts.registry;
+          const network = await registry.registerHarnessNetwork(
+            workspaceId,
+            sessionId,
+            this.opts.sandboxEgress.owner,
+          );
+          environmentSpec.sandboxNetwork = network;
+          networkCleanup = () =>
+            registry.revokeHarnessNetwork(
+              workspaceId,
+              sessionId,
+              network.binding_id,
+              network.generation,
+            );
+          environmentSpec.harnessEnv = {
+            ...environmentSpec.harnessEnv,
+            ORCA_SANDBOX_EGRESS_REQUIRED: '1',
+          };
+        }
         sandbox = await runtime.acquire(environmentSpec);
 
         // This must be the first sandbox-side setup operation. Remote
@@ -4881,9 +4924,47 @@ export class Dispatcher {
             OUTPUT_WRITABLE_PATH,
             ...resources.map((resource) => resource.mount_path),
             ...(sessionSkills.length > 0 ? [SKILLS_ROOT] : []),
+            ...(this.opts.sandboxEgress ? ['/run/orca/session-egress'] : []),
           ]);
+          if (this.opts.sandboxEgress) {
+            for (const resource of resources) {
+              await assertCanonicalPathOutsideReservedRoot(
+                sandbox,
+                resource.mount_path,
+                '/run/orca/sandbox-network',
+              );
+              await assertCanonicalPathOutsideReservedRoot(
+                sandbox,
+                resource.mount_path,
+                '/run/orca/session-egress',
+              );
+            }
+          }
         } catch (e) {
           throw new RequiredSetupError('write_policy', e);
+        }
+
+        if (this.opts.sandboxEgress && this.opts.registry) {
+          const registry = this.opts.registry;
+          const issued: SessionEgressGrant = await registry.issueSessionEgress({
+            workspaceId,
+            sessionId,
+            sandboxId: sandbox.id,
+            owner: this.opts.sandboxEgress.owner,
+          });
+          egressCleanup = () =>
+            registry.revokeSessionEgress({
+              workspaceId,
+              sessionId,
+              binding_id: issued.binding_id,
+              generation: issued.generation,
+            });
+          await prepareSessionEgress(
+            sandbox,
+            issued,
+            selection.mode === 'colocated',
+            environmentSpec.harnessEnv,
+          );
         }
 
         // The separate-mode write policy always binds and chdirs to the
@@ -5171,8 +5252,7 @@ export class Dispatcher {
         if (
           repoResources.length > 0 &&
           this.opts.registry &&
-          this.opts.gitWorker &&
-          this.opts.workDir
+          (this.opts.sandboxEgress || (this.opts.gitWorker && this.opts.workDir))
         ) {
           const registry = this.opts.registry;
           const gitWorker = this.opts.gitWorker;
@@ -5196,28 +5276,30 @@ export class Dispatcher {
             const repoUrls = repoResources
               .map((r) => (r.repo_ref as { url?: string } | null)?.url)
               .filter((u): u is string => typeof u === 'string' && u.length > 0);
-            const gitJwt = inSandboxGitCredsToken
-              ? { token: inSandboxGitCredsToken }
-              : await registry.mintGitCredsJwt({ workspaceId, sessionId, repoUrls });
+            if (!this.opts.sandboxEgress) {
+              const gitJwt = inSandboxGitCredsToken
+                ? { token: inSandboxGitCredsToken }
+                : await registry.mintGitCredsJwt({ workspaceId, sessionId, repoUrls });
 
-            // 2. Separate-mode templates are already running at this point,
-            //    so inject the helper config via `/etc/profile.d`. The custom
-            //    image registers the root-owned system Git helper at build
-            //    time; no post-start sudo path is needed. In-sandbox images
-            //    received the same URL/token in EnvironmentSpec.harnessEnv
-            //    before acquire and configure the helper in the image itself.
-            if (selection.mode === 'separate') {
-              const credsUrl = this.opts.gitCredsPublicUrl;
-              if (!credsUrl) {
-                throw new Error('dispatcher: GIT_CREDS_PUBLIC_URL not configured');
+              // 2. Separate-mode templates are already running at this point,
+              //    so inject the helper config via `/etc/profile.d`. The custom
+              //    image registers the root-owned system Git helper at build
+              //    time; no post-start sudo path is needed. In-sandbox images
+              //    received the same URL/token in EnvironmentSpec.harnessEnv
+              //    before acquire and configure the helper in the image itself.
+              if (selection.mode === 'separate') {
+                const credsUrl = this.opts.gitCredsPublicUrl;
+                if (!credsUrl) {
+                  throw new Error('dispatcher: GIT_CREDS_PUBLIC_URL not configured');
+                }
+                const profileScript =
+                  `export ORCA_GIT_CREDS_URL=${shQuote(credsUrl)}\n` +
+                  `export ORCA_GIT_CREDS_TOKEN=${shQuote(gitJwt.token)}\n`;
+                await sandbox.files.write(
+                  '/etc/profile.d/orca-git-creds.sh',
+                  Buffer.from(profileScript, 'utf8'),
+                );
               }
-              const profileScript =
-                `export ORCA_GIT_CREDS_URL=${shQuote(credsUrl)}\n` +
-                `export ORCA_GIT_CREDS_TOKEN=${shQuote(gitJwt.token)}\n`;
-              await sandbox.files.write(
-                '/etc/profile.d/orca-git-creds.sh',
-                Buffer.from(profileScript, 'utf8'),
-              );
             }
 
             // 3. Activate `GitCloneStrategy` per repo. Each strategy clones
@@ -5251,8 +5333,9 @@ export class Dispatcher {
                 runtime,
                 workspaceId,
                 sessionId,
-                gitWorker,
-                workDir,
+                ...(gitWorker ? { gitWorker } : {}),
+                ...(workDir ? { workDir } : {}),
+                ...(this.opts.sandboxEgress ? { sandboxEgress: true as const } : {}),
                 resolvePat: (gitCredentialId: string) =>
                   registry.resolveGitCredentialSecret({
                     workspaceId,
@@ -5300,7 +5383,7 @@ export class Dispatcher {
             }
             // Best-effort: rm -rf the partial work dir so a half-clone
             // can't outlive the session.
-            await this.opts.workDir.releaseSession(workspaceId, sessionId).catch(() => {});
+            await this.opts.workDir?.releaseSession(workspaceId, sessionId).catch(() => {});
             repoCleanupReleases = async () => {};
             throw new RequiredSetupError('repo_setup', e);
           }
@@ -5310,7 +5393,7 @@ export class Dispatcher {
             // captured by ref above so a future Dispatcher option mutation
             // can't repoint the cleanup at the wrong manager.
             repoCleanupReleases = async () => {
-              await workDir.releaseSession(workspaceId, sessionId);
+              await workDir?.releaseSession(workspaceId, sessionId);
             };
           }
         } else if (repoResources.length > 0) {
@@ -5453,6 +5536,14 @@ export class Dispatcher {
           await this.opts.workDir.releaseSession(workspaceId, sessionId).catch(() => {});
         }
         agentSandbox = undefined;
+        if (egressCleanup) {
+          await egressCleanup().catch(() => {});
+          egressCleanup = undefined;
+        }
+        if (networkCleanup) {
+          await networkCleanup().catch(() => {});
+          networkCleanup = undefined;
+        }
         if (sandbox) {
           await sandbox.destroy().catch(() => {});
           sandbox = undefined;
@@ -5529,7 +5620,18 @@ export class Dispatcher {
     if (mounts) runnerOpts.mounts = mounts;
     if (outputMount) runnerOpts.outputMount = outputMount;
     if (memoryWatcher) runnerOpts.memoryWatcher = memoryWatcher;
-    if (repoCleanupReleases) runnerOpts.workDirReleases = repoCleanupReleases;
+    if (repoCleanupReleases || egressCleanup || networkCleanup)
+      runnerOpts.workDirReleases = async () => {
+        try {
+          try {
+            await egressCleanup?.();
+          } finally {
+            await networkCleanup?.();
+          }
+        } finally {
+          await repoCleanupReleases?.();
+        }
+      };
     // Registry coordinates the writer with the deployed Gateway sink. Missing
     // authority defaults to Harness for backward compatibility and prevents a
     // colocated deployment without that optional sink from silently dropping

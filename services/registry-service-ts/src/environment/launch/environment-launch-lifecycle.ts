@@ -76,6 +76,7 @@ import type {
   StartWorkerOptions,
   EnvironmentProvisionSpec,
 } from '../launcher/types.js';
+import type { SandboxNetworkRequest } from '@orca/sandbox-runtime';
 
 /** Default wait-online timeout (ms): how long a started worker has to dial in before the launch fails. */
 export const DEFAULT_WAIT_ONLINE_TIMEOUT_MS = 120_000;
@@ -89,9 +90,15 @@ export const DEFAULT_POLL_INTERVAL_MS = 1_000;
  */
 export interface EnvironmentTokenIssuer {
   /** Mint + persist a fresh per-launch Environment Token; returns the raw token to forward once. */
-  mintEnvironmentToken(environmentId: string, ttlMs?: number, now?: Date): Promise<string>;
+  mintEnvironmentToken(
+    environmentId: string,
+    ttlMs?: number,
+    now?: Date,
+    cloudSandboxHandleId?: string,
+    sandboxNetwork?: SandboxNetworkRequest,
+  ): Promise<string>;
   /** Revoke the environment's current Environment Token (best-effort cleanup on launch failure). */
-  revokeEnvironmentToken(environmentId: string): Promise<void>;
+  revokeEnvironmentToken(environmentId: string, expectedToken?: string): Promise<void>;
 }
 
 /**
@@ -116,6 +123,15 @@ export interface LifecycleLogger {
 
 /** Options for {@link EnvironmentLaunchLifecycle}. */
 export interface EnvironmentLaunchLifecycleOptions {
+  networks?: {
+    registerEnvironmentNetwork(environmentId: string): Promise<SandboxNetworkRequest>;
+    revokeEnvironmentNetwork(
+      environmentId: string,
+      bindingId: string,
+      generation: string,
+    ): Promise<unknown>;
+    current(bindingId: string, generation: string): Promise<unknown>;
+  };
   loadProvisionSpec?: (environmentId: string) => Promise<EnvironmentProvisionSpec>;
   /** The provider backend (local, or a cloud sandbox backend) that actually provisions/starts/terminates. */
   launcher: EnvironmentLauncher;
@@ -173,6 +189,10 @@ export class EnvironmentLaunchLifecycle {
   private readonly now: () => number;
   private readonly logger: LifecycleLogger | undefined;
   private readonly loadProvisionSpec: EnvironmentLaunchLifecycleOptions['loadProvisionSpec'];
+  private readonly networks: EnvironmentLaunchLifecycleOptions['networks'];
+  private readonly networkBindings = new Map<string, SandboxNetworkRequest>();
+  private readonly attempts = new Map<string, object>();
+  private readonly launchTokens = new Map<string, string>();
 
   /** The launch tracker: in-flight launches keyed by REGISTRY environment id. */
   private readonly inFlight = new Map<string, Promise<LaunchOutcome>>();
@@ -190,6 +210,7 @@ export class EnvironmentLaunchLifecycle {
     this.now = opts.now ?? Date.now;
     this.logger = opts.logger;
     this.loadProvisionSpec = opts.loadProvisionSpec;
+    this.networks = opts.networks;
   }
 
   /**
@@ -231,18 +252,25 @@ export class EnvironmentLaunchLifecycle {
 
   /**
    * Best-effort terminate the tracked launcher-level environment (if this
-   * process launched/tracks one) and revoke the environment's token.
-   * Idempotent — safe to call for an environment this process never
-   * launched (a no-op terminate; the revoke is still issued defensively in
-   * case a different process/replica minted a token for it).
+   * process launched/tracks one). Managed networking revokes only the captured
+   * network generation and token; without it, a missing tracked token still
+   * triggers a defensive revoke for tokens minted by another replica.
+   * Idempotent — safe to call for an environment this process never launched.
    */
   async terminate(environmentId: string): Promise<void> {
+    this.attempts.delete(environmentId);
+    const token = this.launchTokens.get(environmentId);
+    this.launchTokens.delete(environmentId);
+    const network = this.networkBindings.get(environmentId);
+    this.networkBindings.delete(environmentId);
     const launcherEnvironmentId = this.launcherEnvironmentIds.get(environmentId);
     this.launcherEnvironmentIds.delete(environmentId);
+    // Detach all captured references before cleanup yields to a successor launch.
+    if (network) await this.safeRevokeNetwork(environmentId, network);
     if (launcherEnvironmentId !== undefined) {
       await this.safeTerminate(launcherEnvironmentId);
     }
-    await this.safeRevoke(environmentId);
+    if (token || !this.networks) await this.safeRevoke(environmentId, token);
   }
 
   /**
@@ -280,7 +308,15 @@ export class EnvironmentLaunchLifecycle {
     opts: EnvironmentLaunchOptions,
     relaunch: boolean,
   ): Promise<LaunchOutcome> {
+    const attempt = {};
+    this.attempts.set(environmentId, attempt);
+    const checkCurrent = () => {
+      if (this.attempts.get(environmentId) !== attempt)
+        throw new Error('Environment launch cancelled');
+    };
     if (relaunch) {
+      const oldNetwork = this.networkBindings.get(environmentId);
+      if (oldNetwork) await this.safeRevokeNetwork(environmentId, oldNetwork);
       // Defensive: the old generation is normally already dead (that's why a
       // relaunch was asked for), but terminate it anyway, before provisioning
       // the replacement, so a transient tunnel blip can never leave two live
@@ -292,26 +328,53 @@ export class EnvironmentLaunchLifecycle {
     }
 
     let launcherEnvironmentId: string;
+    let sandboxNetwork: SandboxNetworkRequest | undefined;
     try {
       const spec = await this.loadProvisionSpec?.(environmentId);
+      checkCurrent();
+      if (this.networks) {
+        sandboxNetwork = await this.networks.registerEnvironmentNetwork(environmentId);
+        this.networkBindings.set(environmentId, sandboxNetwork);
+        checkCurrent();
+      }
       launcherEnvironmentId = spec
-        ? await this.launcher.provision(opts.name, spec)
-        : await this.launcher.provision(opts.name);
+        ? await this.launcher.provision(opts.name, {
+            ...spec,
+            ...(sandboxNetwork ? { sandboxNetwork } : {}),
+          })
+        : sandboxNetwork
+          ? await this.launcher.provision(opts.name, { sandboxNetwork })
+          : await this.launcher.provision(opts.name);
     } catch (err) {
+      if (sandboxNetwork) await this.safeRevokeNetwork(environmentId, sandboxNetwork);
       // Nothing was armed yet — no terminate/revoke needed, just report.
       this.logger?.error?.({ err, environmentId }, 'environment-launch: provision failed');
       return { status: 'failed', environmentId, error: describeError(err) };
     }
     this.launcherEnvironmentIds.set(environmentId, launcherEnvironmentId);
 
+    let token: string | undefined;
     try {
+      checkCurrent();
+      if (sandboxNetwork)
+        await this.networks!.current(sandboxNetwork.binding_id, sandboxNetwork.generation);
+      checkCurrent();
       // Arm the credential BEFORE starting the worker, so it already resolves
       // by the time the worker's first dial arrives. On a relaunch this
       // mint's fresh digest overwrites the prior one in place — atomically
       // revoking the dead generation's token (EnvironmentTokenStore semantics
       // — see its `mintEnvironmentToken` doc).
-      const token = await this.tokens.mintEnvironmentToken(environmentId);
+      token = await this.tokens.mintEnvironmentToken(
+        environmentId,
+        undefined,
+        undefined,
+        launcherEnvironmentId,
+        sandboxNetwork,
+      );
+      this.launchTokens.set(environmentId, token);
+      checkCurrent();
       const startOpts: StartWorkerOptions = {
+        ...(sandboxNetwork ? { sandboxEgress: true as const } : {}),
         token,
         registryTunnelUrl: this.registryTunnelUrl,
         environmentId,
@@ -321,6 +384,7 @@ export class EnvironmentLaunchLifecycle {
       };
       await this.launcher.startWorker(launcherEnvironmentId, startOpts);
       await this.waitOnline(environmentId);
+      checkCurrent();
     } catch (err) {
       // Any failure from here on tears down what was just provisioned/armed:
       // terminate the box, then revoke the token.
@@ -330,7 +394,9 @@ export class EnvironmentLaunchLifecycle {
       );
       await this.safeTerminate(launcherEnvironmentId);
       this.launcherEnvironmentIds.delete(environmentId);
-      await this.safeRevoke(environmentId);
+      if (sandboxNetwork) await this.safeRevokeNetwork(environmentId, sandboxNetwork);
+      if (token) await this.safeRevoke(environmentId, token);
+      if (this.launchTokens.get(environmentId) === token) this.launchTokens.delete(environmentId);
       return { status: 'failed', environmentId, error: describeError(err) };
     }
 
@@ -369,11 +435,27 @@ export class EnvironmentLaunchLifecycle {
   }
 
   /** Best-effort token revoke — logs, never throws (a cleanup path must not itself fail the caller). */
-  private async safeRevoke(environmentId: string): Promise<void> {
+  private async safeRevoke(environmentId: string, expectedToken?: string): Promise<void> {
     try {
-      await this.tokens.revokeEnvironmentToken(environmentId);
+      await this.tokens.revokeEnvironmentToken(environmentId, expectedToken);
     } catch (err) {
       this.logger?.warn?.({ err, environmentId }, 'environment-launch: best-effort revoke failed');
+    }
+  }
+  private async safeRevokeNetwork(
+    environmentId: string,
+    network: SandboxNetworkRequest,
+  ): Promise<void> {
+    if (this.networkBindings.get(environmentId) === network)
+      this.networkBindings.delete(environmentId);
+    try {
+      await this.networks!.revokeEnvironmentNetwork(
+        environmentId,
+        network.binding_id,
+        network.generation,
+      );
+    } catch (err) {
+      this.logger?.warn?.({ err, environmentId }, 'environment-launch: network revoke failed');
     }
   }
 }

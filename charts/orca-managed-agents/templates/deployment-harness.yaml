@@ -3,7 +3,7 @@
 {{- $databaseSecretName := include "orca-managed-agents.databaseSecretName" . -}}
 {{- /* With every credential delivered through extraEnvFrom there is no `env`
        entry left to render, and an empty `env:` key is invalid. */}}
-{{- $harnessHasEnv := or (ne (include "orca-managed-agents.secretName" .) "") (ne $databaseSecretName "") (gt (len $harnessSecretRefs) 0) (gt (len $harnessExtraEnv) 0) -}}
+{{- $harnessHasEnv := or .Values.sandboxEgress.enabled (ne (include "orca-managed-agents.secretName" .) "") (ne $databaseSecretName "") (gt (len $harnessSecretRefs) 0) (gt (len $harnessExtraEnv) 0) -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -65,6 +65,27 @@ spec:
             {{- end }}
           {{- if $harnessHasEnv }}
           env:
+            {{- if .Values.sandboxEgress.enabled }}
+            {{- range $key := list "SANDBOX_EGRESS_ENABLED" "SANDBOX_EGRESS_PROXY_URL" "SANDBOX_EGRESS_INTERNAL_BYPASS" }}
+            - name: {{ $key }}
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "orca-managed-agents.fullname" $ }}-harness-config
+                  key: {{ $key }}
+            {{- end }}
+            - name: SANDBOX_EGRESS_OWNER_POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: SANDBOX_EGRESS_OWNER_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: SANDBOX_EGRESS_OWNER_POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            {{- end }}
             {{- include "orca-managed-agents.secretEnv" (dict "ctx" $ "key" "TRANSCRIPT_STORE_DATABASE_URL" "refs" $harnessSecretRefs "optional" (ne .Values.transcriptStore.backend "postgres") "fallbackSecretName" $databaseSecretName) | nindent 12 }}
             {{- include "orca-managed-agents.secretEnv" (dict "ctx" $ "key" "FILESTORE_DATABASE_URL" "refs" $harnessSecretRefs "optional" false "fallbackSecretName" $databaseSecretName) | nindent 12 }}
             {{- include "orca-managed-agents.secretEnv" (dict "ctx" $ "key" "ANTHROPIC_API_KEY" "refs" $harnessSecretRefs "optional" true) | nindent 12 }}

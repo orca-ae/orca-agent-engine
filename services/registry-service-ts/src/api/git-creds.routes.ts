@@ -15,6 +15,7 @@ import {
 import { registryGitCredsRequestTotal } from '../metrics.js';
 import { buildRuntimeSecretResolver } from '../secrets/runtime-resolver.js';
 import { urlMatches } from '../domain/git-credentials.js';
+import { sessionUsesSandboxEgress } from '../domain/git-proxy-capability.js';
 
 export { urlMatches } from '../domain/git-credentials.js';
 
@@ -80,6 +81,9 @@ export function registerGitCredsRoutes(app: FastifyInstance, deps: GitCredsRoute
     }
 
     const { workspaceId, sessionId, repoUrls } = verified;
+    if (sessionId && (await sessionUsesSandboxEgress(deps.db, sessionId))) {
+      return reply.code(403).send({ error: 'legacy Git credentials are unavailable' });
+    }
     if (!workspaceId || !sessionId) {
       registryGitCredsRequestTotal.inc({ result: 'jwt_invalid' });
       return reply

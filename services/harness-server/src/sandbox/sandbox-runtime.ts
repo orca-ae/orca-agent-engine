@@ -84,6 +84,8 @@ export interface SandboxFiles {
 }
 
 export interface SandboxHandle {
+  /** Trusted owner installs bootstrap only after provider-confirmed policy readiness. */
+  configureSessionEgress?(env: Record<string, string>): Promise<void>;
   /** Stable id; surfaces in audit + logs. */
   id: string;
   /** Run a tool call (bash, glob, grep, …). */
@@ -172,6 +174,8 @@ export type PackageManager = (typeof packageManagers)[number];
 export type Packages = Partial<Record<PackageManager, string[]>>;
 
 export interface EnvironmentSpec {
+  /** Managed OpenSandbox only: registered Sandbox network established before isolated installers. */
+  sandboxNetwork?: import('@orca/sandbox-runtime').SandboxNetworkRequest;
   dshProfile?: DshProfileDescriptor;
   packages?: Packages;
   networking?: Record<string, unknown>;

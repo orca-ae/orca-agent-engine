@@ -483,6 +483,7 @@ function defaultCreateLoop(
   sandboxRuntime: SandboxRuntime,
 ): SessionLoopLike {
   return new SessionLoop({
+    ...(config.sandboxEgressRequired ? { sandboxEgressRequired: true } : {}),
     workspaceId: config.workspaceId,
     providers: registry,
     transcriptSink,
@@ -509,11 +510,17 @@ function defaultCreateLoop(
  * supplied here.
  */
 function defaultCreateSandboxRuntime(config: RunnerConfig, logger: RunnerLogger): SandboxRuntime {
-  const kind = (process.env[SANDBOX_RUNTIME_ENV_VAR] ?? '').trim().toLowerCase();
+  const configuredKind = (process.env[SANDBOX_RUNTIME_ENV_VAR] ?? '').trim().toLowerCase();
+  if (config.sandboxEgressRequired && configuredKind !== '' && configuredKind !== 'local') {
+    throw new Error('managed sandbox egress requires Local/SRT inside OpenSandbox');
+  }
+  const kind = config.sandboxEgressRequired ? 'local' : configuredKind;
   if (kind !== 'local') {
     return createRunnerSandboxRuntime({ kind });
   }
   const local = resolveRunnerLocalSandbox({ harnessWorkDir: config.workspace, logger });
+  if (config.sandboxEgressRequired && local === undefined)
+    throw new Error('managed sandbox egress cannot fall back without SRT');
   // Spread `local` in only when resolved — an absent value lets `createRunnerSandboxRuntime`
   // fall back to InMemory (the resolver already logged why).
   return createRunnerSandboxRuntime({ kind, ...(local !== undefined ? { local } : {}) });

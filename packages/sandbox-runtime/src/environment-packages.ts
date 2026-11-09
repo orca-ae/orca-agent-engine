@@ -92,10 +92,13 @@ export function currentEnvironmentPackagesRevision(
 export function prepareEnvironmentPackagePlan(
   packages: Packages | undefined,
   networking?: Record<string, unknown>,
+  managedNetwork = false,
 ): { packages: Packages; extension: string } | undefined {
   const normalized = normalizeEnvironmentPackages(packages);
   if (Object.keys(normalized).length === 0) return undefined;
-  if (networking?.type !== undefined && networking.type !== 'unrestricted') {
+  if (managedNetwork && normalized.gem?.length)
+    throw new Error('managed Sandbox networking does not support RubyGems HTTPS proxy transport');
+  if (!managedNetwork && networking?.type !== undefined && networking.type !== 'unrestricted') {
     throw new Error('OpenSandbox package preparation requires unrestricted environment networking');
   }
   return { packages: normalized, extension: JSON.stringify({ version: 1, packages: normalized }) };

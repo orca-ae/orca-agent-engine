@@ -198,6 +198,48 @@ opensandbox-server:
 `subPath` mounts do not hot-reload. Restart `deployment/opensandbox-server`
 after upgrading this chart.
 
+## Controlled egress opt-in
+
+The trusted `orca.sandbox.network` extension carries strict JSON
+`{"binding_id":"...","generation":"..."}`. It is accepted only when the provider
+has `ORCA_SANDBOX_EGRESS_ENABLED=true`, `ORCA_SANDBOX_EGRESS_CA_CONFIG_MAP`, and the
+operator-owned `ORCA_SANDBOX_EGRESS_REGISTRY_URL` internal origin. The old enable
+extension is rejected. Without opt-in no network bootstrap is injected.
+
+The provider protects the enforcement label and `orca.ai/network-binding-id` /
+`orca.ai/network-generation` annotations on both BatchSandbox and Pod template.
+It verifies the trusted offline execd init, entrypoint and exact installer ordering
+before adding an image-owned network init. Only this init receives the projected
+Pod-bound ServiceAccount token with audience `orca-sandbox-network` and the public
+CA ConfigMap. Pod automount remains false. Registry validates token identity, exact
+Pod/owner UID and current Cilium NP/CNP/CCNP union and CEP enforcement before issuing
+base networking. The provider does not duplicate that authority evaluator.
+
+The bootstrap publishes `/run/orca/sandbox-network/context.json`, a combined trust
+bundle and client configuration on a memory-backed volume. Package and DSH installers
+follow it as separate init containers and mount the context read-only, as does main.
+The same combined CA is mounted read-only at the platform images' native
+`/etc/ssl/certs/ca-certificates.crt` path using `subPath: ca-bundle.crt`; bootstrap
+keeps its original image roots. This supports Cargo/libcurl proxy CA verification.
+A Registry/bootstrap failure prevents installation. Session grants project only
+process-local capability/markers over this one Sandbox-lifetime network context.
+
+Enabled egress requires endpoint policy status reporting. Cilium 1.13.2 Helm values
+`endpointStatus.enabled: true` and `endpointStatus.status: "policy"` publish it
+through agent ConfigMap key `endpoint-status`; preserve existing reporting categories
+when adding `policy`. A CEP showing `{enforcing: false, state: '<status disabled>'}`
+does not establish whether enforcement is active and fails readiness closed. The
+Engine chart reference below links the official versioned Cilium source. This
+chart does not reconfigure Cilium, and disabled egress has no reporting prerequisite.
+Managed networking allows Environment package and DSH profile preparation after the
+network barrier. Managed `gem` plans are rejected before provisioning/download because
+RubyGems 3.6.7 / Ruby 3.3.8 cannot use HTTPS proxy transport; non-managed gem plans
+retain their existing behavior. Unsupported runtime backends reject managed network acquisition.
+
+See [Engine chart controlled egress](../orca-managed-agents/README.md#controlled-sandbox-egress)
+for configuration, namespace-scoped RBAC, legacy-policy exclusions, and the distinction
+between endpoint readiness and actual dataplane qualification. The network init must complete before any installer or runtime container starts.
+
 ## License
 
 Files under `files/` are modified OpenSandbox sources licensed under Apache

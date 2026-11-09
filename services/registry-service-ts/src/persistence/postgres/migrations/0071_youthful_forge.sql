@@ -1,0 +1,1 @@
+ALTER TABLE "sessions" ADD COLUMN "runner_launch_authority" jsonb;

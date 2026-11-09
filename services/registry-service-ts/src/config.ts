@@ -33,6 +33,12 @@ export interface KafkaClientConfig {
 }
 
 export interface ServiceConfig {
+  sandboxEgressEnabled: boolean;
+  sandboxEgressPolicySha256: string;
+  sandboxEgressSandboxNamespace: string | undefined;
+  sandboxEgressGithubRestReadEnabled: boolean;
+  sandboxEgressProxyUrl: string;
+  sandboxEgressInternalBypass: string[];
   dshApprovedProfiles: DshApprovedProfiles;
   httpPort: number;
   batchReadsEnabled: boolean;
@@ -671,6 +677,52 @@ function parsePriceRefreshIntervalMs(env: NodeJS.ProcessEnv): number {
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServiceConfig {
+  const sandboxEgressEnabled = parseBooleanEnv(env, 'SANDBOX_EGRESS_ENABLED');
+  const sandboxEgressPolicySha256 = env['SANDBOX_EGRESS_POLICY_SHA256'] ?? '';
+  const sandboxEgressProxyUrl = env['SANDBOX_EGRESS_PROXY_URL'] ?? '';
+  let sandboxEgressInternalBypass: string[] = [];
+  if (sandboxEgressEnabled) {
+    if (!/^[0-9a-f]{64}$/.test(sandboxEgressPolicySha256))
+      throw new Error('SANDBOX_EGRESS_POLICY_SHA256 is required when sandbox egress is enabled');
+    let proxy: URL;
+    try {
+      proxy = new URL(sandboxEgressProxyUrl);
+    } catch {
+      throw new Error('SANDBOX_EGRESS_PROXY_URL must be an HTTPS proxy origin');
+    }
+    if (
+      proxy.protocol !== 'https:' ||
+      !proxy.hostname ||
+      proxy.username ||
+      proxy.password ||
+      proxy.pathname !== '/' ||
+      proxy.search ||
+      proxy.hash
+    )
+      throw new Error('SANDBOX_EGRESS_PROXY_URL must be an HTTPS proxy origin without credentials');
+    const bypass: unknown = JSON.parse(env['SANDBOX_EGRESS_INTERNAL_BYPASS'] ?? '[]');
+    if (
+      !Array.isArray(bypass) ||
+      bypass.length > 128 ||
+      !bypass.every(
+        (host) =>
+          typeof host === 'string' &&
+          (isIP(host) === 4 ||
+            /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/.test(
+              host,
+            )),
+      )
+    )
+      throw new Error(
+        'SANDBOX_EGRESS_INTERNAL_BYPASS must contain exact DNS names or IPv4 addresses',
+      );
+    sandboxEgressInternalBypass = bypass;
+  }
+  if (
+    parseBooleanEnv(env, 'SANDBOX_EGRESS_ENABLED') &&
+    !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(env['SANDBOX_EGRESS_SANDBOX_NAMESPACE'] ?? '')
+  )
+    throw new Error('SANDBOX_EGRESS_SANDBOX_NAMESPACE is required when sandbox egress is enabled');
   const rawKey = env['SESSION_JWT_PRIVATE_KEY_PEM'] ?? '';
   let pem = rawKey;
   if (rawKey && !rawKey.includes('BEGIN')) {
@@ -761,7 +813,18 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServiceConfig 
     sseBufferSize: Number(env['SSE_BUFFER_SIZE'] ?? 256),
     sseDropAgeMs: Number(env['SSE_DROP_AGE_MS'] ?? 5000),
     sseHeartbeatMs: Number(env['SSE_HEARTBEAT_MS'] ?? 15000),
-    environmentClaimTtlMs: Number(env['ENVIRONMENT_CLAIM_TTL_MS'] ?? 90_000),
+    environmentClaimTtlMs: sandboxEgressEnabled
+      ? parsePositiveInteger(env, 'ENVIRONMENT_CLAIM_TTL_MS', 90_000)
+      : Number(env['ENVIRONMENT_CLAIM_TTL_MS'] ?? 90_000),
+    sandboxEgressEnabled,
+    sandboxEgressPolicySha256,
+    sandboxEgressProxyUrl,
+    sandboxEgressInternalBypass,
+    sandboxEgressSandboxNamespace: env['SANDBOX_EGRESS_SANDBOX_NAMESPACE'],
+    sandboxEgressGithubRestReadEnabled: parseBooleanEnv(
+      env,
+      'SANDBOX_EGRESS_GITHUB_REST_READ_ENABLED',
+    ),
     gatewayRegistryUsageEnabled: parseBooleanEnv(env, 'AI_GATEWAY_REGISTRY_USAGE_ENABLED'),
     sessionJwtPrivateKeyPem: pem,
     sessionJwtIssuer: env['SESSION_JWT_ISSUER'] ?? 'orca-registry',

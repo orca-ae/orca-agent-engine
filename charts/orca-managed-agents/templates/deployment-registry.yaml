@@ -6,7 +6,7 @@
 {{- $registryExtraVolumeMounts := default (list) .Values.registry.extraVolumeMounts -}}
 {{- $registryExtraVolumes := default (list) .Values.registry.extraVolumes -}}
 {{- $registryDatabaseKeys := list "DATABASE_URL" "TRANSCRIPT_STORE_DATABASE_URL" "FILESTORE_DATABASE_URL" "MEMORYSTORE_DATABASE_URL" -}}
-{{- $registryHasEnv := or (ne $databaseSecretName "") (gt (len $registrySecretRefs) 0) (gt (len $registryExtraEnv) 0) -}}
+{{- $registryHasEnv := or .Values.sandboxEgress.enabled (ne $databaseSecretName "") (gt (len $registrySecretRefs) 0) (gt (len $registryExtraEnv) 0) -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -125,6 +125,15 @@ spec:
             {{- /* Keep every workload on the same selected database Secret.
                    Per-variable refs still win because secretEnv checks them
                    before the fallback Secret. */}}
+            {{- if .Values.sandboxEgress.enabled }}
+            {{- range $key := list "SANDBOX_EGRESS_POLICY_SHA256" "SANDBOX_EGRESS_ENABLED" "SANDBOX_EGRESS_GITHUB_REST_READ_ENABLED" "SANDBOX_EGRESS_SANDBOX_NAMESPACE" "SANDBOX_EGRESS_PROXY_URL" "SANDBOX_EGRESS_INTERNAL_BYPASS" }}
+            - name: {{ $key }}
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "orca-managed-agents.fullname" $ }}-registry-config
+                  key: {{ $key }}
+            {{- end }}
+            {{- end }}
             {{- include "orca-managed-agents.secretEnv" (dict "ctx" $ "key" "DATABASE_URL" "refs" $registrySecretRefs "optional" false "fallbackSecretName" $databaseSecretName) | nindent 12 }}
             {{- include "orca-managed-agents.secretEnv" (dict "ctx" $ "key" "TRANSCRIPT_STORE_DATABASE_URL" "refs" $registrySecretRefs "optional" (ne .Values.transcriptStore.backend "postgres") "fallbackSecretName" $databaseSecretName) | nindent 12 }}
             {{- include "orca-managed-agents.secretEnv" (dict "ctx" $ "key" "FILESTORE_DATABASE_URL" "refs" $registrySecretRefs "optional" false "fallbackSecretName" $databaseSecretName) | nindent 12 }}

@@ -115,6 +115,19 @@ until this table describes it.
 
 ## What this process must never acquire
 
+Managed OpenSandbox launchers set SANDBOX_EGRESS_ENABLED=true (default false); the
+Environment worker forwards this nonsecret requirement signal only on its managed-auth path.
+It is not proof of policy enforcement. Each authenticated resource manifest must then carry
+its scoped session_egress grant, and only verified native Local/SRT placement is supported.
+The runner validates each grant against the existing Sandbox network context and installs
+per-session env before committing placement, keeps Session capabilities in memory,
+and reprocesses delivery even when resource bytes retain the same revision. A generation change
+restarts the native harness on snapshot delivery. Missing/invalid delivery blocks execution.
+The already Cilium-enforced outer Pod owns network policy; nested Local/SRT retains filesystem,
+PID and UID isolation while sharing that Pod network namespace instead of adding a plaintext proxy.
+Self-hosted, in-memory and unsupported placements reject this mode. Online package/DSH preparation uses separate init containers after the trusted network
+bootstrap; all mount the Sandbox context read-only. Session cleanup clears only its grant.
+
 - **No transcript backend.** History lives in the tunnel-fed in-memory store in
   `src/transcript/in-memory-transcript-store.ts`; the registry pushes the recovery replay down and
   the runner streams new events up. Wiring a broker or a database here would break the

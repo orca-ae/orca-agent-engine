@@ -23,6 +23,32 @@ export type {
   SearchToolArgs,
   ParsedToolCall,
 } from './sandbox-runtime.js';
+export {
+  SANDBOX_NETWORK_EXTENSION,
+  SANDBOX_NETWORK_BINDING_ANNOTATION,
+  SANDBOX_NETWORK_GENERATION_ANNOTATION,
+  SANDBOX_NETWORK_DIRECTORY,
+  SANDBOX_NETWORK_CONTEXT_PATH,
+  SANDBOX_NETWORK_TRUST_PATH,
+  SANDBOX_NETWORK_TIMEOUT_MS,
+  parseSandboxNetworkRequest,
+  parseSandboxNetworkContext,
+  SANDBOX_EGRESS_ENABLED_ENV,
+  parseSessionEgressGrant,
+  SESSION_EGRESS_BOOTSTRAP_PATH,
+  prepareSessionEgress,
+  SANDBOX_EGRESS_GIT_HELPER,
+  buildSandboxNetworkEnvironment,
+  buildSessionEgressEnvironment,
+} from './sandbox-egress.js';
+export type {
+  SandboxNetworkRequest,
+  SandboxNetworkContext,
+  SessionEgressGrant,
+  SandboxEgressConfig,
+} from './sandbox-egress.js';
+export { buildSandboxEgressGitCloneCommand } from './sandbox-egress-git.js';
+export type { SandboxEgressGitClone } from './sandbox-egress-git.js';
 export { packageManagers, parseToolCall, hasWritePolicyEnforcement } from './sandbox-runtime.js';
 export {
   ENVIRONMENT_PACKAGES_EXTENSION,

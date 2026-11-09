@@ -27,6 +27,7 @@ import {
   applyCounterStateUpdate,
   parseGuardrailStateBody,
 } from '../domain/usage-accounting.js';
+import { sessionUsesSandboxEgress } from '../domain/git-proxy-capability.js';
 export {
   usageCostNanoUsd,
   parseGuardrailStateBody,
@@ -381,6 +382,8 @@ function versionToApi(r: MemoryVersionRecord): {
 }
 
 export interface InternalRoutesOptions {
+  /** Derived from the configured Sandbox egress service, not a request capability. */
+  sandboxNetworkEnabled?: boolean;
   recordPolicyWarning?: (
     workspaceId: string,
     sessionId: string,
@@ -832,6 +835,7 @@ export function registerInternalRoutes(
       const profileStartedAt = performance.now();
       try {
         const prepared = await prepareExecution({
+          sandboxNetworkEnabled: options.sandboxNetworkEnabled ?? false,
           ...(options.guardrails ? { guardrails: options.guardrails } : {}),
           ...(body.data.capabilities ? { capabilities: body.data.capabilities } : {}),
           ...(options.dshApprovedProfiles
@@ -1847,6 +1851,11 @@ export function registerInternalRoutes(
     if (typeof body.audience === 'string' && body.audience.length > 0) {
       mintOpts.audience = body.audience;
     }
+    if (
+      ['git-creds', 'git-proxy'].includes(minter.audienceFor(mintOpts)) &&
+      (await sessionUsesSandboxEgress(db, id))
+    )
+      return reply.code(403).send({ error: 'legacy Git capabilities are unavailable' });
     if (Array.isArray(body.repo_urls) && body.repo_urls.length > 0) {
       mintOpts.repoUrls = body.repo_urls.filter(
         (u): u is string => typeof u === 'string' && u.length > 0,

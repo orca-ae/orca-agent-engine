@@ -9,12 +9,23 @@ import {
   environments,
   gitCredentials,
   sessionResources,
+  sandboxEgressBindings,
   sessions,
   workspaces,
 } from '../persistence/postgres/schema.js';
 import { validateGitRepositoryUrl } from './git-credentials.js';
 
 export const GIT_PROXY_TTL_SECONDS = 900;
+
+/** Revocation must never restore legacy PAT delivery for a migrated Session. */
+export async function sessionUsesSandboxEgress(db: DbClient, sessionId: string): Promise<boolean> {
+  const [binding] = await db
+    .select({ id: sandboxEgressBindings.id })
+    .from(sandboxEgressBindings)
+    .where(eq(sandboxEgressBindings.sessionId, sessionId))
+    .limit(1);
+  return binding !== undefined;
+}
 
 export interface GitProxyBinding {
   organizationId: string;
@@ -134,6 +145,8 @@ export async function mintGitProxyCapability(
   minter: SessionJwtMinter,
   input: { registryBaseUrl: string; workspaceId: string; sessionId: string; resourceId: string },
 ): Promise<{ remoteUrl: string; authorizationHeader: string; expiresAt: number }> {
+  if (await sessionUsesSandboxEgress(db, input.sessionId))
+    throw new Error('legacy Git proxy is unavailable');
   const base = new URL(input.registryBaseUrl);
   if (
     !['https:', 'http:'].includes(base.protocol) ||

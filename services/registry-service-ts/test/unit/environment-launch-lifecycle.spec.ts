@@ -30,6 +30,83 @@ import type {
   StartWorkerOptions,
 } from '../../src/environment/launcher/types.js';
 
+describe('managed Sandbox network launch boundary', () => {
+  function fixture() {
+    const request = { binding_id: 'network', generation: 'generation' };
+    const networks = {
+      registerEnvironmentNetwork: vi.fn(async () => request),
+      revokeEnvironmentNetwork: vi.fn(async () => {}),
+      current: vi.fn(async () => {}),
+    };
+    const provision = vi.fn(async (_name: string, _spec?: unknown) => 'sandbox');
+    const startWorker = vi.fn(async () => {}),
+      terminate = vi.fn(async () => {});
+    const tokens = {
+      mintEnvironmentToken: vi.fn(async () => 'worker-token'),
+      revokeEnvironmentToken: vi.fn(async () => {}),
+    };
+    const lifecycle = new EnvironmentLaunchLifecycle({
+      networks,
+      tokens,
+      launcher: { provision, startWorker, terminate, isRunning: async () => true },
+      registryTunnelUrl: 'https://registry.example',
+      workerOnline: { get: () => undefined },
+      waitOnlineTimeoutMs: 0,
+    });
+    return { request, networks, provision, startWorker, terminate, tokens, lifecycle };
+  }
+  it('registers before provisioning and revokes the exact generation on provision failure', async () => {
+    const f = fixture();
+    f.provision.mockImplementation(async (_name, spec) => {
+      expect(f.networks.registerEnvironmentNetwork).toHaveBeenCalledWith('env');
+      expect(spec).toEqual({ sandboxNetwork: f.request });
+      throw new Error('installer failed');
+    });
+    expect((await f.lifecycle.ensureLaunched('env', { name: 'fixture' })).status).toBe('failed');
+    expect(f.networks.revokeEnvironmentNetwork).toHaveBeenCalledWith(
+      'env',
+      'network',
+      'generation',
+    );
+    expect(f.tokens.mintEnvironmentToken).not.toHaveBeenCalled();
+  });
+  it('requires current verified networking before minting worker credentials', async () => {
+    const f = fixture();
+    f.networks.current.mockRejectedValue(new Error('enforcement lost'));
+    expect((await f.lifecycle.ensureLaunched('env', { name: 'fixture' })).status).toBe('failed');
+    expect(f.terminate).toHaveBeenCalledWith('sandbox');
+    expect(f.tokens.mintEnvironmentToken).not.toHaveBeenCalled();
+    expect(f.startWorker).not.toHaveBeenCalled();
+  });
+  it('fences cancellation while provision is in flight', async () => {
+    const f = fixture();
+    let release!: (id: string) => void;
+    const held = new Promise<string>((resolve) => {
+      release = resolve;
+    });
+    f.provision.mockReturnValue(held);
+    const launch = f.lifecycle.ensureLaunched('env', { name: 'fixture' });
+    await vi.waitFor(() => expect(f.provision).toHaveBeenCalled());
+    await f.lifecycle.terminate('env');
+    release('sandbox');
+    expect((await launch).status).toBe('failed');
+    expect(f.terminate).toHaveBeenCalledWith('sandbox');
+    expect(f.startWorker).not.toHaveBeenCalled();
+    expect(f.tokens.mintEnvironmentToken).not.toHaveBeenCalled();
+  });
+  it('revokes the matching parent after wait-online timeout', async () => {
+    const f = fixture();
+    expect((await f.lifecycle.ensureLaunched('env', { name: 'fixture' })).status).toBe('failed');
+    expect(f.startWorker).toHaveBeenCalled();
+    expect(f.networks.revokeEnvironmentNetwork).toHaveBeenCalledWith(
+      'env',
+      'network',
+      'generation',
+    );
+    expect(f.tokens.revokeEnvironmentToken).toHaveBeenCalledWith('env', 'worker-token');
+  });
+});
+
 // ── Fakes ──────────────────────────────────────────────────
 
 /** Records every call; provisions deterministic, distinct launcher-level ids. */
@@ -511,6 +588,125 @@ describe('EnvironmentLaunchLifecycle.relaunch — same environment identity, new
 });
 
 describe('EnvironmentLaunchLifecycle.terminate', () => {
+  it.each(['startWorker', 'waitOnline'] as const)(
+    'keeps cancelled %s single-flighted until cleanup finishes',
+    async (phase) => {
+      const launcher = new FakeLauncher();
+      const workerOnline = new FakeWorkerOnline();
+      let entered!: () => void;
+      let release!: () => void;
+      const waiting = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const pause = async () => {
+        entered();
+        await held;
+        workerOnline.markOnline(ENV_ID);
+      };
+      if (phase === 'startWorker') {
+        const start = launcher.startWorker.bind(launcher);
+        vi.spyOn(launcher, 'startWorker').mockImplementationOnce(async (id, opts) => {
+          await start(id, opts);
+          await pause();
+        });
+      }
+      const lifecycle = new EnvironmentLaunchLifecycle({
+        launcher,
+        tokens: new FakeTokenIssuer(),
+        workerOnline,
+        registryTunnelUrl: REGISTRY_TUNNEL_URL,
+        sleep: phase === 'waitOnline' ? pause : async () => workerOnline.markOnline(ENV_ID),
+      });
+      const first = lifecycle.ensureLaunched(ENV_ID, { name: 'old' });
+      await waiting;
+      await lifecycle.terminate(ENV_ID);
+      // Both public entry points must join A, rather than install B before A cleans up.
+      const retry = lifecycle.ensureLaunched(ENV_ID, { name: 'new' });
+      const relaunch = lifecycle.relaunch(ENV_ID, { name: 'replacement' });
+      release();
+      const outcomes = await Promise.all([first, retry, relaunch]);
+      expect(outcomes).toEqual(
+        Array(3).fill({
+          status: 'failed',
+          environmentId: ENV_ID,
+          error: 'Environment launch cancelled',
+        }),
+      );
+      expect(launcher.provisionCalls).toEqual(['old']);
+      workerOnline.markOffline(ENV_ID);
+      expect((await lifecycle.ensureLaunched(ENV_ID, { name: 'successor' })).status).toBe(
+        'launched',
+      );
+      await lifecycle.terminate(ENV_ID);
+      expect(launcher.terminateCalls.at(-1)).toBe('local_2');
+    },
+  );
+
+  it('preserves a successor launched while the old network revoke is pending', async () => {
+    const launcher = new FakeLauncher();
+    const workerOnline = new FakeWorkerOnline();
+    const oldNetwork = { binding_id: 'network', generation: 'old' };
+    const newNetwork = { binding_id: 'network', generation: 'new' };
+    let releaseRevoke!: () => void;
+    const heldRevoke = new Promise<void>((resolve) => {
+      releaseRevoke = resolve;
+    });
+    const networks = {
+      registerEnvironmentNetwork: vi
+        .fn()
+        .mockResolvedValueOnce(oldNetwork)
+        .mockResolvedValueOnce(newNetwork),
+      revokeEnvironmentNetwork: vi
+        .fn()
+        .mockReturnValueOnce(heldRevoke)
+        .mockResolvedValue(undefined),
+      current: vi.fn(async () => {}),
+    };
+    const tokens = {
+      mintEnvironmentToken: vi
+        .fn()
+        .mockResolvedValueOnce('old-token')
+        .mockResolvedValueOnce('new-token'),
+      revokeEnvironmentToken: vi.fn(async () => {}),
+    };
+    const lifecycle = new EnvironmentLaunchLifecycle({
+      launcher,
+      tokens,
+      networks,
+      workerOnline,
+      registryTunnelUrl: REGISTRY_TUNNEL_URL,
+      sleep: async () => workerOnline.markOnline(ENV_ID),
+    });
+    expect((await lifecycle.ensureLaunched(ENV_ID, { name: 'old' })).status).toBe('launched');
+    workerOnline.markOffline(ENV_ID);
+
+    const oldCleanup = lifecycle.terminate(ENV_ID);
+    expect(networks.revokeEnvironmentNetwork).toHaveBeenCalledWith(ENV_ID, 'network', 'old');
+    expect(launcher.terminateCalls).toEqual([]);
+    expect((await lifecycle.ensureLaunched(ENV_ID, { name: 'new' })).status).toBe('launched');
+
+    releaseRevoke();
+    await oldCleanup;
+    expect(launcher.terminateCalls).toEqual(['local_1']);
+    expect(networks.revokeEnvironmentNetwork.mock.calls).toEqual([[ENV_ID, 'network', 'old']]);
+    expect(tokens.revokeEnvironmentToken.mock.calls).toEqual([[ENV_ID, 'old-token']]);
+
+    // A later termination must still find every successor cleanup reference.
+    await lifecycle.terminate(ENV_ID);
+    expect(launcher.terminateCalls).toEqual(['local_1', 'local_2']);
+    expect(networks.revokeEnvironmentNetwork.mock.calls).toEqual([
+      [ENV_ID, 'network', 'old'],
+      [ENV_ID, 'network', 'new'],
+    ]);
+    expect(tokens.revokeEnvironmentToken.mock.calls).toEqual([
+      [ENV_ID, 'old-token'],
+      [ENV_ID, 'new-token'],
+    ]);
+  });
+
   it('terminates the tracked launcher-level environment and revokes the token', async () => {
     const launcher = new FakeLauncher();
     const tokens = new FakeTokenIssuer();

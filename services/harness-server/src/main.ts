@@ -369,6 +369,7 @@ const dispatcherOpts: DispatcherOptions = {
   fileStore,
   skillStore,
   sandboxRuntime,
+  ...(config.sandboxEgress ? { sandboxEgress: config.sandboxEgress } : {}),
   s3KeyPrefix: config.s3KeyPrefix,
   s3ForcePathStyle: config.s3ForcePathStyle,
   s3Client: s3,

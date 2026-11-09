@@ -103,6 +103,8 @@ export class AgentEnvRuntime implements SandboxRuntime {
   }
 
   async acquire(env: EnvironmentSpec): Promise<SandboxHandle> {
+    if (env.sandboxNetwork)
+      throw new Error('sandbox egress requires managed OpenSandbox execution');
     if (hasRequestedPackages(env)) {
       throw new Error(
         'AgentENV does not allow runtime package installation before the agent isolation boundary; use an operator-approved prebuilt image',

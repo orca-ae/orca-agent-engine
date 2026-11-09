@@ -126,6 +126,7 @@ export interface TranscriptSink {
 
 /** Options for {@link SessionLoop}. */
 export interface SessionLoopOptions {
+  sandboxEgressRequired?: true;
   resources?: RunnerResources;
   /** Owning workspace (tenant scope) for the session this runner serves. */
   workspaceId: string;
@@ -314,6 +315,7 @@ export class SessionLoop {
    * in-process providers ignore it.
    */
   private readonly sandboxRuntime: SandboxRuntime | undefined;
+  private readonly sandboxEgressRequired: boolean;
   /**
    * The runner workspace root the owner-pod-pushed Skills are materialized under (see
    * {@link SessionLoopOptions.skillsWorkspaceDir}); falls back to a per-process tmp dir.
@@ -434,20 +436,22 @@ export class SessionLoop {
     this.logger = opts.logger;
     this.transcriptSink = opts.transcriptSink;
     this.sandboxRuntime = opts.sandboxRuntime;
+    this.sandboxEgressRequired = opts.sandboxEgressRequired === true;
+    const sessionSandbox = sessionSandboxRuntime(
+      this.sandboxRuntime,
+      this.providers.sessionSandboxReadPaths(),
+    );
+    if (this.sandboxEgressRequired && (process.platform !== 'linux' || !sessionSandbox)) {
+      throw new Error('sandbox egress requires verified managed Linux Local/SRT placement');
+    }
     this.skillsWorkspaceDir =
       opts.skillsWorkspaceDir ?? join(tmpdir(), 'orca-session-runner-skills');
     this.resources =
       opts.resources ??
       new RunnerResources({
+        ...(opts.sandboxEgressRequired ? { sandboxEgressRequired: true } : {}),
         workspaceDir: this.skillsWorkspaceDir,
-        ...(sessionSandboxRuntime(this.sandboxRuntime, this.providers.sessionSandboxReadPaths())
-          ? {
-              sessionSandbox: sessionSandboxRuntime(
-                this.sandboxRuntime,
-                this.providers.sessionSandboxReadPaths(),
-              )!,
-            }
-          : {}),
+        ...(sessionSandbox ? { sessionSandbox } : {}),
       });
     this.now = opts.now ?? (() => performance.now() / 1000);
     this.lastActivityAt = this.now();
@@ -636,11 +640,13 @@ export class SessionLoop {
       snapshot.sandbox_resources &&
       supportsNativeFileCompletion(snapshot) &&
       this.harness &&
-      this.nativeFingerprint === nativeSnapshotFingerprint(snapshot)
+      this.nativeFingerprint ===
+        nativeSnapshotFingerprint(snapshot) + ':' + (this.resources.egressGeneration ?? '')
     ) {
       this.assertResourceSession(sessionId);
       if (
         this.stopped ||
+        !this.resources.readyForSnapshot ||
         this.configuring ||
         this.snapshotBinding?.sessionId !== sessionId ||
         this.resources.placement?.id !== snapshot.sandbox_resources.placement_id ||
@@ -669,7 +675,12 @@ export class SessionLoop {
       );
     }
     const native = snapshot.sandbox_resources;
-    const fingerprint = native ? nativeSnapshotFingerprint(snapshot) : undefined;
+    if (this.sandboxEgressRequired && (!native || !this.resources.readyForSnapshot)) {
+      throw new Error('managed sandbox egress delivery is not committed');
+    }
+    const fingerprint = native
+      ? nativeSnapshotFingerprint(snapshot) + ':' + (this.resources.egressGeneration ?? '')
+      : undefined;
     if (native) {
       const placement = this.resources.placement;
       if (

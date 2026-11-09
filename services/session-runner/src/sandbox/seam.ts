@@ -43,6 +43,15 @@
 import { execFileSync } from 'node:child_process';
 export { SandboxManager } from '@orca/sandbox-runtime';
 export { LocalSandboxRuntime } from '@orca/sandbox-runtime';
+export {
+  SANDBOX_EGRESS_ENABLED_ENV,
+  parseSessionEgressGrant,
+  prepareSessionEgress,
+  parseSandboxNetworkContext,
+  SANDBOX_NETWORK_CONTEXT_PATH,
+  SANDBOX_NETWORK_TRUST_PATH,
+} from '@orca/sandbox-runtime';
+export type { SessionEgressGrant } from '@orca/sandbox-runtime';
 import {
   InMemorySandboxRuntime,
   LocalSandboxRuntime,

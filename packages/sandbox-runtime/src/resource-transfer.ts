@@ -6,6 +6,7 @@ import { posix as path } from 'node:path';
 import { OUTPUT_WRITABLE_PATH, SKILLS_ROOT } from './write-policy.js';
 import { parseNativeCompletion, type NativeCompletion } from './native-completion.js';
 import { assertEnvironmentPackageMountPaths } from './environment-packages.js';
+import type { SessionEgressGrant } from './sandbox-egress.js';
 
 /** Bounds shared by Registry producers and credential-free runner consumers. */
 export const RESOURCE_CHUNK_BYTES = 1024 * 1024;
@@ -65,7 +66,12 @@ export interface GitProxyCapability {
   expires_at: number;
 }
 export type ResourcePush =
-  | { type: 'manifest'; manifest: ResourceManifest; network_allowed_domains?: string[] }
+  | {
+      type: 'manifest';
+      manifest: ResourceManifest;
+      network_allowed_domains?: string[];
+      session_egress?: SessionEgressGrant;
+    }
   | {
       type: 'file_chunk';
       revision: string;
@@ -80,6 +86,8 @@ export type ResourcePush =
 const SHA256 = /^[a-f0-9]{64}$/;
 const RESERVED_ROOTS = [
   '/.orca',
+  '/run/orca/sandbox-network',
+  '/run/orca/session-egress',
   OUTPUT_WRITABLE_PATH,
   SKILLS_ROOT,
   '/tmp',

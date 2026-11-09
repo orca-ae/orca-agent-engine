@@ -8,6 +8,15 @@ metadata:
   labels:
     {{- include "orca-managed-agents.labels" . | nindent 4 }}
 data:
+  {{- if .Values.sandboxEgress.enabled }}
+  SANDBOX_EGRESS_ENABLED: "true"
+  SANDBOX_EGRESS_PROXY_URL: {{ .Values.sandboxEgress.proxyUrl | quote }}
+  {{- $bypass := list }}
+  {{- range .Values.sandboxEgress.internalBypass }}
+  {{- $bypass = append $bypass .host }}
+  {{- end }}
+  SANDBOX_EGRESS_INTERNAL_BYPASS: {{ $bypass | toJson | quote }}
+  {{- end }}
   NODE_ENV: {{ $nodeEnv | quote }}
   ALLOW_INSECURE_STATIC_S3_CREDS: {{ $useStaticCredentials | quote }}
   HTTP_PORT: {{ .Values.harness.httpPort | quote }}

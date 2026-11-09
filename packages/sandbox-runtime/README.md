@@ -110,6 +110,42 @@ test/
   unit/                 # vitest unit specs (incl. the read-page/write-policy/chmod safety net)
 ```
 
+## Controlled HTTP egress bootstrap
+
+The owner registers a Sandbox network before acquisition. Trusted image-owned bootstrap
+validates Registry-issued networking with a Pod-bound token, writes one memory-backed
+context and combined CA, and completes before independent package/DSH installers start.
+Installers and main mount that context and the native system CA path read-only. Session
+grants reference the existing network and project only private process capability/markers;
+Session cleanup preserves base networking. Git uses a marker-only helper with
+http.proactiveAuth=basic, preserving canonical remotes. The Local adapter inside that
+managed Pod uses the outer Cilium network boundary while retaining filesystem isolation.
+Managed gem plans are rejected before provisioning because RubyGems 3.6.7 / Ruby 3.3.8
+cannot use HTTPS proxy transport; non-managed gem plans retain their existing behavior.
+
+The provider sets `ORCA_SANDBOX_NETWORK_REQUIRED=1` only for the DSH installer.
+Its clean child allowlist reads the protected network context and admits proxy/CA values;
+it does not forward arbitrary installer process environment or runtime credentials.
+
+These values are generated bootstrap data, not operator overrides:
+
+| Environment field                                   | Value and purpose                                                                       |
+| --------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| `CURL_HOME`                                         | `/run/orca/sandbox-network`, containing curl's proxy CA configuration.                  |
+| `CURL_CA_BUNDLE`, `SSL_CERT_FILE`, `GIT_SSL_CAINFO` | Combined system and managed public trust bundle for upstream TLS.                       |
+| `GIT_PROXY_SSL_CAINFO`                              | Public trust bundle for TLS to the proxy.                                               |
+| `GIT_CONFIG_VALUE_0`, `GIT_CONFIG_VALUE_1`          | Git proxy and upstream CA paths paired with their generated config keys.                |
+| `GH_CONFIG_DIR`                                     | Execution-specific gh configuration directory.                                          |
+| `REQUESTS_CA_BUNDLE`, `PIP_CERT`                    | Combined CA path for Python requests/pip HTTPS verification.                            |
+| `NPM_CONFIG_CAFILE`, `CARGO_HTTP_CAINFO`            | Combined CA path for Node package managers and Cargo origin TLS.                        |
+| `NPM_CONFIG_USERCONFIG`, `NPM_CONFIG_GLOBALCONFIG`  | Empty installer-owned npmrc paths; ambient npm configuration is excluded.               |
+| `ORCA_SANDBOX_NETWORK_REQUIRED`                     | Provider-injected `1` requires the DSH installer to read the protected network context. |
+
+For Local handles without a mapped tool filesystem, these paths are translated into that Session's
+host directory. The internal `ORCA_EGRESS_BOOTSTRAP_` prefix carries aliases in the subprocess
+environment so the wrapper restores proxy variables after SRT setup and removes the aliases.
+Capability values are not interpolated into command arguments or stored in resource checkpoints.
+
 ## Build & test
 
 - `pnpm -F @orca/sandbox-runtime build` — bundle via tsup.

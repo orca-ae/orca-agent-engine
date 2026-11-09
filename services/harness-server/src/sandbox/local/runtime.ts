@@ -506,6 +506,8 @@ export class LocalSandboxRuntime implements SandboxRuntime {
   }
 
   async acquire(env: EnvironmentSpec): Promise<SandboxHandle> {
+    if (env.sandboxNetwork)
+      throw new Error('sandbox egress requires managed OpenSandbox execution');
     void env;
     const id = `sbx_local_${++nextId}_${Date.now().toString(36)}`;
     const layout = await acquireSessionWorkDir({

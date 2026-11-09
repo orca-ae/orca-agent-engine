@@ -160,12 +160,15 @@ RUN apt-get update \
 RUN cc -Os -static -Wall -Werror /tmp/orca-environment-probe.c -o /tmp/orca-environment-probe
 
 FROM node:22-trixie-slim@sha256:517aa41d78545cb1b8c67b13655b4c13ede1ee9df1da8aab54cd7434aefbcaf8 AS runtime
+ARG SANDBOX_GIT_VERSION=1:2.47.3-0+deb13u1
+ARG SANDBOX_CURL_VERSION=8.14.1-2+deb13u7
+ARG SANDBOX_GH_VERSION=2.46.0-3
 COPY --from=bubblewrap-build /tmp/orca-environment-probe /usr/local/libexec/orca-environment-probe
 ARG BUBBLEWRAP_VERSION
 # git: `environment-worker`'s worktree offload and `session-runner`'s repo
 # mounts shell out to real git. ca-certificates: TLS to the LLM gateway.
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends git ca-certificates curl libcap2 socat util-linux ripgrep && \
+    apt-get install -y --no-install-recommends "git=$SANDBOX_GIT_VERSION" ca-certificates "curl=$SANDBOX_CURL_VERSION" "gh=$SANDBOX_GH_VERSION" libcap2 socat util-linux ripgrep && \
     rm -rf /var/lib/apt/lists/*
 COPY --from=bubblewrap-build /tmp/bubblewrap.deb /tmp/bubblewrap.deb
 COPY services/sandbox-harness/orca-gvisor-bwrap /usr/local/bin/orca-gvisor-bwrap
@@ -176,6 +179,7 @@ RUN dpkg -i /tmp/bubblewrap.deb \
     && bwrap --version \
     && test ! -u /usr/lib/orca/bwrap.real \
     && test -z "$(dpkg -V bubblewrap)"
+COPY packages/sandbox-runtime/bootstrap/network.mjs /usr/local/libexec/orca-sandbox-network.mjs
 ENV NODE_ENV=production
 
 # Both binaries at stable paths the caller's worker/runner command settings point

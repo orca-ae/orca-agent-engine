@@ -107,6 +107,10 @@ suite.
 
 - `test-ts.yml` runs `test` (the checks above), `integration` (the integration suites against
   Postgres, Kafka and RustFS) and `coverage`. `coverage` posts a report and doesn't block.
+  The test and integration jobs use Ubuntu 24.04 for the Local/SRT sandbox host baseline.
+  Kind image imports export only the local image platform, including when streaming, so
+  incomplete multi-platform indexes in Docker's containerd image store do not break loading.
+  Imports do not promote unnamed provenance attestations to runnable images.
 - `test-proto.yml` runs `lint-and-breaking`: `buf lint`, and on pull requests `buf breaking`, which
   reports without failing.
 - `test`, `integration` and `lint-and-breaking` are required. The `test-ts.yml` jobs skip, and

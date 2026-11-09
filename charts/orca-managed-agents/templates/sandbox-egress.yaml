@@ -1,0 +1,103 @@
+{{- if .Values.sandboxEgress.enabled }}
+{{- $egress := .Values.sandboxEgress }}
+{{- $spec := include "orca-managed-agents.sandboxEgressSpec" . }}
+{{- $auditRole := printf "%s-%s-sandbox-egress-audit" (include "orca-managed-agents.fullname" .) .Release.Namespace | trunc 63 | trimSuffix "-" }}
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: orca-sandbox-egress
+  namespace: {{ $egress.namespace }}
+spec:
+  {{- $spec | fromJson | toYaml | nindent 2 }}
+---
+# Wire this ConfigMap into the operator-owned OpenSandbox server envFrom.
+# The trusted Registry origin is operator-owned, never request metadata.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: orca-sandbox-egress-provider
+  namespace: {{ $egress.providerServiceAccount.namespace }}
+data:
+  ORCA_SANDBOX_EGRESS_ENABLED: "true"
+  ORCA_SANDBOX_EGRESS_CA_CONFIG_MAP: {{ $egress.caBundleConfigMap | quote }}
+  ORCA_SANDBOX_EGRESS_REGISTRY_URL: {{ printf "http://%s.%s.svc:%v" (include "orca-managed-agents.registryInternalServiceName" .) .Release.Namespace .Values.registry.service.internalPort | quote }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "orca-managed-agents.fullname" . }}-sandbox-egress-authority
+  namespace: {{ $egress.namespace }}
+rules:
+  - apiGroups: ["cilium.io"]
+    resources: ["ciliumnetworkpolicies", "ciliumendpoints"]
+    verbs: ["get", "list"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["list"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: ["sandbox.opensandbox.io"]
+    resources: ["batchsandboxes"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "orca-managed-agents.fullname" . }}-sandbox-egress-authority
+  namespace: {{ $egress.namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "orca-managed-agents.fullname" . }}-sandbox-egress-authority
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "orca-managed-agents.registryServiceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "orca-managed-agents.fullname" . }}-sandbox-egress-owner
+  namespace: {{ .Release.Namespace }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "orca-managed-agents.fullname" . }}-sandbox-egress-owner
+  namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "orca-managed-agents.fullname" . }}-sandbox-egress-owner
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "orca-managed-agents.registryServiceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $auditRole }}
+rules:
+  - apiGroups: ["cilium.io"]
+    resources: ["ciliumclusterwidenetworkpolicies"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $auditRole }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $auditRole }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "orca-managed-agents.registryServiceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

@@ -227,6 +227,20 @@ describe('private immutable DSH profile ingestion', () => {
     expect(sessionLlmEgressMetadataError({ dsh_profile: 'file_legacy' })).toMatch(/reserved/);
   });
 
+  it('admits limited networking only with trusted controlled Sandbox networking', () => {
+    const limited = { target: 'cloud', networking: { type: 'limited' } };
+    expect(() => requireDshProfileEnvironment(limited, true)).not.toThrow();
+    expect(() => requireDshProfileEnvironment(limited)).toThrow(/cloud Environment/);
+    expect(() => requireDshProfileEnvironment(limited, false)).toThrow(/cloud Environment/);
+    for (const environment of [
+      null,
+      { target: 'self_hosted', networking: { type: 'limited' } },
+      { target: 'local', networking: { type: 'unrestricted' } },
+      { target: 'cloud', networking: { type: 'invalid' } },
+    ])
+      expect(() => requireDshProfileEnvironment(environment, true)).toThrow(/cloud Environment/);
+  });
+
   it('checks current Environment networking and named plugin declaration syntax', () => {
     expect(() =>
       requireDshProfileEnvironment({ target: 'cloud', networking: { type: 'unrestricted' } }),

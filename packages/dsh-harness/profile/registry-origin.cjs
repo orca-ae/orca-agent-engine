@@ -14,8 +14,8 @@ function checkOrigin(protocol, input, overrides) {
   const port =
     options.port ||
     options.defaultPort ||
-    options.agent?.defaultPort ||
-    (protocol === 'https:' ? 443 : 80);
+    // A proxy agent's default port describes its transport, not the logical URL origin.
+    ((options.protocol ?? protocol) === 'https:' ? 443 : 80);
   if (
     (options.protocol ?? protocol) !== 'https:' ||
     String(options.hostname ?? options.host ?? 'localhost').toLowerCase() !==

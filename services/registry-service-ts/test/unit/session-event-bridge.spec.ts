@@ -4159,6 +4159,169 @@ it.each([false, true])(
   },
 );
 
+describe('managed egress preparation abort', () => {
+  const snapshot = {
+    provider: 'codex-sdk',
+    model: { provider: 'openai', id: 'gpt-5.4' },
+    system: '',
+    allowed_tool_names: [],
+    allowed_mcp_server_names: [],
+    egress: {
+      mode: 'gateway' as const,
+      gateway: { mcp_base_url: 'http://gateway', session_jwt: 'a.b.c', mcp_servers: {} },
+    },
+  };
+  it.each(['skills', 'snapshot', 'recovery', 'publish'])(
+    'aborts after manifest success and initial %s failure',
+    async (phase) => {
+      const store = new InMemoryTranscriptStore();
+      const registry = new TunnelRegistry();
+      new FakeRunner(registry, RUNNER_ID).connect();
+      if (phase === 'recovery')
+        // eslint-disable-next-line require-yield -- Fail before producing the first replay event.
+        vi.spyOn(store, 'read').mockImplementation(async function* () {
+          throw new Error('recovery unavailable');
+        });
+      const abort = vi.fn(async () => true);
+      const deliver = vi.fn(async () => ({ version: 1 as const, revision: 'a'.repeat(64) }));
+      const manager = new SessionEventBridgeManager({
+        store,
+        registry,
+        resolver: new FakeResolver().bind(RUNNER_ID, WORKSPACE_ID, SESSION_ID),
+        resourcesFactory: async () => ({
+          deliver,
+          commit: async () => {},
+          abortPreparation: abort,
+          publishMounted: async () => {
+            if (phase === 'publish') throw new Error('publication unavailable');
+          },
+        }),
+        skillsProvider: {
+          resolveSkillBundles: async () => {
+            if (phase === 'skills') throw new Error('Skills unavailable');
+            return [];
+          },
+        },
+        skillStore: new InMemorySkillStore(),
+        snapshotProvider: {
+          resolve: async () => {
+            if (phase === 'snapshot') throw new Error('snapshot unavailable');
+            return snapshot;
+          },
+        },
+      });
+      try {
+        await manager.onRunnerConnect(RUNNER_ID);
+        expect(deliver).toHaveBeenCalledOnce();
+        expect(abort).toHaveBeenCalledOnce();
+        expect(registry.has(RUNNER_ID)).toBe(false);
+        expect(manager.size).toBe(0);
+      } finally {
+        await manager.stopAll();
+      }
+    },
+  );
+  it.each(['skills', 'snapshot', 'publish'])(
+    'aborts turn preparation after later %s failure',
+    async (phase) => {
+      const store = new InMemoryTranscriptStore();
+      const registry = new TunnelRegistry();
+      const runner = new FakeRunner(registry, RUNNER_ID);
+      runner.connect();
+      let skills = 0,
+        snapshots = 0,
+        publications = 0;
+      const abort = vi.fn(async () => true);
+      const manager = new SessionEventBridgeManager({
+        store,
+        registry,
+        recoverOnConnect: false,
+        resolver: new FakeResolver().bind(RUNNER_ID, WORKSPACE_ID, SESSION_ID),
+        resourcesFactory: async () => ({
+          deliver: async () => ({ version: 1 as const, revision: 'a'.repeat(64) }),
+          commit: async () => {},
+          abortPreparation: abort,
+          publishMounted: async () => {
+            if (++publications > 1 && phase === 'publish')
+              throw new Error('publication unavailable');
+          },
+        }),
+        skillsProvider: {
+          resolveSkillBundles: async () => {
+            if (++skills > 1 && phase === 'skills') throw new Error('Skills unavailable');
+            return [];
+          },
+        },
+        skillStore: new InMemorySkillStore(),
+        snapshotProvider: {
+          resolve: async () => {
+            if (++snapshots > 1 && phase === 'snapshot') throw new Error('snapshot unavailable');
+            return snapshot;
+          },
+        },
+      });
+      try {
+        await manager.onRunnerConnect(RUNNER_ID);
+        expect(abort).not.toHaveBeenCalled();
+        await appendUserMessage(store, 'preparation must fail');
+        await waitFor(() => abort.mock.calls.length > 0);
+        await waitFor(() => !registry.has(RUNNER_ID));
+        expect(runner.turns).toEqual([]);
+      } finally {
+        await manager.stopAll();
+      }
+    },
+  );
+  it('does not tear down a replacement tunnel while stale abort cleanup drains', async () => {
+    const store = new InMemoryTranscriptStore();
+    const registry = new TunnelRegistry();
+    new FakeRunner(registry, RUNNER_ID).connect();
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const abort = vi.fn(async () => {
+      await held;
+      return true;
+    });
+    let skills = 0;
+    const manager = new SessionEventBridgeManager({
+      store,
+      registry,
+      recoverOnConnect: false,
+      resolver: new FakeResolver().bind(RUNNER_ID, WORKSPACE_ID, SESSION_ID),
+      resourcesFactory: async () => ({
+        deliver: async () => ({ version: 1 as const, revision: 'a'.repeat(64) }),
+        commit: async () => {},
+        abortPreparation: abort,
+      }),
+      skillsProvider: {
+        resolveSkillBundles: async () => {
+          if (++skills === 1) throw new Error('old preparation failed');
+          return [];
+        },
+      },
+      skillStore: new InMemorySkillStore(),
+      snapshotProvider: { resolve: async () => snapshot },
+    });
+    const first = manager.onRunnerConnect(RUNNER_ID);
+    await waitFor(() => abort.mock.calls.length > 0);
+    new FakeRunner(registry, RUNNER_ID).connect();
+    const replacement = registry.get(RUNNER_ID);
+    const next = manager.onRunnerConnect(RUNNER_ID);
+    release();
+    try {
+      await Promise.all([first, next]);
+      expect(registry.get(RUNNER_ID)).toBe(replacement);
+      expect(manager.size).toBe(1);
+      expect(abort).toHaveBeenCalledOnce();
+    } finally {
+      release();
+      await manager.stopAll();
+    }
+  });
+});
+
 it.each([false, true])(
   'drains initial mount publication across rapid reconnects (append fails=%s)',
   async (fail) => {

@@ -34,11 +34,22 @@ here. `harness-server` keeps its own copies of the runtimes (see
   formatter from [`../skills.md`](../skills.md). Catalog entries carry the pinned
   package digest so native history fingerprints also bind the Skill version.
 - OpenSandbox runtimes advertise `capabilities.supportsDshProfiles`. The shared
-  `prepareDshProfilePlan` validates the retained descriptor and unrestricted Environment
+  `prepareDshProfilePlan` validates the retained descriptor and unrestricted or managed Environment
   networking; `buildDshProfileProbeCommand` verifies the actual configuration revision and
   read-only configuration/module subPath mounts. A profile volume is separate from the
   Environment package rootfs. Lifecycle polling covers either init path without enabling
   package filesystem policy for a DSH-only sandbox.
+
+- Managed OpenSandbox acquisition carries a strict `SandboxNetworkRequest` in
+  `EnvironmentSpec.sandboxNetwork`. The provider completes its trusted Pod-bound
+  network bootstrap before package or DSH installers. The single memory-backed
+  `/run/orca/sandbox-network/context.json` and combined CA are mounted read-only
+  into installers and main. `SessionEgressGrant` references this network parent;
+  `prepareSessionEgress` validates that reference and projects only process-local
+  capability, marker and Git settings. Clearing the grant preserves base networking.
+  Unsupported acquisition backends reject managed network requests. Managed gem plans
+  are rejected because RubyGems 3.6.7 / Ruby 3.3.8 cannot use HTTPS proxy transport;
+  non-managed gem plans are unchanged.
 
 ## Implementations
 

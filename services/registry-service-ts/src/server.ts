@@ -42,6 +42,8 @@ import { registerOutcomesRoutes } from './api/outcomes.routes.js';
 import { registerFilesRoutes } from './api/files.routes.js';
 import { registerMemoryStoresRoutes } from './api/memory-stores.routes.js';
 import { registerGitCredsRoutes } from './api/git-creds.routes.js';
+import { registerSandboxEgressRoutes } from './api/sandbox-egress.routes.js';
+import type { SandboxEgressService } from './domain/sandbox-egress.js';
 import { registerGitProxyRoutes } from './api/git-proxy.routes.js';
 import { registerAdminRoutes } from './api/admin.routes.js';
 import { registerPlatformRoutes } from './api/platform.routes.js';
@@ -165,6 +167,7 @@ export interface SseConfig {
 }
 
 export interface BuildAppOptions {
+  sandboxEgress?: SandboxEgressService;
   guardrails?: import('./domain/guardrail-rollout.js').GuardrailRouteOptions;
   dshApprovedProfiles?: DshApprovedProfiles;
   db: DbClient;
@@ -808,7 +811,7 @@ function buildSurfaceApp(
     // connected, or a cloud session harness-server runs) is recorded PENDING with
     // no runner, so the wiring is uniform across deployments.
     const sessionDistributor = new SessionDistributor({
-      sessions: buildDistributionSessionStore(opts.db),
+      sessions: buildDistributionSessionStore(opts.db, opts.sandboxEgress),
       environments: buildEnvironmentTargetLookup(opts.db),
       tunnelRegistry,
       workerRegistry,
@@ -853,6 +856,7 @@ function buildSurfaceApp(
       registry: tunnelRegistry,
       resolver: buildBoundSessionResolver(opts.db),
       resourcesFactory: buildRunnerResourcesFactory({
+        ...(opts.sandboxEgress ? { sandboxEgress: opts.sandboxEgress } : {}),
         db: opts.db,
         ...(opts.agentSnapshotProvider ? { snapshotProvider: opts.agentSnapshotProvider } : {}),
         jwtMinter: opts.jwtMinter,
@@ -987,6 +991,7 @@ function buildSurfaceApp(
       opts.secretStore,
       opts.batchReadsEnabled,
       opts.dshApprovedProfiles,
+      !!opts.sandboxEgress,
     );
     registerVaultsRoutes(app, opts.db, opts.secretStore);
     registerVaultCredentialRoutes(app, opts.db, {
@@ -1075,7 +1080,7 @@ function buildSurfaceApp(
         ? buildOnWorkerDisconnect({
             lifecycle: opts.environmentLaunchLifecycle,
             environments: buildEnvironmentTargetLookup(opts.db),
-            sessions: buildDistributionSessionStore(opts.db),
+            sessions: buildDistributionSessionStore(opts.db, opts.sandboxEgress),
             workerOnline: workerRegistry,
           })
         : undefined;
@@ -1155,6 +1160,7 @@ function buildSurfaceApp(
         onRunnerDisconnect,
       });
       registerWorkerTunnelRoutes(tunnelScope, {
+        ...(opts.sandboxEgress ? { sandboxEgress: opts.sandboxEgress } : {}),
         registry: workerRegistry,
         environments: buildEnvironmentKeyLoader(opts.db),
         tokens: new EnvironmentTokenStore(opts.db),
@@ -1200,7 +1206,7 @@ function buildSurfaceApp(
     });
   } else {
     if (!internalAuthVerifier) throw new Error('internal auth verifier is required');
-    app.addHook('preHandler', buildInternalAuth(internalAuthVerifier));
+    app.addHook('preHandler', buildInternalAuth(internalAuthVerifier, !!opts.sandboxEgress));
 
     app.get('/healthz', async () => ({ status: 'ok', service: SERVICE_NAME }));
     app.get('/readyz', async () => ({ status: 'ready', service: SERVICE_NAME }));
@@ -1213,6 +1219,7 @@ function buildSurfaceApp(
   }
 
   if (surface !== 'public') {
+    if (opts.sandboxEgress) registerSandboxEgressRoutes(app, opts.sandboxEgress);
     registerInternalRoutes(
       app,
       opts.db,
@@ -1242,6 +1249,7 @@ function buildSurfaceApp(
         },
         ...(opts.guardrails ? { guardrails: opts.guardrails } : {}),
         ...(opts.dshApprovedProfiles ? { dshApprovedProfiles: opts.dshApprovedProfiles } : {}),
+        sandboxNetworkEnabled: !!opts.sandboxEgress,
         ...(opts.llmJwtTtlSecs !== undefined ? { llmJwtTtlSecs: opts.llmJwtTtlSecs } : {}),
         ...(opts.environmentClaimTtlMs !== undefined
           ? { environmentClaimTtlMs: opts.environmentClaimTtlMs }

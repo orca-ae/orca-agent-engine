@@ -1228,6 +1228,7 @@ export const environments = pgTable(
     // fresh mint on relaunch overwrites it in place (atomically revoking the
     // previous generation's token). NULL when no token is armed.
     environmentTokenDigest: text('environment_token_digest'),
+    cloudSandboxHandleId: text('cloud_sandbox_handle_id'),
     environmentTokenExpiresAt: timestamp('environment_token_expires_at', { withTimezone: true }),
     // How the environment reaches the network: 'gateway' (egress via the
     // ai-gateway) or 'sidecar'. NULL falls back to the deployment default.
@@ -1375,6 +1376,7 @@ export const sessions = pgTable(
     // the runner-tunnel route reproduce. NULL until the session is dispatched to
     // a connected worker (or for cloud sessions, which never distribute here).
     runnerId: text('runner_id'),
+    runnerLaunchAuthority: jsonb('runner_launch_authority'),
     // The environment whose connected worker was dispatched the launch frame.
     // NULL when no worker was connected at dispatch time (the session stays
     // pending until a worker reconnects). Distinct from `environmentId`, which is
@@ -1431,6 +1433,59 @@ export const sessions = pgTable(
       columns: [t.workspaceId, t.environmentId],
       foreignColumns: [environments.workspaceId, environments.id],
     }).onDelete('restrict'),
+  ],
+);
+
+// One current network generation per trusted provisioning owner.
+export const sandboxNetworkBindings = pgTable(
+  'sandbox_network_bindings',
+  {
+    id: text('id').primaryKey(),
+    workspaceId: text('workspace_id')
+      .notNull()
+      .references(() => workspaces.id),
+    environmentId: text('environment_id')
+      .notNull()
+      .references(() => environments.id),
+    ownerSubject: text('owner_subject').notNull(),
+    owner: jsonb('owner').notNull(),
+    generation: text('generation').notNull(),
+    capabilityDigest: text('capability_digest'),
+    workload: jsonb('workload'),
+    pod: jsonb('pod'),
+    revokedAt: timestamp('revoked_at', { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex('sandbox_network_capability_digest_idx').on(t.capabilityDigest),
+    uniqueIndex('sandbox_network_current_owner_idx')
+      .on(t.ownerSubject)
+      .where(sql`${t.revokedAt} is null`),
+  ],
+);
+
+// Session credential grants retain revoked history; live grants require a network parent.
+export const sandboxEgressBindings = pgTable(
+  'sandbox_egress_bindings',
+  {
+    id: text('id').primaryKey(),
+    networkBindingId: text('network_binding_id').references(() => sandboxNetworkBindings.id),
+    sessionId: text('session_id')
+      .notNull()
+      .references(() => sessions.id, { onDelete: 'cascade' }),
+    executionGeneration: text('execution_generation').notNull(),
+    capabilityDigest: text('capability_digest').notNull(),
+    revokedAt: timestamp('revoked_at', { withTimezone: true }),
+    credentials: jsonb('credentials').notNull(),
+  },
+  (t) => [
+    uniqueIndex('sandbox_egress_capability_digest_idx').on(t.capabilityDigest),
+    check(
+      'sandbox_egress_live_parent_check',
+      sql`${t.revokedAt} is not null or ${t.networkBindingId} is not null`,
+    ),
+    uniqueIndex('sandbox_egress_current_session_idx')
+      .on(t.sessionId)
+      .where(sql`${t.revokedAt} is null`),
   ],
 );
 

@@ -19,6 +19,7 @@ export interface KubernetesTokenReviewResult {
   authenticated: boolean;
   username?: string;
   audiences?: string[];
+  extra?: Record<string, string[]>;
 }
 
 export type KubernetesTokenReviewer = (
@@ -134,6 +135,7 @@ export function kubernetesTokenReviewerFromApi(
       authenticated: result.body.status?.authenticated === true,
       ...(result.body.status?.user?.username ? { username: result.body.status.user.username } : {}),
       ...(result.body.status?.audiences ? { audiences: result.body.status.audiences } : {}),
+      ...(result.body.status?.user?.extra ? { extra: result.body.status.user.extra } : {}),
     };
   };
 }
@@ -186,10 +188,17 @@ export function buildConfiguredInternalAuthVerifier(options: {
   });
 }
 
-export function buildInternalAuth(verifier: InternalAuthVerifier) {
+export function buildInternalAuth(verifier: InternalAuthVerifier, sandboxBootstrap = false) {
   return async function internalAuth(req: FastifyRequest, reply: FastifyReply): Promise<void> {
     const path = req.url.split('?')[0] ?? '';
     if (path === '/healthz' || path === '/readyz' || path === '/metrics') return;
+    // This single route authenticates its Pod-bound token in the network service.
+    if (
+      sandboxBootstrap &&
+      req.method === 'POST' &&
+      /^\/internal\/v1\/sandbox-networks\/[^/]+\/bootstrap$/.test(path)
+    )
+      return;
 
     const token = bearerToken(req.headers.authorization);
     if (!token) {
@@ -240,6 +249,21 @@ interface InternalRouteCapabilityRule {
 }
 
 const INTERNAL_ROUTE_CAPABILITY_RULES: readonly InternalRouteCapabilityRule[] = [
+  {
+    callers: ['ai-gateway'],
+    matches: (path, method) =>
+      method === 'POST' &&
+      (path === '/internal/v1/sandbox-egress/authorize' ||
+        path === '/internal/v1/sandbox-egress/resolve'),
+  },
+  {
+    callers: ['harness'],
+    matches: (path, method) =>
+      method === 'POST' &&
+      /^\/internal\/v1\/workspaces\/[^/]+\/sessions\/[^/]+\/(?:session-egress\/(?:issue|revoke)|sandbox-networks(?:\/revoke)?)$/.test(
+        path,
+      ),
+  },
   {
     callers: ['ai-gateway'],
     matches: (path, method) =>

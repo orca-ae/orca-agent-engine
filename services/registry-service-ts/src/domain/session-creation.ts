@@ -40,6 +40,8 @@ type GitCredentialInsert = typeof gitCredentials.$inferInsert;
 type SessionObservabilityBindingInsert = typeof sessionObservabilityBindings.$inferInsert;
 
 export interface CreateSessionInTransactionInput {
+  /** Trusted deployment configuration, never Session metadata. */
+  sandboxNetworkEnabled?: boolean;
   dshApprovedProfiles?: DshApprovedProfiles;
   id: string;
   workspaceId: string;
@@ -199,7 +201,7 @@ export async function createSessionInTransaction(
     const profile = retainedDshProfile(agent.snapshot as Record<string, unknown>);
     if (profile) {
       requireDshProfileApproval(input.dshApprovedProfiles ?? {}, input.workspaceId, profile);
-      requireDshProfileEnvironment(environment);
+      requireDshProfileEnvironment(environment, input.sandboxNetworkEnabled);
     }
   } catch (error) {
     return {

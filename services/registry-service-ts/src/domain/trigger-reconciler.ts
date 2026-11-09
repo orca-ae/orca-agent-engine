@@ -187,7 +187,12 @@ export async function reconcileDueAgentTriggers(
 
 export async function dispatchPendingAgentTriggerFires(
   db: DbClient,
-  options: { now?: Date; batchSize?: number; dshApprovedProfiles?: DshApprovedProfiles } = {},
+  options: {
+    now?: Date;
+    batchSize?: number;
+    dshApprovedProfiles?: DshApprovedProfiles;
+    sandboxNetworkEnabled?: boolean;
+  } = {},
 ): Promise<TriggerDispatcherResult> {
   const now = options.now ?? new Date();
   const result: TriggerDispatcherResult = {
@@ -273,6 +278,7 @@ export async function dispatchPendingAgentTriggerFires(
 
       try {
         const creation = await createSessionInTransaction(tx, {
+          sandboxNetworkEnabled: options.sandboxNetworkEnabled ?? false,
           ...(options.dshApprovedProfiles
             ? { dshApprovedProfiles: options.dshApprovedProfiles }
             : {}),

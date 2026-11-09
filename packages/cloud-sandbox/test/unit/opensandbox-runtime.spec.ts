@@ -234,6 +234,39 @@ describe('buildOpenSandboxEndpointUrl', () => {
 });
 
 describe('OpenSandboxRuntime.acquire hardening', () => {
+  it('requires enforced lifecycle readiness and applies bootstrap to noninteractive exec', async () => {
+    const calls = mockOpenSandboxFetch([commandStream({ exitCode: 0 })], undefined, {
+      lifecycleStatus: { state: 'Running' },
+    });
+    const handle = await newTestRuntime().acquire({
+      sandboxNetwork: { binding_id: 'network', generation: 'one' },
+    });
+    expect(calls.find((call) => call.method === 'POST')?.body).toContain('orca.sandbox.network');
+    expect(
+      calls.some((call) => call.method === 'GET' && call.url.endsWith('/sandboxes/sb_test')),
+    ).toBe(true);
+    await handle.configureSessionEgress!({
+      HTTPS_PROXY: 'https://orca:placeholder@proxy.example:8443',
+    });
+    await handle.run({
+      tool: 'bash',
+      args: { command: 'git ls-remote https://github.com/owner/repo.git' },
+    });
+    const request = calls.find((call) => call.url.endsWith('/command'));
+    expect(JSON.parse(request!.body!).envs.HTTPS_PROXY).toBe(
+      'https://orca:placeholder@proxy.example:8443',
+    );
+    expect(JSON.parse(request!.body!).command).not.toContain('placeholder');
+  });
+
+  it('destroys a controlled sandbox when policy enforcement fails', async () => {
+    const calls = mockOpenSandboxFetch([], undefined, { lifecycleStatus: { state: 'Failed' } });
+    await expect(
+      newTestRuntime().acquire({ sandboxNetwork: { binding_id: 'network', generation: 'one' } }),
+    ).rejects.toThrow('preparation failed');
+    expect(calls.some((call) => call.method === 'DELETE')).toBe(true);
+    expect(calls.some((call) => call.url.endsWith('/command'))).toBe(false);
+  });
   it('prepares a DSH-only write policy without a package rootfs', async () => {
     const calls = mockOpenSandboxFetch([
       commandStream({ exitCode: 0 }),
@@ -759,6 +792,15 @@ function mockOpenSandboxFetch(
       if (next instanceof Error) throw next;
       return next ?? commandStream({ exitCode: 0 });
     }
+    if (method === 'GET' && url.includes('/files/download'))
+      return jsonResponse({
+        binding_id: 'network',
+        generation: 'one',
+        proxy_url: 'https://proxy.example:8443',
+        proxy_capability: 'base-capability',
+        ca_bundle_path: '/run/orca/sandbox-network/ca-bundle.crt',
+        internal_bypass: [],
+      });
     if (method === 'POST' && url === 'http://execd.test:44772/files/upload') {
       return new Response('', { status: 200 });
     }

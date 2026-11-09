@@ -18,7 +18,9 @@
 // on PATH so the unit run stays green on a box without tmux (CI installs it).
 
 import { execFileSync } from 'node:child_process';
-import { describe, it, expect } from 'vitest';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+import { describe, it, expect, vi } from 'vitest';
 import { TmuxSandboxRuntime, type SandboxHandle } from '../../src/sandbox/tmux-sandbox.js';
 
 /** True when a usable `tmux` binary is on PATH (the suite self-skips otherwise). */
@@ -154,14 +156,43 @@ describeTmux('TmuxSandboxHandle — SandboxHandle over a socket-scoped tmux sess
         proc.stdout.on('end', () => resolve());
       });
       proc.kill('SIGKILL');
+      proc.kill('SIGKILL');
       await Promise.race([
-        ended,
+        Promise.all([ended, proc.exited]),
         new Promise<void>((_, reject) =>
           setTimeout(() => reject(new Error('stdout did not end after kill()')), 8000),
         ),
       ]);
     });
   }, 15_000);
+
+  it('destroys stdout even when waking its pending open fails', async () => {
+    await withSandbox(async (sandbox) => {
+      const proc = await sandbox.spawn!('sleep 30');
+      const stdout = proc.stdout as fs.ReadStream;
+      // Force the cancellation error path independently of tee startup timing.
+      Object.defineProperty(stdout, 'pending', { configurable: true, get: () => true });
+      const open = vi.spyOn(fs, 'openSync').mockImplementationOnce(() => {
+        throw Object.assign(new Error('fd limit'), { code: 'EMFILE' });
+      });
+      syncBuiltinESMExports();
+      try {
+        expect(() => proc.kill()).toThrow('fd limit');
+        expect(stdout.destroyed).toBe(true);
+      } finally {
+        open.mockRestore();
+        syncBuiltinESMExports();
+        Reflect.deleteProperty(stdout, 'pending');
+        // Release a genuinely pending open after removing the injected failure.
+        if (stdout.pending && !stdout.closed) {
+          const wake = fs.openSync(stdout.path, fs.constants.O_RDWR | fs.constants.O_NONBLOCK);
+          stdout.once('close', () => fs.closeSync(wake));
+        }
+        stdout.destroy();
+        await proc.exited;
+      }
+    });
+  });
 
   it('stdin end() delivers a real EOF: a read-to-EOF child terminates on its own', async () => {
     await withSandbox(async (sandbox) => {

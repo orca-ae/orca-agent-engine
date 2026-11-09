@@ -367,6 +367,8 @@ send literal text and key chords, read the rendered pane plus scrollback, list
 the live panes, close one. They are backed by `TerminalHost`, a capability a
 `SandboxHandle` may expose — the tmux-backed handle does, a cloud-only handle
 need not, so callers feature-detect it.
+The tmux-backed process transport closes its stdout FIFO on kill even if the pane
+has not opened the writer yet; cancellation also completes the process exit promise.
 
 `src/tunnel/terminal-attach.ts` bridges a live pane's pty to a tunneled WS
 channel opened on `/v1/runner/terminal/attach/<terminalId>`: raw pane bytes out

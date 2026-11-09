@@ -11,9 +11,10 @@ import {
 export function prepareDshProfilePlan(
   value: DshProfileDescriptor | undefined,
   networking?: Record<string, unknown>,
+  managedNetwork = false,
 ): DshProfileDescriptor | undefined {
   if (value === undefined) return undefined;
-  if (networking?.type !== undefined && networking.type !== 'unrestricted')
+  if (!managedNetwork && networking?.type !== undefined && networking.type !== 'unrestricted')
     throw new Error('DSH profile preparation requires unrestricted Environment networking');
   return parseDshProfileDescriptor(value);
 }

@@ -28,6 +28,15 @@ while [ ! -e "$ready_path" ]; do
   sleep 0.1
 done
 
+# The trusted owner publishes this only after enforcement readiness and binding issuance.
+if [ "${ORCA_SANDBOX_EGRESS_REQUIRED:-}" = "1" ]; then
+  bootstrap=/run/orca/session-egress/bootstrap.sh
+  test -f "$bootstrap" && test ! -L "$bootstrap"
+  . "$bootstrap"
+  rm -f -- "$bootstrap"
+  unset ORCA_GIT_CREDS_URL ORCA_GIT_CREDS_TOKEN
+fi
+
 policy_file="$(mktemp)"
 trap 'rm -f "$policy_file"' EXIT
 node - <<'NODE' >"$policy_file"

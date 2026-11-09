@@ -1,7 +1,14 @@
 // Copyright The Orca Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { runCancellableOpenSandboxCommand, type SandboxCallOptions } from '@orca/sandbox-runtime';
+import {
+  runCancellableOpenSandboxCommand,
+  type SandboxCallOptions,
+  buildSandboxNetworkEnvironment,
+  parseSandboxNetworkContext,
+  SANDBOX_NETWORK_TIMEOUT_MS,
+  SANDBOX_NETWORK_CONTEXT_PATH,
+} from '@orca/sandbox-runtime';
 import { DSH_PROFILE_TIMEOUT_MS } from '@orca/harness-catalog';
 
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -140,6 +147,7 @@ export class OpenSandboxRuntime implements SandboxRuntime {
       runtime: this,
       environmentPackages: packagePlan !== undefined,
       hasInitPreparation: packagePlan !== undefined || dshProfilePlan !== undefined,
+      sandboxEgress: env.sandboxNetwork !== undefined,
       execdAccessToken,
       ...(env.fileUploadOwnership ? { fileUploadOwnership: env.fileUploadOwnership } : {}),
     });
@@ -148,9 +156,20 @@ export class OpenSandboxRuntime implements SandboxRuntime {
         packagePlan || dshProfilePlan
           ? (packagePlan ? ENVIRONMENT_PACKAGE_TIMEOUT_MS : 0) +
               (dshProfilePlan ? DSH_PROFILE_TIMEOUT_MS : 0) +
-              READY_TIMEOUT_MS
-          : READY_TIMEOUT_MS,
+              READY_TIMEOUT_MS +
+              (env.sandboxNetwork ? SANDBOX_NETWORK_TIMEOUT_MS : 0)
+          : READY_TIMEOUT_MS + (env.sandboxNetwork ? SANDBOX_NETWORK_TIMEOUT_MS : 0),
       );
+      if (env.sandboxNetwork) {
+        const context = parseSandboxNetworkContext(
+          JSON.parse((await handle.files.read(SANDBOX_NETWORK_CONTEXT_PATH)).toString('utf8')),
+        );
+        if (
+          context.binding_id !== env.sandboxNetwork.binding_id ||
+          context.generation !== env.sandboxNetwork.generation
+        )
+          throw new Error('OpenSandbox network context does not match requested generation');
+      }
       await handle.verifyExecdAuthentication();
       await handle.verifyFusePrerequisites();
       if (packagePlan) await handle.prepareEnvironmentPackages(packagePlan.packages);
@@ -253,6 +272,13 @@ export function buildOpenSandboxAcquireBody(
 }
 
 class OpenSandboxHandle implements SandboxHandle {
+  private sandboxEgressEnvironment: Record<string, string> = {};
+
+  async configureSessionEgress(env: Record<string, string>): Promise<void> {
+    if (!this.opts.sandboxEgress)
+      throw new Error('sandbox egress was not requested at acquisition');
+    this.sandboxEgressEnvironment = { ...env };
+  }
   readonly files: SandboxFiles;
   private destroyed = false;
   private execdBaseUrl = '';
@@ -265,6 +291,7 @@ class OpenSandboxHandle implements SandboxHandle {
       runtime: OpenSandboxRuntime;
       environmentPackages: boolean;
       hasInitPreparation: boolean;
+      sandboxEgress: boolean;
       execdAccessToken: string;
       fileUploadOwnership?: { owner: string; group: string };
     },
@@ -280,7 +307,7 @@ class OpenSandboxHandle implements SandboxHandle {
     await waitUntilOpenSandboxReady({
       id: this.id,
       timeoutMs,
-      ...(this.opts.hasInitPreparation
+      ...(this.opts.hasInitPreparation || this.opts.sandboxEgress
         ? {
             getLifecycle: () =>
               this.opts.runtime.requestJson(`/sandboxes/${encodeURIComponent(this.id)}`),
@@ -522,7 +549,16 @@ class OpenSandboxHandle implements SandboxHandle {
       background: false,
     };
     if (opts.timeoutMs !== undefined) body['timeout'] = Math.round(opts.timeoutMs);
-    if (opts.envs !== undefined) body['envs'] = opts.envs;
+    if (opts.envs !== undefined || this.opts.sandboxEgress) {
+      const base = this.opts.sandboxEgress
+        ? buildSandboxNetworkEnvironment(
+            parseSandboxNetworkContext(
+              JSON.parse((await this.files.read(SANDBOX_NETWORK_CONTEXT_PATH)).toString('utf8')),
+            ),
+          )
+        : {};
+      body['envs'] = { ...base, ...this.sandboxEgressEnvironment, ...opts.envs };
+    }
 
     const commandSequence = ++this.commandSequence;
     const startedAt = new Date().toISOString();

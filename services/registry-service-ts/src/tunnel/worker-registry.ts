@@ -67,6 +67,8 @@ export class WorkerConnectionReplacedError extends Error {
  * `workerId`, the live `hello`, and the `connectedAt` timestamp.
  */
 export interface WorkerConnection extends WorkerConnectionSeam {
+  /** Fixed by the authenticated route; never read from hello. */
+  readonly launchAuthority?: import('../domain/runner-launch-authority.js').WorkerLaunchAuthority;
   /** Stable worker identifier — the environment id from the tunnel path, e.g. `"env_a1b2..."`. */
   readonly workerId: string;
   /** The hello frame the worker sent on connect (version / name / runners / readiness). */
@@ -107,11 +109,15 @@ export class WorkerRegistry implements WorkerRegistrySeam {
     workerId: string,
     ws: WorkerWebSocket,
     hello: WorkerHelloFrame,
-    opts: { owner?: string } = {},
+    opts: {
+      owner?: string;
+      launchAuthority?: import('../domain/runner-launch-authority.js').WorkerLaunchAuthority;
+    } = {},
   ): WorkerConnection {
     void ws; // The route owns the socket lifecycle; the registry holds no ref.
     const now = Date.now();
     const conn: WorkerConnection = {
+      ...(opts.launchAuthority ? { launchAuthority: structuredClone(opts.launchAuthority) } : {}),
       workerId,
       hello,
       owner: opts.owner,
