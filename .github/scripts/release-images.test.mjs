@@ -29,6 +29,8 @@ test('release validation prepares Local sandbox probes before running unit tests
   const tsWorkflow = yaml.load(
     readFileSync(new URL('../workflows/test-ts.yml', import.meta.url), 'utf8'),
   );
+  assert.equal(jobs.validate['runs-on'], 'ubuntu-24.04');
+  assert.equal(jobs.validate['runs-on'], tsWorkflow.jobs.test['runs-on']);
   const prerequisites = tsWorkflow.jobs.test.steps.find(
     (step) => step.name === 'Install Local sandbox probe prerequisites',
   );
