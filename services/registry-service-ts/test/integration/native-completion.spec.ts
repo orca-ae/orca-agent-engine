@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { beforeAll, afterAll, expect, it, vi } from 'vitest';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import {
   NATIVE_USAGE_SOURCE,
   OUTPUT_RESOURCE_ID,
@@ -30,6 +30,7 @@ import {
   STUB_SSE_CONFIG,
   buildTestJwtMinter,
   buildStubFileStore,
+  buildTestPostgresStore,
 } from './setup.js';
 import { buildCombinedTestApp } from '../../src/server.js';
 import { createTestApiKey, uniqueWorkspace } from './fixtures.js';
@@ -102,13 +103,17 @@ function replayEvents(count: number, bytes = 1024) {
 }
 
 let db: Awaited<ReturnType<typeof getTestDb>>['db'];
+let postgresStore: Awaited<ReturnType<typeof buildTestPostgresStore>>['store'];
+let apiKey: string;
 const workspaceId = uniqueWorkspace('native_completion');
 beforeAll(async () => {
   ({ db } = await getTestDb());
-  await createTestApiKey(db, workspaceId);
+  ({ store: postgresStore } = await buildTestPostgresStore());
+  apiKey = await createTestApiKey(db, workspaceId);
 });
 afterAll(async () => {
   await rawCodec.close();
+  await postgresStore?.close();
   await closeTestDb();
 });
 
@@ -252,6 +257,295 @@ async function fixture(begin = true, claim = true) {
     },
   };
 }
+
+// Public Session-state and durable completion acceptance.
+async function publicStateFixture() {
+  const f = await fixture(false);
+  const coordinator = f.replace({ store: postgresStore });
+  await coordinator.claim(f.binding);
+  const app = buildCombinedTestApp({
+    db,
+    oidc: { allowedIssuers: [], audience: 'orca-agent-engine' },
+    store: postgresStore,
+    sse: STUB_SSE_CONFIG,
+    jwtMinter: buildTestJwtMinter(),
+    fileStore: buildStubFileStore(),
+  });
+  await app.ready();
+  const submit = () =>
+    app.inject({
+      method: 'POST',
+      url: `/v1/sessions/${f.sessionId}/events`,
+      headers: { 'x-api-key': apiKey },
+      payload: { events: [{ type: 'user.message', content: [{ type: 'text', text: 'turn' }] }] },
+    });
+  const get = async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: `/v1/sessions/${f.sessionId}`,
+      headers: { 'x-api-key': apiKey },
+    });
+    expect(response.statusCode).toBe(200);
+    return response.json() as { status: string };
+  };
+  const inputs = async () => {
+    const events: Event[] = [];
+    for await (const event of postgresStore.read(workspaceId, f.sessionId, {
+      fromCursor: '',
+      maxEvents: 0,
+      subpath: '',
+    })) {
+      if (event.kind === 'user.message') events.push(event);
+    }
+    return events;
+  };
+  const complete = async (event: Event, outcome: 'success' | 'interrupted' = 'success') => {
+    await coordinator.begin(event, f.binding);
+    const checkpoint = structuredClone(f.checkpoint);
+    checkpoint.completion!.turn_id = event.id;
+    checkpoint.completion!.outcome = outcome;
+    await coordinator.prepare(checkpoint, resourceCheckpointDigest(checkpoint));
+    const ack = vi.fn(async () => {});
+    await coordinator.finish(event.id, f.binding.revision, ack);
+    expect(ack.mock.calls).toEqual([['prepared'], ['completed']]);
+  };
+  return { ...f, coordinator, app, submit, get, inputs, complete };
+}
+
+it('public submission becomes idle with active time at durable native completion', async () => {
+  const f = await publicStateFixture();
+  try {
+    expect((await f.submit()).statusCode).toBe(200);
+    expect((await f.get()).status).toBe('running');
+    const activeSince = new Date(Date.now() - 5000);
+    await db
+      .update(sessions)
+      .set({ lastActiveAt: activeSince })
+      .where(eq(sessions.id, f.sessionId));
+    await f.complete((await f.inputs())[0]!);
+    expect(await f.coordinator.pending()).toEqual([]);
+    expect((await f.session()).usageInputTokens).toBe(30);
+    expect((await f.get()).status).toBe('idle');
+    expect((await f.session()).activeSeconds).toBeGreaterThanOrEqual(5);
+  } finally {
+    await f.app.close();
+  }
+});
+
+it.each(['metadata', 'receipt'] as const)(
+  '%s write failure rolls back completion and recovers the prepared receipt',
+  async (failure) => {
+    const f = await fixture();
+    await db
+      .update(sessions)
+      .set({ status: 'running', lastActiveAt: new Date(Date.now() - 5000) })
+      .where(eq(sessions.id, f.sessionId));
+    await f.coordinator.prepare(f.checkpoint, resourceCheckpointDigest(f.checkpoint));
+    const before = await f.session();
+    const table = failure === 'metadata' ? 'sessions' : 'session_native_completions';
+    const idColumn = failure === 'metadata' ? 'id' : 'session_id';
+    const forbidden = failure === 'metadata' ? "status = 'idle'" : "phase = 'completed'";
+    await db.execute(
+      sql.raw(
+        'ALTER TABLE ' +
+          table +
+          ' ADD CONSTRAINT native_completion_fault CHECK (NOT (' +
+          idColumn +
+          " = '" +
+          f.sessionId +
+          "' AND " +
+          forbidden +
+          ')) NOT VALID',
+      ),
+    );
+    const ack = vi.fn(async (_phase: 'prepared' | 'completed') => {});
+    try {
+      await expect(f.coordinator.finish(f.event.id, f.binding.revision, ack)).rejects.toThrow();
+      expect((await f.row()).phase).toBe('prepared');
+      expect(await f.session()).toEqual(before);
+      expect(ack.mock.calls).toEqual([['prepared']]);
+      expect(f.events.slice(-3).map((event) => event.kind)).toEqual([
+        'session.status_idle',
+        'agent.turn_completed',
+        'session.user_event_completed',
+      ]);
+    } finally {
+      await db.execute(
+        sql.raw('ALTER TABLE ' + table + ' DROP CONSTRAINT native_completion_fault'),
+      );
+    }
+    const evidence = [...f.events];
+    const usage = await db
+      .select()
+      .from(sessionUsageEvents)
+      .where(eq(sessionUsageEvents.sessionId, f.sessionId));
+    const replacement = f.replace();
+    await replacement.claim(f.binding);
+    expect((await replacement.pending()).map((row) => row.phase)).toEqual(['prepared']);
+    await replacement.finish(f.event.id, f.binding.revision, ack);
+    expect((await f.row()).phase).toBe('completed');
+    expect((await f.session()).status).toBe('idle');
+    expect((await f.session()).activeSeconds).toBeGreaterThanOrEqual(5);
+    expect((await f.session()).usageInputTokens).toBe(30);
+    expect(f.events).toEqual(evidence);
+    expect(
+      await db
+        .select()
+        .from(sessionUsageEvents)
+        .where(eq(sessionUsageEvents.sessionId, f.sessionId)),
+    ).toEqual(usage);
+    expect(ack.mock.calls).toEqual([['prepared'], ['prepared'], ['completed']]);
+  },
+);
+
+it.each(['completed', 'incomplete', 'missing'])(
+  'final transaction re-reads a receipt changed to %s during transcript delivery',
+  async (phase) => {
+    const f = await fixture();
+    await f.coordinator.prepare(f.checkpoint, resourceCheckpointDigest(f.checkpoint));
+    const scope = and(
+      eq(sessionNativeCompletions.sessionId, f.sessionId),
+      eq(sessionNativeCompletions.turnId, f.event.id),
+    );
+    const before = await f.session();
+    const ack = vi.fn(async (value: 'prepared' | 'completed') => {
+      if (value !== 'prepared') return;
+      if (phase === 'missing') await db.delete(sessionNativeCompletions).where(scope);
+      else await db.update(sessionNativeCompletions).set({ phase }).where(scope);
+    });
+    const finish = f.coordinator.finish(f.event.id, f.binding.revision, ack);
+    if (phase === 'completed') {
+      await finish;
+      expect(ack.mock.calls).toEqual([['prepared'], ['completed']]);
+    } else {
+      await expect(finish).rejects.toThrow('Native completion is not prepared');
+      expect(ack.mock.calls).toEqual([['prepared']]);
+    }
+    expect(await f.session()).toEqual(before);
+  },
+);
+
+it('lost completed ACK replay preserves a newer running turn and its timing', async () => {
+  const f = await publicStateFixture();
+  try {
+    expect((await f.submit()).statusCode).toBe(200);
+    const input = (await f.inputs())[0]!;
+    await f.coordinator.begin(input, f.binding);
+    const checkpoint = structuredClone(f.checkpoint);
+    checkpoint.completion!.turn_id = input.id;
+    const digest = resourceCheckpointDigest(checkpoint);
+    await f.coordinator.prepare(checkpoint, digest);
+    await expect(
+      f.coordinator.finish(input.id, f.binding.revision, async (phase) => {
+        if (phase === 'completed') throw new Error('completed ACK lost');
+      }),
+    ).rejects.toThrow('completed ACK lost');
+    expect((await f.get()).status).toBe('idle');
+    expect((await f.submit()).statusCode).toBe(200);
+    const newer = (await f.inputs())[1]!;
+    await f.coordinator.begin(newer, f.binding);
+    const before = await f.session();
+    const ack = vi.fn(async (_phase: 'prepared' | 'completed') => {});
+    expect(
+      await f.coordinator.finishAcknowledgedCheckpoint(
+        checkpoint.checkpoint_id,
+        digest,
+        f.binding.revision,
+        ack,
+      ),
+    ).toBe(true);
+    expect(ack.mock.calls).toEqual([['prepared'], ['completed']]);
+    expect(await f.session()).toEqual(before);
+    expect((await f.get()).status).toBe('running');
+    expect((await f.coordinator.pending()).map((row) => row.turnId)).toEqual([newer.id]);
+  } finally {
+    await f.app.close();
+  }
+});
+
+it('a replacement coordinator omits completed receipts from pending recovery', async () => {
+  const f = await publicStateFixture();
+  try {
+    expect((await f.submit()).statusCode).toBe(200);
+    const input = (await f.inputs())[0]!;
+    await f.complete(input);
+    const replacement = f.replace({ store: postgresStore });
+    await replacement.claim(f.binding);
+    expect(await replacement.pending()).toEqual([]);
+    const [receipt] = await db
+      .select()
+      .from(sessionNativeCompletions)
+      .where(
+        and(
+          eq(sessionNativeCompletions.sessionId, f.sessionId),
+          eq(sessionNativeCompletions.turnId, input.id),
+        ),
+      );
+    expect(receipt?.phase).toBe('completed');
+    expect((await f.get()).status).toBe('idle');
+  } finally {
+    await f.app.close();
+  }
+});
+
+it('interrupted native turns use durable completion evidence', async () => {
+  const f = await publicStateFixture();
+  try {
+    expect((await f.submit()).statusCode).toBe(200);
+    const input = (await f.inputs())[0]!;
+    await f.complete(input, 'interrupted');
+    const [receipt] = await db
+      .select()
+      .from(sessionNativeCompletions)
+      .where(
+        and(
+          eq(sessionNativeCompletions.sessionId, f.sessionId),
+          eq(sessionNativeCompletions.turnId, input.id),
+        ),
+      );
+    expect(receipt?.phase).toBe('completed');
+    const kinds: string[] = [];
+    for await (const event of postgresStore.read(workspaceId, f.sessionId, {
+      fromCursor: '',
+      maxEvents: 0,
+      subpath: '',
+    })) {
+      kinds.push(event.kind);
+    }
+    expect(kinds.slice(-4)).toEqual([
+      'session.error',
+      'session.status_idle',
+      'agent.turn_completed',
+      'session.user_event_completed',
+    ]);
+    expect(await f.coordinator.pending()).toEqual([]);
+    expect((await f.session()).usageInputTokens).toBe(30);
+    expect((await f.get()).status).toBe('idle');
+  } finally {
+    await f.app.close();
+  }
+});
+
+it('completed native turns close active-time intervals between inputs', async () => {
+  const f = await publicStateFixture();
+  vi.useFakeTimers({ toFake: ['Date'] });
+  try {
+    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+    expect((await f.submit()).statusCode).toBe(200);
+    vi.setSystemTime(new Date('2026-01-01T00:00:03Z'));
+    await f.complete((await f.inputs())[0]!);
+    expect((await f.session()).activeSeconds).toBe(3);
+    vi.setSystemTime(new Date('2026-01-04T00:00:00Z'));
+    expect((await f.submit()).statusCode).toBe(200);
+    vi.setSystemTime(new Date('2026-01-04T00:00:05Z'));
+    await f.complete((await f.inputs())[1]!);
+    expect((await f.get()).status).toBe('idle');
+    expect((await f.session()).activeSeconds).toBe(8);
+  } finally {
+    vi.useRealTimers();
+    await f.app.close();
+  }
+});
 
 it.each([0, 1, 2])(
   'persists acceptance before execution and reconciles a lost begin append ACK (%s)',
@@ -933,6 +1227,182 @@ it('rejects retained accounting attributed to a different execution', async () =
   ).rejects.toThrow('ownership');
   expect((await f.session()).usageInputTokens).toBe(0);
   expect((await f.row()).phase).toBe('running');
+});
+
+it('delivery recovers metadata failure after prepared ACK releases output bytes', async () => {
+  const f = await fixture(false);
+  await db
+    .update(sessions)
+    .set({ status: 'running', lastActiveAt: new Date(Date.now() - 5000) })
+    .where(eq(sessions.id, f.sessionId));
+  const bytes = Buffer.from('retained output');
+  const checkpoint = f.checkpoint;
+  checkpoint.files.push({
+    resource_id: OUTPUT_RESOURCE_ID,
+    path: 'answer.txt',
+    size_bytes: bytes.length,
+    sha256: createHash('sha256').update(bytes).digest('hex'),
+    mode: 0o644,
+  });
+  const digest = resourceCheckpointDigest(checkpoint);
+  const files = new LocalFileStore({
+    blobStore: new InMemoryBlobStore(),
+    metadataStore: new InMemoryFileMetadataStore(),
+  });
+  const createFile = vi.spyOn(files, 'create');
+  let frozenBytes: Buffer | undefined = bytes;
+  let runnerPhase: 'frozen' | 'prepared' | 'completed' | undefined;
+  let faultInstalled = false;
+  let manifestReads = 0,
+    byteReads = 0;
+  const acks: string[] = [];
+  const makeDelivery = (coordinator: NativeCompletionCoordinator) =>
+    new SessionResourcesDelivery({
+      workspaceId,
+      sessionId: f.sessionId,
+      fileStore: files,
+      store: postgresStore,
+      isCurrent: async () => true,
+      prepare: async () => ({
+        manifest: { version: 1, revision: f.binding.revision, resources: [] },
+        memoryStores: new Map(),
+        networkAllowedDomains: [],
+        close: async () => {},
+        open: async () => {
+          throw new Error('unexpected input byte read');
+        },
+      }),
+      native: {
+        coordinator,
+        probe: async () => ({
+          ...f.binding,
+          resolvedPaths: {},
+          outputs: '/verified/outputs',
+          ...(runnerPhase && runnerPhase !== 'completed'
+            ? {
+                turn: {
+                  turnId: f.event.id,
+                  phase: runnerPhase,
+                  checkpointId: checkpoint.checkpoint_id,
+                  digest,
+                },
+              }
+            : {}),
+        }),
+      },
+      request: async (path, raw) => {
+        const body = raw as Record<string, unknown>;
+        if (path === '/v1/runner/resources')
+          return { committed: true, revision: f.binding.revision };
+        if (path.endsWith('/ack')) {
+          expect(body.checkpoint_id).toBe(checkpoint.checkpoint_id);
+          expect(body.manifest_sha256).toBe(digest);
+          acks.push(body.completion_phase as string);
+          if (body.completion_phase === 'prepared') {
+            expect((await f.row()).phase).toBe('prepared');
+            if (runnerPhase === 'frozen') {
+              frozenBytes = undefined;
+              runnerPhase = 'prepared';
+              await db.execute(
+                sql.raw(
+                  "ALTER TABLE sessions ADD CONSTRAINT native_delivery_fault CHECK (NOT (id = '" +
+                    f.sessionId +
+                    "' AND status = 'idle')) NOT VALID",
+                ),
+              );
+              faultInstalled = true;
+            }
+          } else {
+            expect(body.completion_phase).toBe('completed');
+            expect((await f.row()).phase).toBe('completed');
+            expect((await f.session()).status).toBe('idle');
+            runnerPhase = 'completed';
+          }
+          return { ok: true };
+        }
+        if (path === '/v1/runner/resource-changes') {
+          if (body.type === 'pending') return { checkpoint: null };
+          if (body.type === 'manifest') {
+            manifestReads++;
+            if (!frozenBytes) throw new Error('checkpoint manifest released by prepared ACK');
+            return { ...checkpoint, manifest_sha256: digest };
+          }
+          if (body.type === 'file_chunk') {
+            byteReads++;
+            if (!frozenBytes) throw new Error('frozen bytes released by prepared ACK');
+            return { offset: 0, content_base64: frozenBytes.toString('base64') };
+          }
+        }
+        throw new Error('unexpected runner request: ' + path);
+      },
+    });
+  const transcript = async () => {
+    const events: Event[] = [];
+    for await (const event of postgresStore.read(workspaceId, f.sessionId, {
+      fromCursor: '',
+      maxEvents: 0,
+      subpath: '',
+    }))
+      events.push(event);
+    return events;
+  };
+  try {
+    const coordinator = f.replace({ store: postgresStore });
+    const delivery = makeDelivery(coordinator);
+    await delivery.deliver();
+    await delivery.beginTurn(f.event);
+    runnerPhase = 'frozen';
+    await expect(delivery.commit(checkpoint.checkpoint_id, digest)).rejects.toThrow(
+      'native_delivery_fault',
+    );
+    expect(faultInstalled).toBe(true);
+    expect(frozenBytes).toBeUndefined();
+    expect((await f.row()).phase).toBe('prepared');
+    expect((await f.session()).status).toBe('running');
+    expect(acks).toEqual(['prepared']);
+    await expect(coordinator.begin({ ...f.event, id: newId('evt') }, f.binding)).rejects.toThrow(
+      'blocks',
+    );
+    const events = await transcript();
+    expect(events.slice(-3).map((event) => event.kind)).toEqual([
+      'session.status_idle',
+      'agent.turn_completed',
+      'session.user_event_completed',
+    ]);
+    const outputs = (await files.list(workspaceId, { scopeId: f.sessionId })).items;
+    expect(outputs).toHaveLength(1);
+    expect(events.filter((event) => event.kind === 'session.output_indexed')).toHaveLength(1);
+    const usage = await db
+      .select()
+      .from(sessionUsageEvents)
+      .where(eq(sessionUsageEvents.sessionId, f.sessionId));
+    expect(usage).toHaveLength(2);
+    await db.execute(sql.raw('ALTER TABLE sessions DROP CONSTRAINT native_delivery_fault'));
+    faultInstalled = false;
+
+    const replacement = f.replace({ store: postgresStore });
+    await makeDelivery(replacement).deliver();
+    expect(await replacement.pending()).toEqual([]);
+    expect(acks).toEqual(['prepared', 'prepared', 'completed']);
+    expect(manifestReads).toBe(1);
+    expect(byteReads).toBe(1);
+    expect(createFile).toHaveBeenCalledTimes(1);
+    expect((await files.list(workspaceId, { scopeId: f.sessionId })).items).toEqual(outputs);
+    expect(await transcript()).toEqual(events);
+    expect(
+      await db
+        .select()
+        .from(sessionUsageEvents)
+        .where(eq(sessionUsageEvents.sessionId, f.sessionId)),
+    ).toEqual(usage);
+    expect((await f.session()).usageInputTokens).toBe(30);
+    expect((await f.session()).activeSeconds).toBeGreaterThanOrEqual(5);
+    await replacement.begin({ ...f.event, id: newId('evt') }, f.binding);
+  } finally {
+    if (faultInstalled)
+      await db.execute(sql.raw('ALTER TABLE sessions DROP CONSTRAINT native_delivery_fault'));
+    await files.close();
+  }
 });
 
 it.each([false, true, 'missing', 'incomplete'] as const)(

@@ -143,6 +143,17 @@ describe('/internal/v1/workspaces/:workspaceId/sessions/:id lifecycle (integrati
     expect(runningBody.timing.last_active_at).toBeTruthy();
     expect(runningBody.timing.active_seconds).toBe(0);
 
+    const repeated = await app.inject({
+      method: 'PATCH',
+      url: '/internal/v1/workspaces/' + workspaceId + '/sessions/' + sessionId + '/state',
+      payload: { status: 'running' },
+    });
+    expect(repeated.statusCode).toBe(200);
+    const repeatedBody = repeated.json() as InternalSessionResp;
+    expect(repeatedBody.sandbox_handle_id).toBe('sbx_local_test');
+    expect(repeatedBody.timing.started_at).toBe(runningBody.timing.started_at);
+    expect(repeatedBody.timing.last_active_at).toBe(runningBody.timing.last_active_at);
+
     const stillRunningBody = await waitForSession(baseURL, apiKey, sessionId, (body) => {
       expect(body.status).toBe('running');
       return body.timing.active_seconds >= 1;
@@ -179,6 +190,35 @@ describe('/internal/v1/workspaces/:workspaceId/sessions/:id lifecycle (integrati
     const idleThread = await getPrimaryThread(baseURL, apiKey, sessionId);
     expect(idleThread.status).toBe('idle');
     expect(idleThread.stats.active_seconds).toBe(idleBody.timing.active_seconds);
+  });
+
+  it('rejects invalid state and retains retired Session predicates', async () => {
+    const agentId = await createTestAgent(baseURL, apiKey);
+    for (const retirement of ['terminated', 'archived', 'deleted']) {
+      const retiredId = await createTestSession(baseURL, apiKey, agentId);
+      await db
+        .update(sessions)
+        .set(
+          retirement === 'terminated'
+            ? { status: 'terminated' }
+            : retirement === 'archived'
+              ? { archivedAt: new Date() }
+              : { deletedAt: new Date() },
+        )
+        .where(eq(sessions.id, retiredId));
+      const response = await app.inject({
+        method: 'PATCH',
+        url: '/internal/v1/workspaces/' + workspaceId + '/sessions/' + retiredId + '/state',
+        payload: { status: 'running' },
+      });
+      expect(response.statusCode).toBe(404);
+    }
+    const response = await app.inject({
+      method: 'PATCH',
+      url: '/internal/v1/workspaces/' + workspaceId + '/sessions/' + sessionId + '/state',
+      payload: { status: 'invalid' },
+    });
+    expect(response.statusCode).toBe(400);
   });
 
   it('does not double-count active seconds when concurrent idle updates race', async () => {
