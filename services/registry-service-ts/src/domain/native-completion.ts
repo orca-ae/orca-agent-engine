@@ -26,6 +26,7 @@ import {
   workspaces,
 } from '../persistence/postgres/schema.js';
 import { loadSessionExecutionOwner } from './session-harness-binding.js';
+import { updateSessionState } from './session-state.js';
 import {
   loadGuardrailTurnSubject,
   parseUsageDelta,
@@ -355,6 +356,17 @@ export class NativeCompletionCoordinator {
         ...userEventProcessedPayload(turnId),
       });
       await this.locked(revision, async (tx) => {
+        const [row] = await tx.select().from(receipts).where(this.scope(turnId));
+        if (row?.phase === 'completed') return;
+        if (row?.phase !== 'prepared') throw new Error('Native completion is not prepared');
+        const updated = await updateSessionState(
+          tx,
+          this.options.workspaceId,
+          this.options.sessionId,
+          { status: 'idle' },
+          new Date(),
+        );
+        if (!updated) throw new Error('Native completion lost session ownership');
         await tx.update(receipts).set({ phase: 'completed' }).where(this.scope(turnId));
       });
     }

@@ -45,7 +45,7 @@ import { sendWorkspaceGuardrailBundle } from './guardrails.routes.js';
 import { WorkspaceBundleQuery } from '../contracts/guardrails.contract.js';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { RequestPriceFactsSchema } from '../contracts/model-price-rules.contract.js';
-import { eq, and, isNull, sql, inArray, ne, or } from 'drizzle-orm';
+import { eq, and, isNull, inArray, ne, or } from 'drizzle-orm';
 import type { FileStore, FilePurpose, FileRecord } from '@orca/file-store';
 import {
   SEED_PRICE_PROVIDER,
@@ -90,6 +90,7 @@ import {
 import { buildRuntimeSecretResolver } from '../secrets/index.js';
 import type { SecretProvider, SecretStore } from '../secrets/secret-provider.js';
 import { sdkGatewayJwtTtlSecs, type SessionJwtMinter } from '../auth/session-jwt.js';
+import { updateSessionState } from '../domain/session-state.js';
 import { loadInternalSession } from './sessions.routes.js';
 import { verifyEnvKeyForEnvironment } from '../domain/environment-key-state.js';
 import { EnvironmentClaimStore, type EnvironmentClaim } from '../domain/environment-claims.js';
@@ -1393,36 +1394,14 @@ export function registerInternalRoutes(
       return reply.code(404).send({ error: 'session not found' });
     }
 
-    const now = clock();
-    const hasSandboxHandle = Object.prototype.hasOwnProperty.call(body, 'sandbox_handle_id');
-    const update = {
-      status: body.status,
-      ...(hasSandboxHandle ? { sandboxHandleId: body.sandbox_handle_id } : {}),
-      ...(body.status === 'running'
-        ? {
-            startedAt: sql`coalesce(${sessions.startedAt}, ${now})`,
-            lastActiveAt: sql`case when ${sessions.status} <> 'running' then ${now} else ${sessions.lastActiveAt} end`,
-          }
-        : {
-            activeSeconds: sql`${sessions.activeSeconds} + case when ${sessions.status} = 'running' and ${sessions.lastActiveAt} is not null then greatest(0, floor(extract(epoch from (cast(${now} as timestamptz) - ${sessions.lastActiveAt})))::int) else 0 end`,
-            lastActiveAt: now,
-          }),
-      updatedAt: now,
-    };
-    const rows = await db
-      .update(sessions)
-      .set(update)
-      .where(
-        and(
-          isNull(sessions.deletedAt),
-          eq(sessions.workspaceId, workspaceId),
-          eq(sessions.id, id),
-          isNull(sessions.archivedAt),
-          ne(sessions.status, 'terminated'),
-        ),
-      )
-      .returning({ id: sessions.id });
-    if (rows.length === 0) return reply.code(404).send({ error: 'session not found' });
+    const updated = await updateSessionState(
+      db,
+      workspaceId,
+      id,
+      body as { status: string; sandbox_handle_id?: string | null },
+      clock(),
+    );
+    if (!updated) return reply.code(404).send({ error: 'session not found' });
 
     const session = await loadInternalSession(db, workspaceId, id);
     return reply.send(session);

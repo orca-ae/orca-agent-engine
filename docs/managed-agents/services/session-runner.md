@@ -117,7 +117,10 @@ After all admitted file tools settle, the runner retains the sealed report set a
 outcome, freezes changed outputs privately, and holds terminal events and the next
 turn. Registry commits Files, output events and usage before preparing a durable
 receipt. Prepared ACK releases frozen bytes; completed ACK follows durable terminal
-and completion markers. Reports remain until completed ACK. Cleanup keeps one small
+and completion markers and the transaction that updates Session idle/active time
+and marks the receipt completed. Metadata failure leaves the receipt prepared for
+existing checkpoint recovery; completed-receipt replay retransmits ACKs without
+rewriting Session state. Reports remain until completed ACK. Cleanup keeps one small
 completed ACK tombstone until the next turn and resumes after restart. Failed and
 interrupted turns use the same ordering. Pi 0.87.1's native `error` settlement maps to
 a failed completion while preserving whether each usage report is complete.

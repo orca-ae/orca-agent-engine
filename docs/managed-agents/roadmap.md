@@ -28,6 +28,12 @@ and its row in the proposals index together.
 
 Each item is proposed as an OIP pull request; the design is reviewed there before the code lands.
 
+- **Concurrent Session state and publication races.** Late public running writes, delayed idle
+  callbacks, publication overtaking and retirement races remain outside native receipt-completion
+  metadata updates. Trigger: address a specific reproduced race through its existing execution
+  owner. Historical stuck-running intervals require an explicit operational repair policy before
+  bulk repair; replaying completed receipts must not overwrite newer Session state.
+
 - **Controlled sandbox egress deployment qualification.** Enablement requires verified
   Cilium enforcement and policy readiness for every new Pod, compatible Gateway and Registry
   versions, and qualified native clients. Local fixtures do not establish deployment enforcement.
