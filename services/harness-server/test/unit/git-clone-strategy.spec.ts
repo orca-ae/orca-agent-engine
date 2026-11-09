@@ -16,6 +16,69 @@ import { serializeSandboxFileModes } from '../../src/sandbox/chmod-many.js';
 import type { SandboxFileMode } from '../../src/sandbox/sandbox-runtime.js';
 
 describe('GitCloneStrategy', () => {
+  it('prepares controlled Git inside the sandbox without acquiring host credentials', async () => {
+    const run = vi.fn().mockResolvedValue({ exit_code: 0 });
+    const sandbox = { id: 'controlled', run } as unknown as Parameters<
+      GitCloneStrategy['activate']
+    >[0];
+    const controller = new AbortController();
+    const strategy = new GitCloneStrategy({
+      workspaceId: 'ws',
+      sessionId: 'session',
+      sandboxEgress: true,
+      signal: controller.signal,
+    });
+    const handle = await strategy.activate(sandbox, {
+      id: 'resource',
+      type: 'github_repository',
+      url: 'https://github.com/owner/repo.git',
+      mountPath: '/mnt/repo',
+      access: 'read_only',
+      gitCredentialId: 'unused',
+      repoIdx: 0,
+      checkout: { type: 'commit', value: 'a'.repeat(40) },
+    });
+    expect(handle.mountPath).toBe('/mnt/repo');
+    expect(run.mock.calls[0]?.[0].args.command).toContain('checkout --detach');
+    expect(run.mock.calls[0]?.[1]).toEqual({ signal: controller.signal });
+    expect(JSON.stringify(await strategy.teardownForSnapshot(sandbox, handle))).not.toContain(
+      'capability',
+    );
+  });
+
+  it('does not start a cancelled controlled clone or expose failed process diagnostics', async () => {
+    const run = vi.fn().mockResolvedValue({ exit_code: 1, stderr: 'private-diagnostic' });
+    const sandbox = { id: 'controlled', run } as unknown as Parameters<
+      GitCloneStrategy['activate']
+    >[0];
+    const resource: MountResource = {
+      id: 'resource',
+      type: 'github_repository',
+      url: 'https://github.com/owner/repo.git',
+      mountPath: '/mnt/repo',
+      access: 'read_only',
+      gitCredentialId: 'unused',
+      repoIdx: 0,
+    };
+    const controller = new AbortController();
+    controller.abort();
+    const cancelled = new GitCloneStrategy({
+      workspaceId: 'ws',
+      sessionId: 'session',
+      sandboxEgress: true,
+      signal: controller.signal,
+    });
+    await expect(cancelled.activate(sandbox, resource)).rejects.toThrow();
+    expect(run).not.toHaveBeenCalled();
+    const strategy = new GitCloneStrategy({
+      workspaceId: 'ws',
+      sessionId: 'session',
+      sandboxEgress: true,
+    });
+    await expect(strategy.activate(sandbox, resource)).rejects.toThrow(
+      'sandbox egress Git clone preparation failed',
+    );
+  });
   let workBase: string;
   let workDir: WorkDirManager;
   let runtime: InMemorySandboxRuntime;

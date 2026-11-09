@@ -77,6 +77,9 @@ export interface PickStrategyInput {
    * without taking a network round-trip.
    */
   gitWorker?: GitWorker;
+  /** Already bootstrapped, policy-enforced managed sandbox; never resolve a host PAT. */
+  sandboxEgress?: true;
+  signal?: AbortSignal;
   /**
    * Owns the per-session ephemeral host work dir (rm -rf'd at session stop).
    * Required for `github_repository` resources.
@@ -145,6 +148,14 @@ function pickGitStrategy(input: PickStrategyInput): MountStrategy {
     throw new Error(
       `pickStrategy: mount_strategy=${input.overrideStrategy} is invalid for resource.type=github_repository`,
     );
+  }
+  if (input.sandboxEgress) {
+    return new GitCloneStrategy({
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      sandboxEgress: true,
+      ...(input.signal ? { signal: input.signal } : {}),
+    });
   }
   if (!input.gitWorker || !input.workDir || !input.resolvePat) {
     throw new Error(

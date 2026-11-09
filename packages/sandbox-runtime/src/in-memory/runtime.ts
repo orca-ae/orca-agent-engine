@@ -60,6 +60,8 @@ export class InMemorySandboxRuntime implements SandboxRuntime {
   };
 
   async acquire(_env: EnvironmentSpec): Promise<SandboxHandle> {
+    if (_env.sandboxNetwork)
+      throw new Error('sandbox egress requires managed OpenSandbox execution');
     if (_env.dshProfile)
       throw new Error('DSH profiles require OpenSandbox native-profile preparation');
     const root = mkdtempSync(join(tmpdir(), 'orca-sandbox-'));

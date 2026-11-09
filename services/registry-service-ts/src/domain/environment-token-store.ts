@@ -3,13 +3,14 @@
 
 import { and, isNull, eq } from 'drizzle-orm';
 import type { DbClient } from '../persistence/postgres/client.js';
-import { environments } from '../persistence/postgres/schema.js';
+import type { SandboxNetworkRequest } from '@orca/sandbox-runtime';
+import { environments, sandboxNetworkBindings } from '../persistence/postgres/schema.js';
 import {
   armEnvironmentTokenColumns,
   revokeEnvironmentTokenColumns,
   verifyEnvironmentTokenForEnvironment,
 } from './environment-token-state.js';
-import { ENVIRONMENT_TOKEN_TTL_MS } from './environment-token.js';
+import { ENVIRONMENT_TOKEN_TTL_MS, hashEnvironmentToken } from './environment-token.js';
 
 /**
  * DB-backed mint/resolve for the per-launch Environment Token, over the
@@ -43,15 +44,53 @@ export class EnvironmentTokenStore {
     environmentId: string,
     ttlMs: number = ENVIRONMENT_TOKEN_TTL_MS,
     now: Date = new Date(),
+    cloudSandboxHandleId?: string,
+    sandboxNetwork?: SandboxNetworkRequest,
   ): Promise<string> {
     const armed = armEnvironmentTokenColumns(ttlMs, now);
-    await this.db
-      .update(environments)
-      .set({
-        environmentTokenDigest: armed.environmentTokenDigest,
-        environmentTokenExpiresAt: armed.environmentTokenExpiresAt,
-      })
-      .where(and(isNull(environments.deletedAt), eq(environments.id, environmentId)));
+    const write = async (db: Pick<DbClient, 'update'>) =>
+      db
+        .update(environments)
+        .set({
+          environmentTokenDigest: armed.environmentTokenDigest,
+          environmentTokenExpiresAt: armed.environmentTokenExpiresAt,
+          cloudSandboxHandleId: cloudSandboxHandleId ?? null,
+        })
+        .where(and(isNull(environments.deletedAt), eq(environments.id, environmentId)));
+    if (sandboxNetwork) {
+      await this.db.transaction(async (tx) => {
+        // Network registration takes the same Environment lock before replacement.
+        const [environment] = await tx
+          .select()
+          .from(environments)
+          .where(eq(environments.id, environmentId))
+          .for('update');
+        const [network] = await tx
+          .select()
+          .from(sandboxNetworkBindings)
+          .where(
+            and(
+              eq(sandboxNetworkBindings.id, sandboxNetwork.binding_id),
+              eq(sandboxNetworkBindings.generation, sandboxNetwork.generation),
+              eq(sandboxNetworkBindings.environmentId, environmentId),
+              eq(sandboxNetworkBindings.ownerSubject, `environment:${environmentId}`),
+              isNull(sandboxNetworkBindings.revokedAt),
+            ),
+          )
+          .for('share');
+        if (
+          !environment ||
+          environment.deletedAt ||
+          environment.archivedAt ||
+          !network?.capabilityDigest ||
+          (network.workload as { name?: string } | null)?.name !== cloudSandboxHandleId
+        )
+          throw new Error(
+            'Environment network generation was replaced before worker credential mint',
+          );
+        await write(tx);
+      });
+    } else await write(this.db);
     return armed.raw;
   }
 
@@ -109,14 +148,23 @@ export class EnvironmentTokenStore {
    * unknown `environmentId` (nothing matches the `WHERE`) — the caller does
    * not need to guard on existence first.
    */
-  async revokeEnvironmentToken(environmentId: string): Promise<void> {
+  async revokeEnvironmentToken(environmentId: string, expectedToken?: string): Promise<void> {
     const revoked = revokeEnvironmentTokenColumns();
     await this.db
       .update(environments)
       .set({
         environmentTokenDigest: revoked.environmentTokenDigest,
         environmentTokenExpiresAt: revoked.environmentTokenExpiresAt,
+        cloudSandboxHandleId: null,
       })
-      .where(and(isNull(environments.deletedAt), eq(environments.id, environmentId)));
+      .where(
+        and(
+          isNull(environments.deletedAt),
+          eq(environments.id, environmentId),
+          ...(expectedToken
+            ? [eq(environments.environmentTokenDigest, hashEnvironmentToken(expectedToken))]
+            : []),
+        ),
+      );
   }
 }

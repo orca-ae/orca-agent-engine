@@ -50,9 +50,12 @@
 import { execFile, spawnSync } from 'node:child_process';
 import {
   chmodSync,
+  closeSync,
+  constants,
   createReadStream,
   mkdtempSync,
   mkdirSync,
+  openSync,
   readFileSync,
   readdirSync,
   rmSync,
@@ -294,11 +297,18 @@ export class TmuxSandboxHandle implements SandboxHandle, TerminalHost {
       // (already gone) is a no-op we deliberately swallow.
       this.tmux(['kill-session', '-t', session]).catch(() => {});
       this.sessions.delete(session);
-      // Also tear the reader down directly. This closes `stdout` even in the race
-      // where the pane's `tee` had not yet opened the FIFO's write end (so no EOF
-      // would ever arrive on its own), and makes `kill` deterministic regardless
-      // of how far the child had progressed.
-      stdout.destroy();
+      // destroy() cannot cancel a blocking FIFO open. Supply a temporary writer
+      // so an open still waiting for tee can finish and the reader can close.
+      try {
+        if (stdout.pending && !stdout.closed) {
+          const wake = openSync(fifoPath, constants.O_RDWR | constants.O_NONBLOCK);
+          stdout.once('close', () => closeSync(wake));
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      } finally {
+        stdout.destroy();
+      }
     };
 
     // The pane's `tee` closes the FIFO write end on process exit, so `stdout`

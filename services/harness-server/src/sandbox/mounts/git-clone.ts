@@ -8,20 +8,29 @@ import type { SandboxFileMode, SandboxHandle } from '../sandbox-runtime.js';
 import type { GitWorker } from '../../git/git-worker.js';
 import type { WorkDirManager } from '../../git/work-dir.js';
 import { harnessGitCloneSeconds, harnessGitCloneTotal } from '../../metrics.js';
+import { buildSandboxEgressGitCloneCommand } from '@orca/sandbox-runtime';
 
-export interface GitCloneStrategyConfig {
+interface GitCloneSession {
   workspaceId: string;
   sessionId: string;
-  worker: GitWorker;
-  workDir: WorkDirManager;
-  /**
-   * Resolves the git credential secret → PAT bytes. Called once per repo at
-   * activate time. The PAT lives in scope only for the duration of
-   * `GitWorker.cloneInto` and is discarded immediately after — no caching,
-   * no logging, no env propagation.
-   */
-  resolvePat: (gitCredentialId: string) => Promise<string>;
 }
+
+export type GitCloneStrategyConfig = GitCloneSession &
+  (
+    | { sandboxEgress: true; signal?: AbortSignal }
+    | {
+        sandboxEgress?: false;
+        worker: GitWorker;
+        workDir: WorkDirManager;
+        /**
+         * Resolves the git credential secret → PAT bytes. Called once per repo at
+         * activate time. The PAT lives in scope only for the duration of
+         * `GitWorker.cloneInto` and is discarded immediately after — no caching,
+         * no logging, no env propagation.
+         */
+        resolvePat: (gitCredentialId: string) => Promise<string>;
+      }
+  );
 
 /**
  * v1 mount strategy for github_repository resources.
@@ -65,53 +74,71 @@ export class GitCloneStrategy implements MountStrategy {
     // with the result so dashboards can split ok/error volume.
     const start = Date.now();
     try {
-      // 1. Acquire host-side work dir.
-      const dest = await this.config.workDir.acquire(
-        this.config.workspaceId,
-        this.config.sessionId,
-        resource.repoIdx,
-      );
-
-      // 2. Resolve the PAT just-in-time.
-      const pat = await this.config.resolvePat(resource.gitCredentialId);
-
-      // 3. Clone. v1 always uses --filter=blob:none for production github.com
-      //    URLs; tests inject a fake worker that bypasses the filter logic.
-      const cloneOpts: Parameters<GitWorker['cloneInto']>[0] = {
-        url: resource.url,
-        pat,
-        dest,
-      };
-      if (resource.checkout?.type === 'branch') {
-        cloneOpts.ref = resource.checkout.value;
-      } else if (resource.checkout?.type === 'commit') {
-        // Commit-pin requires a full-history clone (--depth=1 wouldn't include
-        // an arbitrary commit). v1 limitation: clone shallow then `git checkout
-        // <sha>` may fail if the SHA is older than the tip. Document.
-        cloneOpts.shallow = false;
-      }
-      await this.config.worker.cloneInto(cloneOpts);
-
-      // 4. Stream every file (tracked + .git/) into the sandbox. Parent dirs at
-      //    `mountPath` are created implicitly by `sandbox.files.write` (E2B SDK
-      //    + InMemoryFiles both `mkdir -p` the dirname before writing) — no
-      //    explicit `mkdir -p` step is needed.
-      const allFiles = await listAllFiles(dest);
-      const modes: SandboxFileMode[] = [];
-      for (const rel of allFiles) {
-        const source = join(dest, rel);
-        const mode = (await stat(source)).mode & 0o777;
-        const buf = await readFile(source);
-        const target = `${stripTrailingSlash(resource.mountPath)}/${rel}`;
-        await sandbox.files.write(target, buf);
-        modes.push({ path: target, mode });
-      }
-      // Restore permissions only after writing; never copy host ownership or special bits.
-      if (sandbox.files.chmodMany) {
-        await sandbox.files.chmodMany(stripTrailingSlash(resource.mountPath), modes);
+      if (this.config.sandboxEgress) {
+        this.config.signal?.throwIfAborted();
+        const result = await sandbox.run(
+          {
+            tool: 'bash',
+            args: {
+              command: buildSandboxEgressGitCloneCommand({
+                url: resource.url,
+                mountPath: resource.mountPath,
+                ...(resource.checkout ? { checkout: resource.checkout } : {}),
+              }),
+            },
+          },
+          this.config.signal ? { signal: this.config.signal } : undefined,
+        );
+        if (result.exit_code !== 0) throw new Error('sandbox egress Git clone preparation failed');
       } else {
-        for (const entry of modes) {
-          await sandbox.files.chmod(entry.path, entry.mode);
+        // 1. Acquire host-side work dir.
+        const dest = await this.config.workDir.acquire(
+          this.config.workspaceId,
+          this.config.sessionId,
+          resource.repoIdx,
+        );
+
+        // 2. Resolve the PAT just-in-time.
+        const pat = await this.config.resolvePat(resource.gitCredentialId);
+
+        // 3. Clone. v1 always uses --filter=blob:none for production github.com
+        //    URLs; tests inject a fake worker that bypasses the filter logic.
+        const cloneOpts: Parameters<GitWorker['cloneInto']>[0] = {
+          url: resource.url,
+          pat,
+          dest,
+        };
+        if (resource.checkout?.type === 'branch') {
+          cloneOpts.ref = resource.checkout.value;
+        } else if (resource.checkout?.type === 'commit') {
+          // Commit-pin requires a full-history clone (--depth=1 wouldn't include
+          // an arbitrary commit). v1 limitation: clone shallow then `git checkout
+          // <sha>` may fail if the SHA is older than the tip. Document.
+          cloneOpts.shallow = false;
+        }
+        await this.config.worker.cloneInto(cloneOpts);
+
+        // 4. Stream every file (tracked + .git/) into the sandbox. Parent dirs at
+        //    `mountPath` are created implicitly by `sandbox.files.write` (E2B SDK
+        //    + InMemoryFiles both `mkdir -p` the dirname before writing) — no
+        //    explicit `mkdir -p` step is needed.
+        const allFiles = await listAllFiles(dest);
+        const modes: SandboxFileMode[] = [];
+        for (const rel of allFiles) {
+          const source = join(dest, rel);
+          const mode = (await stat(source)).mode & 0o777;
+          const buf = await readFile(source);
+          const target = `${stripTrailingSlash(resource.mountPath)}/${rel}`;
+          await sandbox.files.write(target, buf);
+          modes.push({ path: target, mode });
+        }
+        // Restore permissions only after writing; never copy host ownership or special bits.
+        if (sandbox.files.chmodMany) {
+          await sandbox.files.chmodMany(stripTrailingSlash(resource.mountPath), modes);
+        } else {
+          for (const entry of modes) {
+            await sandbox.files.chmod(entry.path, entry.mode);
+          }
         }
       }
 

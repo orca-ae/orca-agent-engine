@@ -25,7 +25,7 @@
  * No real child processes, no LLM, no cloud services. All traffic 127.0.0.1.
  */
 
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { createServer, type Server, type ServerResponse, type IncomingMessage } from 'node:http';
 import { Readable } from 'node:stream';
 import type { AddressInfo } from 'node:net';
@@ -637,6 +637,127 @@ afterEach(async () => {
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 describe('dispatcher colocated routing', () => {
+  it('bootstraps controlled egress after acquire, clones in sandbox and revokes on stop without legacy Git APIs', async () => {
+    const sessionId = 'ses_insandbox_egress';
+    _wireServer = await startFakeWireServer([
+      makeEvent('evt_egress_agent', sessionId + '_inner', 'agent.message', {
+        content: [{ type: 'text', text: 'ready' }],
+      }),
+      makeEvent('evt_egress_idle', sessionId + '_inner', 'session.status_idle', { usage: {} }),
+    ]);
+    const runtime = new FakeInSandboxRuntime(_wireServer.baseUrl, _wireServer.port, {
+      '/etc/ssl/certs/ca-certificates.crt': Buffer.from('-----BEGIN CERTIFICATE-----system'),
+      '/run/orca/sandbox-network/context.json': Buffer.from(
+        JSON.stringify({
+          binding_id: 'network',
+          generation: 'one',
+          proxy_url: 'https://proxy.example:8443',
+          proxy_capability: 'base-capability',
+          ca_bundle_path: '/run/orca/sandbox-network/ca-bundle.crt',
+          internal_bypass: ['registry.orca.svc.cluster.local'],
+        }),
+      ),
+    });
+    const order: string[] = [];
+    const acquire = runtime.acquire.bind(runtime);
+    const configure = vi.fn(async (_env: Record<string, string>) => {
+      order.push('bootstrap');
+    });
+    const run = vi.fn(async (_call: ToolCall) => ({ exit_code: 0 }));
+    runtime.acquire = async (spec) => {
+      const handle = await acquire(spec);
+      order.push('acquired');
+      Object.assign(handle, { configureSessionEgress: configure, run });
+      return handle;
+    };
+    const registry = new FakeInSandboxRegistry([
+      {
+        id: 'resource_repo',
+        type: 'github_repository',
+        file_id: null,
+        memory_store_id: null,
+        repo_ref: {
+          url: 'https://github.com/owner/repo.git',
+          git_credential_id: 'unused',
+          checkout: { type: 'branch', value: 'main' },
+        },
+        mount_path: '/mnt/repo',
+        access: 'read_only',
+        instructions: null,
+        attached_at: new Date().toISOString(),
+        detached_at: null,
+      },
+    ]);
+    const issue = vi.fn(async (_input: unknown) => {
+      order.push('issued');
+      return {
+        network_binding_id: 'network',
+        binding_id: 'binding',
+        generation: 'generation',
+        proxy_capability: 'opaque-capability',
+        placeholders: {},
+        git: { marker: 'git-marker', username: 'x-access-token' },
+      };
+    });
+    const revoke = vi.fn(async () => {});
+    const revokeNetwork = vi.fn(async () => {});
+    Object.assign(registry, {
+      issueSessionEgress: issue,
+      revokeSessionEgress: revoke,
+      registerHarnessNetwork: async () => {
+        order.push('registered');
+        return { binding_id: 'network', generation: 'one' };
+      },
+      revokeHarnessNetwork: revokeNetwork,
+    });
+    const store = new RecordingStore();
+    const source = new FakeEventSource();
+    _dispatcher = new Dispatcher({
+      eventSource: source,
+      groupId: 'controlled-egress',
+      store,
+      anthropicApiKey: 'unused',
+      modelDefault: 'fake',
+      registry: registry as unknown as RegistryClient,
+      sandboxRuntime: runtime,
+      sandboxEgress: {
+        proxyUrl: 'https://proxy.example:8443',
+        internalBypass: ['registry.orca.svc.cluster.local'],
+        owner: { namespace: 'orca', name: 'harness', uid: 'owner-uid' },
+      },
+    });
+    await _dispatcher.start();
+    await source.emit(userMessageEvent('evt_client_egress', 'ws_insandbox', sessionId));
+    await waitFor(() => store.appended.some((event) => event.kind === 'agent.message'));
+    expect(order).toEqual(['registered', 'acquired', 'issued', 'bootstrap']);
+    expect(runtime.acquiredSpecs[0]!.sandboxNetwork).toEqual({
+      binding_id: 'network',
+      generation: 'one',
+    });
+    expect(runtime.acquiredSpecs[0]!.harnessEnv).not.toHaveProperty('ORCA_GIT_CREDS_TOKEN');
+    expect(issue.mock.calls[0]![0]).toMatchObject({
+      sandboxId: 'sbx_insandbox_1',
+      owner: { uid: 'owner-uid' },
+    });
+    expect(configure.mock.calls[0]![0]).toMatchObject({
+      GH_TOKEN: 'git-marker',
+      GIT_CONFIG_NOSYSTEM: '1',
+    });
+    expect(
+      run.mock.calls.some(([call]) =>
+        (call.args as { command: string }).command.includes("'clone'"),
+      ),
+    ).toBe(true);
+    await _dispatcher.stop();
+    expect(revoke).toHaveBeenCalledWith({
+      workspaceId: 'ws_insandbox',
+      sessionId,
+      binding_id: 'binding',
+      generation: 'generation',
+    });
+    expect(revokeNetwork).toHaveBeenCalledWith('ws_insandbox', sessionId, 'network', 'one');
+    expect(JSON.stringify(store.appended)).not.toContain('opaque-capability');
+  });
   it('routes colocated agent through InSandboxHarness, acquires sandbox with harness image+port, maps events', async () => {
     const WORKSPACE_ID = 'ws_insandbox';
     const SESSION_ID = 'ses_insandbox_1';

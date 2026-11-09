@@ -3,7 +3,10 @@
 
 import type { EnvironmentSpec } from '@orca/sandbox-runtime';
 
-export type EnvironmentProvisionSpec = Pick<EnvironmentSpec, 'packages' | 'networking'>;
+export type EnvironmentProvisionSpec = Pick<
+  EnvironmentSpec,
+  'packages' | 'networking' | 'sandboxNetwork'
+>;
 
 // Environment launcher framework — provider-agnostic lifecycle + start-worker
 // contract for running `environment-worker` inside one Environment backend
@@ -38,6 +41,8 @@ export interface WorkerIdentity {
 
 /** Inputs to {@link EnvironmentLauncher.startWorker}. */
 export interface StartWorkerOptions {
+  /** Trusted requirement signal; actual enforcement is independently verified by Registry. */
+  readonly sandboxEgress?: true;
   /** The per-launch Environment token (minted by `EnvironmentTokenStore`; opaque to the launcher). */
   readonly token: string;
   /** Base URL of the registry worker tunnel the spawned `environment-worker` dials. */

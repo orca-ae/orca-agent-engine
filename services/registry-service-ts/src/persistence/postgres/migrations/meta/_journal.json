@@ -477,6 +477,34 @@
       "when": 1793678679540,
       "tag": "0068_groovy_luke_cage",
       "breakpoints": true
+    },
+    {
+      "idx": 69,
+      "version": "7",
+      "when": 1793678679541,
+      "tag": "0069_ambiguous_mister_sinister",
+      "breakpoints": true
+    },
+    {
+      "idx": 70,
+      "version": "7",
+      "when": 1793678679542,
+      "tag": "0070_misty_impossible_man",
+      "breakpoints": true
+    },
+    {
+      "idx": 71,
+      "version": "7",
+      "when": 1793678679543,
+      "tag": "0071_youthful_forge",
+      "breakpoints": true
+    },
+    {
+      "idx": 72,
+      "version": "7",
+      "when": 1793930519782,
+      "tag": "0072_heavy_whizzer",
+      "breakpoints": true
     }
   ]
 }

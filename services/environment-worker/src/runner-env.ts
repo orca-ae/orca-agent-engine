@@ -32,7 +32,8 @@ import {
   RUNNER_WORKSPACE_ENV_VAR,
   stripRunnerAuthSecrets,
 } from '@orca/harness-tunnel';
-import { ENVIRONMENT_PACKAGES_ENV } from '@orca/sandbox-runtime';
+import { ENVIRONMENT_PACKAGES_ENV, SANDBOX_EGRESS_ENABLED_ENV } from '@orca/sandbox-runtime';
+import { ORCA_ENVIRONMENT_TOKEN_ENV_VAR } from './config.js';
 
 // `RUNNER_REGISTRY_URL_ENV_VAR` is IMPORTED, never declared here — the same rule
 // its three siblings above already follow. It lives in `@orca/harness-tunnel`'s
@@ -92,6 +93,7 @@ const RUNNER_OPERATOR_KNOBS: readonly string[] = [
  * {@link RUNNER_ENV_PASSTHROUGH_ENV_VAR}.
  */
 const RUNNER_ENV_ALLOWLIST: ReadonlySet<string> = new Set([
+  SANDBOX_EGRESS_ENABLED_ENV,
   ENVIRONMENT_PACKAGES_ENV,
   'PATH',
   'HOME',
@@ -140,6 +142,9 @@ export function buildRunnerEnv(
   baseEnv: Record<string, string | undefined>,
   wiring: RunnerWiring,
 ): Record<string, string> {
+  if (baseEnv[SANDBOX_EGRESS_ENABLED_ENV] === 'true' && !baseEnv[ORCA_ENVIRONMENT_TOKEN_ENV_VAR]) {
+    throw new Error('sandbox egress requires a Registry-launched managed environment');
+  }
   const passthrough = new Set(
     (baseEnv[RUNNER_ENV_PASSTHROUGH_ENV_VAR] ?? '')
       .split(',')

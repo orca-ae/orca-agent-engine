@@ -408,7 +408,7 @@ jobs:
             orca-harness-server-kind:e2e \
             orca-ai-gateway-kind:e2e \
             orca-kind-fixture:e2e; do
-            kind load docker-image --name "${KIND_CLUSTER_NAME}" "${image}"
+            bash .github/scripts/load-kind-image-with-retry.sh "${image}" "${KIND_CLUSTER_NAME}"
           done
 
       - name: Run split-chart Kind Helm E2E

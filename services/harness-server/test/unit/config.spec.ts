@@ -10,6 +10,38 @@ import { loadConfig } from '../../src/config.js';
 
 const baseEnv = { SANDBOX_RUNTIME: 'local' };
 
+describe('sandbox egress config', () => {
+  const enabled = {
+    SANDBOX_RUNTIME: 'opensandbox',
+    SANDBOX_EGRESS_ENABLED: 'true',
+    SANDBOX_EGRESS_PROXY_URL: 'https://proxy.example:8443',
+    SANDBOX_EGRESS_OWNER_POD_NAMESPACE: 'orca',
+    SANDBOX_EGRESS_OWNER_POD_NAME: 'harness',
+    SANDBOX_EGRESS_OWNER_POD_UID: 'uid',
+    SANDBOX_EGRESS_INTERNAL_BYPASS: '["registry.orca.svc.cluster.local","10.0.0.2"]',
+  };
+  it('requires nothing when disabled and validates trusted identity when enabled', () => {
+    expect(loadConfig(baseEnv).sandboxEgress).toBeUndefined();
+    expect(loadConfig(enabled).sandboxEgress).toEqual({
+      proxyUrl: 'https://proxy.example:8443',
+      owner: { namespace: 'orca', name: 'harness', uid: 'uid' },
+      internalBypass: ['registry.orca.svc.cluster.local', '10.0.0.2'],
+    });
+  });
+  it('fails closed on unsupported runtime, missing identity, plaintext proxy and broad bypass', () => {
+    expect(() => loadConfig({ ...enabled, SANDBOX_RUNTIME: 'local' })).toThrow('OpenSandbox');
+    expect(() => loadConfig({ ...enabled, SANDBOX_EGRESS_OWNER_POD_UID: '' })).toThrow(
+      'Pod identity',
+    );
+    expect(() =>
+      loadConfig({ ...enabled, SANDBOX_EGRESS_PROXY_URL: 'http://proxy.example' }),
+    ).toThrow('HTTPS proxy');
+    expect(() => loadConfig({ ...enabled, SANDBOX_EGRESS_INTERNAL_BYPASS: '[".svc"]' })).toThrow(
+      'canonical',
+    );
+  });
+});
+
 describe('loadConfig — SDK turn deadlines', () => {
   it('keeps the ten-minute default and parses operator overrides', () => {
     expect(loadConfig(baseEnv)).toMatchObject({

@@ -1,6 +1,9 @@
 // Copyright The Orca Authors
 // SPDX-License-Identifier: Apache-2.0
 
+import type { SandboxEgressService } from '../domain/sandbox-egress.js';
+import type { WorkerLaunchAuthority } from '../domain/runner-launch-authority.js';
+
 // Public WebSocket endpoint for environment-worker tunnels.
 //
 // A self-hosted environment worker dials this endpoint from OUTSIDE the mesh
@@ -169,6 +172,7 @@ export interface WorkerClaimStore {
 
 /** Options for {@link registerWorkerTunnelRoutes}. */
 export interface WorkerTunnelRouteOptions {
+  sandboxEgress?: SandboxEgressService;
   /** In-memory registry of live worker connections on this replica. */
   registry: WorkerRegistry;
   /** Loads the environment's env-key credential row for the auth gate. */
@@ -455,8 +459,39 @@ async function runWorkerTunnel(
   //    superseded worker's teardown cannot release the new owner's claim.
   const workerConnId = randomUUID();
   const ownerPod = opts.ownerPod ?? DEFAULT_OWNER_POD;
+  let launchAuthority: WorkerLaunchAuthority | undefined;
+  try {
+    if (opts.sandboxEgress && (await opts.sandboxEgress.requiresManagedWorker(environmentId))) {
+      if (!presentedToken) {
+        socket.close(
+          WORKER_UNAUTHENTICATED_CLOSE_CODE,
+          'managed worker requires launch token; reprovision Environment',
+        );
+        return;
+      }
+      launchAuthority = await opts.sandboxEgress.authenticatedWorkerLaunch(
+        environmentId,
+        presentedToken,
+        ownerPod,
+        workerConnId,
+      );
+    }
+  } catch {
+    socket.close(
+      WORKER_UNAUTHENTICATED_CLOSE_CODE,
+      'managed worker launch unavailable; reprovision Environment',
+    );
+    return;
+  }
   const server = new WorkerTunnelServer({
-    registry: opts.registry,
+    registry: launchAuthority
+      ? {
+          register: (workerId, ws, hello, registration) =>
+            opts.registry.register(workerId, ws, hello, { ...registration, launchAuthority }),
+          get: (workerId) => opts.registry.get(workerId),
+          deregister: (workerId) => opts.registry.deregister(workerId),
+        }
+      : opts.registry,
     // The env-key credential is the worker's identity, already verified above;
     // the claim store backs the engine's persistent "worker store" seam. The
     // resolved workspace is the tunnel owner (the tenant scope).

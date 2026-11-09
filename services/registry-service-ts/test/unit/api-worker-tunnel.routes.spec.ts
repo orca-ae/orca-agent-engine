@@ -22,7 +22,8 @@
 // (claim on connect, release on disconnect, heartbeat on ping) and authenticates
 // the Env Key, with no infrastructure.
 
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
+import type { SandboxEgressService } from '../../src/domain/sandbox-egress.js';
 import Fastify, { type FastifyInstance } from 'fastify';
 import websocket from '@fastify/websocket';
 import { WebSocket } from 'ws';
@@ -398,6 +399,54 @@ async function sendHelloAndRegister(
 // ── Accept + register + claim ───────────────────────────────
 
 describe('api/worker-tunnel route — accept + register + claim', () => {
+  it('attaches only route-authenticated launch provenance to the exact worker connection', async () => {
+    const capture = vi.fn(
+      async (environmentId: string, token: string, ownerPod: string, workerConnId: string) => {
+        expect(token).toBe(ENVIRONMENT_TOKEN);
+        return {
+          environment_id: environmentId,
+          launch_digest: 'verified-token-digest',
+          sandbox_handle_id: 'sandbox',
+          sandbox_pod: { namespace: 'sandboxes', name: 'pod', uid: 'pod-uid' },
+          worker_conn_id: workerConnId,
+          owner_pod: ownerPod,
+        };
+      },
+    );
+    const sandboxEgress = {
+      requiresManagedWorker: async () => true,
+      authenticatedWorkerLaunch: capture,
+    } as unknown as SandboxEgressService;
+    const { baseUrl, registry, claims } = await buildHostTunnelApp({
+      sandboxEgress,
+      ownerPod: 'registry-fixture',
+      tokens: new FakeEnvironmentTokenStore().put(ENV_ID, liveTokenRow()),
+    });
+    const ws = await connect(baseUrl, ENV_ID, {
+      envKey: null,
+      headers: { [ENVIRONMENT_TOKEN_HEADER]: ENVIRONMENT_TOKEN },
+    });
+    await sendHelloAndRegister(ws, registry, ENV_ID);
+    expect(capture).toHaveBeenCalledOnce();
+    expect(registry.get(ENV_ID)!.launchAuthority).toMatchObject({
+      launch_digest: 'verified-token-digest',
+      worker_conn_id: claims.claims[0]!.workerConnId,
+      owner_pod: 'registry-fixture',
+    });
+  });
+  it('does not let an Env-Key connection acquire managed launch provenance or replace its claim', async () => {
+    const capture = vi.fn();
+    const sandboxEgress = {
+      requiresManagedWorker: async () => true,
+      authenticatedWorkerLaunch: capture,
+    } as unknown as SandboxEgressService;
+    const { baseUrl, registry, claims } = await buildHostTunnelApp({ sandboxEgress });
+    const ws = await connect(baseUrl, ENV_ID);
+    expect(await nextClose(ws)).toBe(WORKER_UNAUTHENTICATED_CLOSE_CODE);
+    expect(capture).not.toHaveBeenCalled();
+    expect(claims.claims).toEqual([]);
+    expect(registry.get(ENV_ID)).toBeUndefined();
+  });
   it('accepts a valid Env Key, registers the worker, and claims the environment', async () => {
     const { baseUrl, registry, claims } = await buildHostTunnelApp();
     const ws = await connect(baseUrl, ENV_ID);

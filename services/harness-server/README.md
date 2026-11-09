@@ -456,6 +456,45 @@ for the full lifecycle, and
 
 ### Git envs
 
+Managed OpenSandbox executions can use controlled sandbox egress instead of the legacy Git helper.
+Harness registers a Sandbox network with its downward Pod identity before acquire.
+The trusted network init receives a Pod-bound token; Registry verifies identity and
+Cilium enforcement before bootstrap publishes the Sandbox context. Separate package
+and DSH init containers run afterwards. Harness then issues a Session grant referencing
+that network and prepares resources. Only placeholder Session credentials enter the
+sandbox. Session teardown revokes its grant; Sandbox teardown revokes the network.
+The entrypoint waits for resources before sourcing and deleting its private Session script.
+The shared network context and combined public CA remain read-only for the Sandbox lifetime.
+
+| Variable                           | Default | Purpose                                                                                                                                                                                                                                      |
+| ---------------------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| SANDBOX_EGRESS_ENABLED             | false   | Opt into controlled egress; requires managed OpenSandbox and trusted platform images.                                                                                                                                                        |
+| SANDBOX_EGRESS_PROXY_URL           | unset   | HTTPS proxy origin without credentials.                                                                                                                                                                                                      |
+| SANDBOX_EGRESS_INTERNAL_BYPASS     | []      | JSON array of explicit canonical DNS names or IPv4 addresses. DNS NO_PROXY entries can also match suffixes in clients; Cilium destination and port rules enforce authorization. Wildcards, CIDRs, leading dots, ports and IPv6 are rejected. |
+| SANDBOX_EGRESS_OWNER_POD_NAMESPACE | unset   | Downward API owner Pod namespace.                                                                                                                                                                                                            |
+| SANDBOX_EGRESS_OWNER_POD_NAME      | unset   | Downward API owner Pod name.                                                                                                                                                                                                                 |
+| SANDBOX_EGRESS_OWNER_POD_UID       | unset   | Downward API owner Pod UID, validated against Kubernetes by Registry.                                                                                                                                                                        |
+
+Disabled mode requires none of these settings and retains the legacy flow below.
+Controlled networking supports separate Environment package and DSH profile installers
+behind the bootstrap barrier. Managed gem plans are rejected before provisioning/download:
+RubyGems 3.6.7 with Ruby 3.3.8 cannot use HTTPS proxy transport. Non-managed gem plans
+retain their existing behavior.
+
+Sandbox images pin client packages with build arguments SANDBOX_GIT_VERSION,
+SANDBOX_CURL_VERSION and SANDBOX_GH_VERSION. The trixie-based sandbox-harness and
+environment images use Git 2.47.3, curl 8.14.1 and gh 2.46.0. The Ubuntu 24.04
+OpenSandbox separate-mode image builds Git 2.47.3 from a SHA256-verified source archive
+against Ubuntu 24.04 and uses curl 8.5.0 and gh 2.45.0. Git uses http.proactiveAuth=basic
+so its first request includes the marker instead of waiting for a 401 challenge from a
+resolver that denies missing markers with 403.
+Changing a pin requires repeating the HTTPS proxy client fixtures; a successful package
+installation alone does not establish proxy compatibility or network enforcement.
+The marker-only helper fixture runs with
+node packages/sandbox-runtime/test/fixtures/git-proactive-auth.mjs from the repository root
+against the locally built client images. It verifies that unauthenticated-first Git fails
+and proactive Basic succeeds; it does not qualify the full TLS proxy chain.
+
 | Var                    | Default                      | Meaning                                                                                                                                                                                                                            |
 | ---------------------- | ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `HARNESS_WORK_DIR`     | `/var/tmp/orca-harness`      | Host-side base dir for per-session ephemeral repos. `WorkDirManager` allocates `<base>/sessions/{ws}/{ses}/repo-{N}/` per repo and `rm -rf`s the session subtree on stop.                                                          |

@@ -5,29 +5,43 @@
 # Bound and retry kind image imports. A wedged Docker export/containerd import
 # must fail with diagnostics instead of consuming the whole GitHub Actions job
 # timeout and canceling the remaining real-agent matrix.
+# Export only the local platform: Docker's containerd store may retain a full
+# multi-platform index without its other blobs, which kind cannot import.
 
 set -u
 
 # Opt in for large images on Docker-backed, overlayfs kind nodes. Streaming
 # avoids kind load docker-image's complete temporary archive on the host.
 load_image() {
-  if [[ "${KIND_IMAGE_LOAD_STREAM:-0}" == 1 ]]; then
-    "${timeout_bin}" --signal=TERM --kill-after=30s "${load_timeout}" \
-      bash -euo pipefail -c '
+  # Positional arguments expand in the child shell, inside the timeout.
+  # shellcheck disable=SC2016
+  "${timeout_bin}" --signal=TERM --kill-after=30s "${load_timeout}" \
+    bash -euo pipefail -c '
         nodes=$("$1" get nodes --name "$4")
         if [[ -z "$nodes" ]]; then
           echo "No kind nodes found for $4" >&2
           exit 1
         fi
+        platform=$("$2" image inspect --format "{{.Os}}/{{.Architecture}}" "$3")
+        archive=
+        cleanup() { if [[ -n "$archive" ]]; then rm -f -- "$archive"; fi; }
+        trap cleanup EXIT
+        if [[ "$5" != 1 ]]; then
+          archive=$(mktemp)
+          "$2" image save --platform "$platform" --output "$archive" "$3"
+        fi
         while IFS= read -r node; do
-          "$2" image save "$3" | "$2" exec --privileged -i "$node" \
-            ctr --namespace=k8s.io images import --all-platforms --digests --snapshotter=overlayfs -
+          # Do not promote unnamed attestations to images via --digests: old
+          # containerd tries to unpack their in-toto payloads as rootfs layers.
+          if [[ "$5" == 1 ]]; then
+            "$2" image save --platform "$platform" "$3" | "$2" exec --privileged -i "$node" \
+              ctr --namespace=k8s.io images import --platform "$platform" --snapshotter=overlayfs -
+          else
+            "$2" exec --privileged -i "$node" \
+              ctr --namespace=k8s.io images import --platform "$platform" --snapshotter=overlayfs - < "$archive"
+          fi
         done <<< "$nodes"
-      ' -- "${kind_bin}" "${docker_bin}" "${image}" "${cluster_name}"
-  else
-    "${timeout_bin}" --signal=TERM --kill-after=30s "${load_timeout}" \
-      "${kind_bin}" load docker-image "${image}" --name "${cluster_name}"
-  fi
+      ' -- "${kind_bin}" "${docker_bin}" "${image}" "${cluster_name}" "${KIND_IMAGE_LOAD_STREAM:-0}"
 }
 
 if [[ "$#" -ne 2 ]]; then

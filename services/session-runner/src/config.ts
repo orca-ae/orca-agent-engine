@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { readPiProviderCredentials, type PiProviderCredentials } from '@orca/pi-harness';
+import { SANDBOX_EGRESS_ENABLED_ENV } from './sandbox/seam.js';
 // Runner-wiring config the session-runner reads from its environment.
 //
 // The session-runner is a long-running CLIENT process the environment-worker
@@ -124,6 +125,8 @@ export interface RunnerProviderConfig {
  * `tokenBoundRunnerId`).
  */
 export interface RunnerConfig {
+  /** Requirement only; authenticated delivery and managed runtime remain mandatory. */
+  readonly sandboxEgressRequired?: true;
   /** Per-run tunnel binding token; also the runner-side request auth token. */
   readonly bindingToken: string;
   /** Registry runner-tunnel base URL the runner dials back. */
@@ -227,12 +230,17 @@ function optionalTrimmed(raw: string | undefined): string | undefined {
  * `process.env`). Throws if a required wiring var is missing or empty.
  */
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): RunnerConfig {
+  const egress = env[SANDBOX_EGRESS_ENABLED_ENV];
+  if (egress !== undefined && egress !== '' && egress !== 'true' && egress !== 'false') {
+    throw new Error('SANDBOX_EGRESS_ENABLED must be true or false');
+  }
   const bindingToken = requireEnv(RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR, env);
   const registryRunnerUrl = requireEnv(RUNNER_REGISTRY_URL_ENV_VAR, env);
   const workspace = requireEnv(RUNNER_WORKSPACE_ENV_VAR, env);
 
   const workspaceIdRaw = env[RUNNER_WORKSPACE_ID_ENV_VAR];
   const config: RunnerConfig = {
+    ...(egress === 'true' ? { sandboxEgressRequired: true as const } : {}),
     bindingToken,
     registryRunnerUrl,
     workspace,

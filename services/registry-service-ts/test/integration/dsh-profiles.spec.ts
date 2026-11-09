@@ -29,10 +29,13 @@ import {
 } from './setup.js';
 import { createTestApiKey, uniqueWorkspace } from './fixtures.js';
 import { nativeProfileFiles } from '../helpers/dsh-profile.js';
+import { SandboxEgressService } from '../../src/domain/sandbox-egress.js';
+import { SandboxNetworkService } from '../../src/domain/sandbox-network.js';
 
 describe('immutable Agent-bound native DSH profiles (Registry integration)', () => {
   let app: FastifyInstance;
   let revoked: FastifyInstance;
+  let managed: FastifyInstance;
   let db: DbClient;
   let workspaceId: string;
   let key: string;
@@ -66,7 +69,26 @@ describe('immutable Agent-bound native DSH profiles (Registry integration)', () 
     };
     app = buildCombinedTestApp({ ...options, dshApprovedProfiles: approved });
     revoked = buildCombinedTestApp(options);
-    await Promise.all([app.ready(), revoked.ready()]);
+    const unavailable = async (): Promise<never> => {
+      throw new Error('admission must not bootstrap or claim network readiness');
+    };
+    const sandboxEgress = new SandboxEgressService(
+      db,
+      { resolve: async () => null },
+      {
+        networks: new SandboxNetworkService(db, {
+          authority: { bootstrap: unavailable, current: unavailable, ownerLive: unavailable },
+          proxyUrl: 'https://proxy.example:8443',
+          internalBypass: [],
+        }),
+        githubRestReadEnabled: false,
+        environmentClaimTtlMs: 90000,
+        verifyLiveness: unavailable,
+        locateSandbox: unavailable,
+      },
+    );
+    managed = buildCombinedTestApp({ ...options, dshApprovedProfiles: approved, sandboxEgress });
+    await Promise.all([app.ready(), revoked.ready(), managed.ready()]);
     const environment = await post('/v1/environments', {
       name: 'DSH profile environment',
       config: { type: 'cloud', networking: { type: 'unrestricted' } },
@@ -76,7 +98,7 @@ describe('immutable Agent-bound native DSH profiles (Registry integration)', () 
   });
 
   afterAll(async () => {
-    await Promise.all([app?.close(), revoked?.close()]);
+    await Promise.all([app?.close(), revoked?.close(), managed?.close()]);
     await fileStore.close();
     await closeTestDb();
   });
@@ -294,6 +316,48 @@ describe('immutable Agent-bound native DSH profiles (Registry integration)', () 
       expect(opened).not.toHaveBeenCalled();
     } finally {
       opened.mockRestore();
+    }
+  });
+
+  it('admits limited cloud profiles only with configured managed networking and rechecks the current Environment', async () => {
+    const agent = await createAgent(await upload());
+    await db
+      .update(environments)
+      .set({ networking: { type: 'limited', allowed_hosts: ['registry.npmjs.org'] } })
+      .where(eq(environments.id, environmentId));
+    try {
+      expect((await createSession(agent.id)).statusCode).toBe(400);
+      expect(
+        (await createSession(agent.id, 1, { metadata: { sandbox_network_enabled: 'true' } }))
+          .statusCode,
+      ).toBe(400);
+      const session = await createSession(agent.id, 1, {}, managed);
+      expect(session.statusCode, session.body).toBe(200);
+      const id = session.json().id;
+      const prepared = await prepare(id, managed);
+      expect(prepared.statusCode, prepared.body).toBe(200);
+      expect(prepared.json().environment.networking).toEqual({
+        type: 'limited',
+        allowed_hosts: ['registry.npmjs.org'],
+      });
+      expect((await prepare(id)).statusCode).toBe(409);
+      expect((await prepare(id, managed, [])).statusCode).toBe(409);
+      const injected = await post(
+        '/internal/v1/workspaces/' + workspaceId + '/sessions/' + id + '/executions:prepare',
+        { capabilities: ['dsh_profile_v1'], sandbox_network_enabled: true },
+      );
+      expect(injected.statusCode).toBe(400);
+      await db
+        .update(environments)
+        .set({ target: 'self_hosted' })
+        .where(eq(environments.id, environmentId));
+      expect((await createSession(agent.id, 1, {}, managed)).statusCode).toBe(400);
+      expect((await prepare(id, managed)).statusCode).toBe(409);
+    } finally {
+      await db
+        .update(environments)
+        .set({ target: 'cloud', networking: { type: 'unrestricted' } })
+        .where(eq(environments.id, environmentId));
     }
   });
 
@@ -533,7 +597,7 @@ describe('immutable Agent-bound native DSH profiles (Registry integration)', () 
       ).toBe(400);
       return result.json().id as string;
     }
-    async function fire(id: string, grants = approved) {
+    async function fire(id: string, grants = approved, sandboxNetworkEnabled = false) {
       const now = new Date();
       await db.update(agentTriggers).set({ nextFireAt: now }).where(eq(agentTriggers.id, id));
       await reconcileDueAgentTriggers(db, { now, batchSize: 1000 });
@@ -541,6 +605,7 @@ describe('immutable Agent-bound native DSH profiles (Registry integration)', () 
         now,
         batchSize: 1000,
         dshApprovedProfiles: grants,
+        sandboxNetworkEnabled,
       });
       return (
         await db.select().from(agentTriggerFires).where(eq(agentTriggerFires.triggerId, id))
@@ -562,10 +627,24 @@ describe('immutable Agent-bound native DSH profiles (Registry integration)', () 
       .where(eq(environments.id, environmentId));
     try {
       expect((await fire(networkTrigger)).status).toBe('failed');
+      const managedFire = await fire(await trigger('Managed limited profile'), approved, true);
+      expect(managedFire.status).toBe('enqueued');
+      expect((await prepare(managedFire.sessionId!, managed)).statusCode).toBe(200);
+      expect((await prepare(managedFire.sessionId!)).statusCode).toBe(409);
+      await db
+        .update(environments)
+        .set({ target: 'self_hosted' })
+        .where(eq(environments.id, environmentId));
+      const unsupportedFire = await fire(
+        await trigger('Unsupported managed target'),
+        approved,
+        true,
+      );
+      expect(unsupportedFire.status).toBe('failed');
     } finally {
       await db
         .update(environments)
-        .set({ networking: { type: 'unrestricted' } })
+        .set({ target: 'cloud', networking: { type: 'unrestricted' } })
         .where(eq(environments.id, environmentId));
     }
     expect(

@@ -22,6 +22,7 @@ import {
   type SQL,
 } from 'drizzle-orm';
 import type { DbClient } from '../persistence/postgres/client.js';
+import type { SandboxEgressService } from '../domain/sandbox-egress.js';
 import {
   agentVersions,
   sessions,
@@ -574,8 +575,25 @@ async function resolveGithubRepoResource(
  * sentinel on the wire, i.e. the worker's own default cwd) when the session
  * attaches no repository. See {@link resolveSessionWorkspace}.
  */
-export function buildDistributionSessionStore(db: DbClient): DistributionSessionStore {
+export function buildDistributionSessionStore(
+  db: DbClient,
+  sandboxEgress?: SandboxEgressService,
+): DistributionSessionStore {
   return {
+    ...(sandboxEgress
+      ? {
+          bindManagedRunner: (
+            id: string,
+            runnerId: string,
+            source: Parameters<SandboxEgressService['bindRunnerLaunch']>[2],
+            send: () => void,
+          ) => sandboxEgress.bindRunnerLaunch(id, runnerId, source, send),
+          retireStaleManagedRunners: (
+            environmentId: string,
+            source: Parameters<SandboxEgressService['retireStaleRunnerLaunches']>[1],
+          ) => sandboxEgress.retireStaleRunnerLaunches(environmentId, source),
+        }
+      : {}),
     async load(id: string): Promise<DistributionSessionRow | null> {
       const rows = await db
         .select()
@@ -600,7 +618,10 @@ export function buildDistributionSessionStore(db: DbClient): DistributionSession
       expectedRunnerId?: string | null,
     ): Promise<boolean> {
       const set: Partial<typeof sessions.$inferInsert> = { updatedAt: new Date() };
-      if ('runnerId' in patch) set.runnerId = patch.runnerId ?? null;
+      if ('runnerId' in patch) {
+        set.runnerId = patch.runnerId ?? null;
+        set.runnerLaunchAuthority = sql`case when ${sessions.runnerId} is distinct from ${patch.runnerId ?? null} then null else ${sessions.runnerLaunchAuthority} end`;
+      }
       if ('hostEnvironmentId' in patch) set.hostEnvironmentId = patch.hostEnvironmentId ?? null;
       if ('distributionState' in patch) set.distributionState = patch.distributionState ?? null;
       const updated = await db
@@ -841,6 +862,7 @@ export function registerSessionsRoutes(
   secretStore?: SecretStore,
   batchReadsEnabled = true,
   dshApprovedProfiles: DshApprovedProfiles = {},
+  sandboxNetworkEnabled = false,
 ): void {
   async function handleSessionStream(req: FastifyRequest, reply: FastifyReply) {
     const auth = req.auth!;
@@ -1249,6 +1271,7 @@ export function registerSessionsRoutes(
     try {
       creation = await db.transaction(async (tx) =>
         createSessionInTransaction(tx, {
+          sandboxNetworkEnabled,
           dshApprovedProfiles,
           id,
           workspaceId: auth.workspaceId,

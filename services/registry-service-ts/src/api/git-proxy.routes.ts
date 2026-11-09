@@ -17,7 +17,7 @@ import {
   GIT_UPLOAD_REQUEST_TYPE,
   GIT_UPLOAD_RESULT_TYPE,
 } from '../contracts/git-proxy.contract.js';
-import { loadGitProxyBinding } from '../domain/git-proxy-capability.js';
+import { loadGitProxyBinding, sessionUsesSandboxEgress } from '../domain/git-proxy-capability.js';
 import {
   createGitProxyRequest,
   GIT_PROXY_REQUEST_MAX_BYTES,
@@ -119,6 +119,8 @@ export function registerGitProxyRoutes(
       return fail(401, 'Invalid Git proxy authorization');
     }
     if (!verified.gitProxy) return fail(401, 'Invalid Git proxy authorization');
+    if (await sessionUsesSandboxEgress(deps.db, verified.sessionId))
+      return fail(404, 'Legacy Git proxy is unavailable');
     const encoding = req.headers['content-encoding'];
     if (encoding !== undefined && encoding !== 'identity' && encoding !== 'gzip')
       return fail(415, 'Unsupported Git request encoding');

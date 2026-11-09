@@ -4,6 +4,27 @@
 nameOverride: ''
 fullnameOverride: ''
 
+sandboxEgress:
+  enabled: false
+  proxyUrl: ''
+  caBundleConfigMap: ''
+  namespace: opensandbox
+  providerServiceAccount:
+    namespace: opensandbox-system
+    name: ''
+  gateway:
+    namespace: ''
+    podSelector: {}
+    port: 8443
+  dns:
+    namespace: kube-system
+    podSelector:
+      k8s-app: kube-dns
+  # Exact host plus namespaced endpoint labels and numeric ports; no CIDRs.
+  internalBypass: []
+  git:
+    githubRestReadEnabled: false
+
 imagePullSecrets: []
 
 podSecurityContext:

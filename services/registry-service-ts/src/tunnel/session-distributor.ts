@@ -1,6 +1,8 @@
 // Copyright The Orca Authors
 // SPDX-License-Identifier: Apache-2.0
 
+import type { WorkerLaunchAuthority } from '../domain/runner-launch-authority.js';
+
 // Claim-based session distributor: connects a Registry-owned Session to its
 // environment worker and runner tunnel. Self-hosted Sessions always use this
 // path. For cloud Sessions, the pinned harness capability selects the owner;
@@ -75,10 +77,15 @@ import {
   tokenBoundRunnerId,
   WorkerFrameKind,
   type WorkerLaunchResult,
+  type WorkerStopResult,
 } from '@orca/harness-tunnel';
 import { resolveExecutionOwner, type HarnessMode, type HarnessType } from '@orca/harness-catalog';
 import { randomBytes } from 'node:crypto';
-import { WorkerConnectionReplacedError, type WorkerRegistry } from './worker-registry.js';
+import {
+  WorkerConnectionReplacedError,
+  type WorkerRegistry,
+  type WorkerConnection,
+} from './worker-registry.js';
 import { TunnelRegistry } from './tunnel-registry.js';
 
 /** distribution_state value: session persisted, no runner assigned yet. */
@@ -373,6 +380,16 @@ export interface DistributionSessionRow {
  * route wires a Drizzle-backed implementation over the `sessions` table.
  */
 export interface DistributionSessionStore {
+  bindManagedRunner?(
+    sessionId: string,
+    runnerId: string,
+    source: WorkerLaunchAuthority,
+    send: () => void,
+  ): Promise<boolean>;
+  retireStaleManagedRunners?(
+    environmentId: string,
+    source: WorkerLaunchAuthority | undefined,
+  ): Promise<string[]>;
   /** Load the distribution view of a session by id, or `null` when absent. */
   load(id: string): Promise<DistributionSessionRow | null>;
   /**
@@ -693,18 +710,21 @@ export class SessionDistributor {
     });
 
     // Persist the runner binding + worker environment id (still PENDING).
-    const persisted = await this.sessions.applyDistributionPatch(
-      sessionId,
-      pendingDistributionPatch({ runnerId, hostEnvironmentId: environment.id }),
-      row.runnerId,
-    );
-    if (!persisted) {
-      this.tunnelRegistry.cancelConnectWaiters(runnerId);
-      return {
-        state: DISTRIBUTION_PENDING,
-        runnerId: null,
-        launchSettled: Promise.resolve({ status: 'send_failed' }),
-      };
+    const managed = environment.target === 'cloud' && this.sessions.bindManagedRunner !== undefined;
+    if (!managed) {
+      const persisted = await this.sessions.applyDistributionPatch(
+        sessionId,
+        pendingDistributionPatch({ runnerId, hostEnvironmentId: environment.id }),
+        row.runnerId,
+      );
+      if (!persisted) {
+        this.tunnelRegistry.cancelConnectWaiters(runnerId);
+        return {
+          state: DISTRIBUTION_PENDING,
+          runnerId: null,
+          launchSettled: Promise.resolve({ status: 'send_failed' }),
+        };
+      }
     }
 
     // Register the pending launch waiter against the worker connection, then send
@@ -724,7 +744,16 @@ export class SessionDistributor {
     });
 
     try {
-      this.workerRegistry.sendText(conn, launchFrame);
+      if (managed) {
+        if (!conn.launchAuthority)
+          throw new Error('managed worker lacks launch-token provenance; reprovision Environment');
+        if (
+          !(await this.sessions.bindManagedRunner!(sessionId, runnerId, conn.launchAuthority, () =>
+            this.workerRegistry.sendText(conn, launchFrame),
+          ))
+        )
+          throw new Error('managed runner binding was replaced');
+      } else this.workerRegistry.sendText(conn, launchFrame);
     } catch (exc) {
       // The send failed, so the launch frame never left the registry — whether
       // the worker tunnel was replaced (newest-wins, the documented
@@ -738,7 +767,20 @@ export class SessionDistributor {
       // exactly the recovery the replaced-connection case already relied on.
       conn.pendingLaunches.delete(requestId);
       this.tunnelRegistry.cancelConnectWaiters(runnerId);
-      await this.sessions.applyDistributionPatch(sessionId, unassignedPendingPatch(), runnerId);
+      const reverted = await this.sessions.applyDistributionPatch(
+        sessionId,
+        {
+          ...unassignedPendingPatch(),
+          ...(managed ? { distributionState: DISTRIBUTION_FAILED } : {}),
+        },
+        runnerId,
+      );
+      if (managed && !reverted)
+        await this.sessions.applyDistributionPatch(
+          sessionId,
+          { ...unassignedPendingPatch(), distributionState: DISTRIBUTION_FAILED },
+          null,
+        );
       if (exc instanceof WorkerConnectionReplacedError) {
         this.logger?.warn?.(
           { sessionId, environmentId: environment.id },
@@ -754,9 +796,17 @@ export class SessionDistributor {
         );
       }
       return {
-        state: DISTRIBUTION_PENDING,
+        state: managed ? DISTRIBUTION_FAILED : DISTRIBUTION_PENDING,
         runnerId: null,
-        launchSettled: Promise.resolve({ status: 'send_failed' }),
+        launchSettled: Promise.resolve(
+          managed
+            ? {
+                status: 'failed',
+                errorCode: 'sandbox_egress_provenance_required',
+                error: 'Managed worker provenance changed; reconnect or reprovision Environment',
+              }
+            : { status: 'send_failed' },
+        ),
       };
     }
 
@@ -853,6 +903,28 @@ export class SessionDistributor {
    *   worker-tunnel `workerId` and the `host_environment_id` a driven launch records.
    */
   async onWorkerConnect(environmentId: string): Promise<void> {
+    if (
+      this.sessions.retireStaleManagedRunners &&
+      (await this.environments.loadTarget(environmentId)) === 'cloud'
+    ) {
+      const connection = this.workerRegistry.get(environmentId);
+      const retired = await this.sessions.retireStaleManagedRunners(
+        environmentId,
+        connection?.launchAuthority,
+      );
+      if (!connection?.launchAuthority)
+        throw new Error(
+          'managed worker lacks launch-token provenance; reconnect or reprovision Environment',
+        );
+      for (const runnerId of retired) {
+        this.tunnelRegistry.deregister(runnerId);
+        await this.stopRetiredRunner(connection, runnerId);
+        // Keep failed provenance until stop ACK so another replica can retry teardown.
+        const sessionId = await this.sessions.findBoundSessionId(runnerId);
+        if (sessionId)
+          await this.sessions.applyDistributionPatch(sessionId, unassignedPendingPatch(), runnerId);
+      }
+    }
     const pending = await this.sessions.loadPendingForEnvironment(environmentId);
     if (pending.length === 0) {
       return;
@@ -902,6 +974,30 @@ export class SessionDistributor {
    * (a runner for a session this replica did not distribute, or one already
    * cleaned up) — the per-session runner-id binding is the cross-runner guard.
    */
+  private async stopRetiredRunner(connection: WorkerConnection, runnerId: string): Promise<void> {
+    const requestId = randomBytes(8).toString('hex');
+    const result = new Promise<WorkerStopResult>((resolve, reject) =>
+      connection.pendingStops.set(requestId, { resolve, reject }),
+    );
+    try {
+      this.workerRegistry.sendText(
+        connection,
+        encodeWorkerFrame({ kind: WorkerFrameKind.StopRunner, requestId, runnerId }),
+      );
+      const stopped = await withTimeout(result, this.launchResultTimeoutMs);
+      // Existing workers report an absent process as this exact fixed error.
+      if (
+        stopped === TIMED_OUT ||
+        (stopped.status !== 'stopped' && stopped.error !== `unknown runner: ${runnerId}`)
+      )
+        throw new Error(
+          'stale managed runner teardown failed; reprovision Environment before retry',
+        );
+    } finally {
+      connection.pendingStops.delete(requestId);
+    }
+  }
+
   async onRunnerConnect(runnerId: string): Promise<void> {
     const sessionId = await this.sessions.findBoundSessionId(runnerId);
     if (sessionId === null) {
@@ -927,7 +1023,14 @@ export class SessionDistributor {
       return;
     }
 
-    await this.sessions.applyDistributionPatch(sessionId, assignedDistributionPatch(), runnerId);
+    if (
+      !(await this.sessions.applyDistributionPatch(
+        sessionId,
+        assignedDistributionPatch(),
+        runnerId,
+      ))
+    )
+      return;
     this.logger?.info?.({ sessionId, runnerId }, 'runner connected; session assigned');
   }
 

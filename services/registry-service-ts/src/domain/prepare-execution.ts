@@ -174,6 +174,7 @@ export async function loadEffectiveSessionAgentModels(input: {
 }
 
 export async function prepareExecution(input: {
+  sandboxNetworkEnabled?: boolean;
   capabilities?: string[];
   dshApprovedProfiles?: DshApprovedProfiles;
   db: DbClient;
@@ -304,6 +305,7 @@ export async function prepareGatewayGuardrails(input: {
 }
 
 async function buildPreparedExecution(input: {
+  sandboxNetworkEnabled?: boolean;
   capabilities?: string[];
   dshApprovedProfiles?: DshApprovedProfiles;
   db: DbClient;
@@ -415,7 +417,7 @@ async function buildPreparedExecution(input: {
       if (!input.capabilities?.includes(DSH_PROFILE_CAPABILITY))
         throw new Error('Harness does not advertise dsh_profile_v1');
       requireDshProfileApproval(input.dshApprovedProfiles ?? {}, workspaceId, profile);
-      requireDshProfileEnvironment(environment);
+      requireDshProfileEnvironment(environment, input.sandboxNetworkEnabled);
     }
   } catch (error) {
     throw new InvalidRuntimeBindingError(

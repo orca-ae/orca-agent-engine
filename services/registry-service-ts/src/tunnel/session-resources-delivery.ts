@@ -20,6 +20,7 @@ import {
   type ResourceFileDescriptor,
   type ResourceManifest,
   type GitProxyCapability,
+  type SessionEgressGrant,
 } from '@orca/sandbox-runtime';
 import type { Event, TranscriptStore } from '@orca/transcript-store';
 import type { NativeCompletionCoordinator } from '../domain/native-completion.js';
@@ -32,6 +33,7 @@ export const RUNNER_RESOURCE_CHANGES_PATH = '/v1/runner/resource-changes';
 export const RUNNER_RESOURCE_ACK_PATH = '/v1/runner/resource-changes/ack';
 
 export interface PreparedRunnerResources {
+  sessionEgress?: SessionEgressGrant;
   manifest: ResourceManifest;
   networkAllowedDomains: string[];
   networkUnrestricted?: boolean;
@@ -45,6 +47,7 @@ export interface PreparedRunnerResources {
 }
 
 export interface SessionResourcesDeliveryOptions {
+  onPreparationFailure?(grant?: SessionEgressGrant): Promise<void>;
   native?: {
     coordinator: NativeCompletionCoordinator;
     probe(): Promise<{
@@ -76,10 +79,32 @@ export class SessionResourcesDelivery {
   private knownOutputEvents: Set<string> | undefined;
   private knownMountEvents: Set<string> | undefined;
   private delivered = false;
+  private readonly preparationAborts = new Map<string, Promise<boolean>>();
 
   constructor(private readonly options: SessionResourcesDeliveryOptions) {}
   get native(): boolean {
     return this.options.native !== undefined;
+  }
+
+  /** Capture the delivered generation before awaiting cleanup; retries never target its successor. */
+  abortPreparation(): Promise<boolean> {
+    const grant = this.prepared?.sessionEgress;
+    if (!grant || !this.options.onPreparationFailure) return Promise.resolve(false);
+    const key = `${grant.binding_id}:${grant.generation}`;
+    const previous = this.preparationAborts.get(key);
+    if (previous) return previous;
+    const cleanup = this.options
+      .onPreparationFailure(grant)
+      .then(() => {
+        if (this.prepared?.sessionEgress === grant) this.delivered = false;
+        return true;
+      })
+      .catch((error: unknown) => {
+        this.preparationAborts.delete(key);
+        throw error;
+      });
+    this.preparationAborts.set(key, cleanup);
+    return cleanup;
   }
   private nativeBinding: { executionId: string; placementId: string; revision: string } | undefined;
   private nativeMappings: Record<string, string> | undefined;
@@ -131,9 +156,21 @@ export class SessionResourcesDelivery {
       if (status.committed === true && status.revision === this.prepared.manifest.revision)
         retainedManifest = this.prepared.manifest;
     }
-    const prepared = await this.options.prepare(retainedManifest);
+    const prepared = await this.options.prepare(retainedManifest).catch(async (error: unknown) => {
+      await this.options.onPreparationFailure?.();
+      throw error;
+    });
     try {
       const manifest = parseResourceManifest(prepared.manifest);
+      const manifestMessage = {
+        type: 'manifest',
+        ...(prepared.sessionEgress ? { session_egress: prepared.sessionEgress } : {}),
+        ...(this.options.native ? { placement: 'session_sandbox' } : {}),
+        manifest,
+        network_allowed_domains: prepared.networkAllowedDomains,
+        network_unrestricted: prepared.networkUnrestricted === true,
+        retained_git_resource_ids: prepared.retainedGitResourceIds ?? [],
+      };
       await this.assertCurrent(manifest.revision);
       this.prepared = { ...prepared, manifest };
       if (this.options.native) {
@@ -206,6 +243,13 @@ export class SessionResourcesDelivery {
               throw new Error('Frozen native checkpoint is unavailable');
             }
             this.nativeMappings = status.resolvedPaths;
+            if (prepared.sessionEgress) {
+              const refreshed = record(
+                await this.options.request(RUNNER_RESOURCES_PATH, manifestMessage),
+              );
+              if (refreshed.committed !== true)
+                throw new Error('Running native egress bootstrap was not acknowledged');
+            }
             this.delivered = true;
             return { version: 1, revision: manifest.revision };
           } else
@@ -215,6 +259,7 @@ export class SessionResourcesDelivery {
       if (this.options.native && this.nativeBinding) {
         const status = await this.options.native.probe();
         if (
+          !prepared.sessionEgress &&
           status.executionId === this.nativeBinding.executionId &&
           status.placementId === this.nativeBinding.placementId &&
           status.revision === manifest.revision
@@ -225,16 +270,7 @@ export class SessionResourcesDelivery {
           return { version: 1, revision: manifest.revision };
         }
       }
-      const response = record(
-        await this.options.request(RUNNER_RESOURCES_PATH, {
-          type: 'manifest',
-          ...(this.options.native ? { placement: 'session_sandbox' } : {}),
-          manifest,
-          network_allowed_domains: prepared.networkAllowedDomains,
-          network_unrestricted: prepared.networkUnrestricted === true,
-          retained_git_resource_ids: prepared.retainedGitResourceIds ?? [],
-        }),
-      );
+      const response = record(await this.options.request(RUNNER_RESOURCES_PATH, manifestMessage));
       if (response.committed !== true) {
         for (const resource of manifest.resources) {
           if (prepared.retainedGitResourceIds?.includes(resource.resource_id)) continue;
@@ -294,6 +330,9 @@ export class SessionResourcesDelivery {
       await this.refreshGitCapabilities();
       this.delivered = true;
       return { version: 1, revision: manifest.revision };
+    } catch (error) {
+      await this.options.onPreparationFailure?.(prepared.sessionEgress);
+      throw error;
     } finally {
       await prepared.close();
     }

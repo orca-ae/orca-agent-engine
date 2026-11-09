@@ -4,6 +4,126 @@ Anthropic-compatible REST control plane. Public-facing service. Owns Postgres me
 
 See `docs/managed-agents/services/registry-service.md` for the full design.
 
+## Controlled sandbox egress
+
+`SANDBOX_EGRESS_ENABLED` defaults to `false`; Registry constructs the egress service and
+registers its routes only when enabled. Enabled deployments require
+`SANDBOX_EGRESS_SANDBOX_NAMESPACE`, `SANDBOX_EGRESS_POLICY_SHA256` (the canonical expected
+Cilium policy spec digest), live Kubernetes Pod get/list, NetworkPolicy list, Cilium
+policy/CEP read and `sandbox.opensandbox.io` BatchSandbox get permissions. Registry verifies the unique
+managed gVisor Pod associated with the BatchSandbox UID and the Harness owner Pod
+UID/readiness on each authorization. Each Kubernetes request has a five-second timeout;
+lookup errors fail closed. Readiness bounds liveness; it does not detect process death
+instantaneously or provide a general execution-owner lease. Harness workload authentication
+trusts the caller to obtain its Pod identity from platform downward API values.
+Network bootstrap uses `SANDBOX_EGRESS_PROXY_URL` (an HTTPS origin without
+credentials) and `SANDBOX_EGRESS_INTERNAL_BYPASS`
+(a JSON array of exact internal DNS names or IPv4 addresses, default `[]`).
+These fields are validated only when enabled; they never come from Session input.
+The trusted bootstrap writes its combined CA path and network context once under
+`/run/orca/sandbox-network`. Session delivery contains no URL, CA or bypass fields.
+
+Harness registers before acquire through scoped `sandbox-networks` and cleans up through
+`sandbox-networks/revoke`; only the authenticated Harness workload can use these routes.
+Cloud Environment launch registers before provision, independently of any Session or worker.
+The parent `sandbox_network_bindings` row stores the owner, provisioning generation,
+capability digest and first bound workload/Pod UID. Replacement and cleanup are generation
+fenced. Bootstrap is `POST /internal/v1/sandbox-networks/{bindingId}/bootstrap`: its exact-route
+TokenReview uses audience `orca-sandbox-network`, Pod-bound token extras and the Pod's
+ServiceAccount identity. The authoritative BatchSandbox owner UID and reserved
+`orca.ai/network-binding-id` / `orca.ai/network-generation` annotations must match on
+the workload, template and actual Pod. Sandbox tokens have no other internal API authority.
+Network checks accept init Pods before Ready, verify the full Cilium/Kubernetes policy
+allow union and exact CEP Pod UID/state/enforcing, and never cache positive results.
+Execution liveness retains its separate Ready checks.
+Cloud DSH profile admission accepts limited networking only when the controlled
+Sandbox egress service is configured. HTTP Session creation, Trigger dispatch and
+execution preparation use that server-controlled enablement; request capabilities
+and metadata cannot enable it. Default-off deployments retain unrestricted-only
+admission. Profile approval, Harness capability and current Environment checks
+remain required; admission does not assert that provisioning has finished.
+
+Gateway uses `/internal/v1/sandbox-egress/authorize` and `/internal/v1/sandbox-egress/resolve`.
+Only Gateway/shared workload principals may call them. Both use required `scope: sandbox|session`.
+Sandbox scope always returns passthrough without managed auth and never resolves Session
+markers or secrets. Session grants reference a live network parent, whose revocation
+invalidates all dependent grants. Session grant cleanup preserves the base network.
+Only Harness/shared principals may issue or revoke bindings using the scoped
+`session-egress/issue` and `session-egress/revoke` routes. Issue accepts
+`{sandbox_id,owner:{namespace,name,uid}}` and returns a one-time capability, generation,
+the parent `network_binding_id`, Vault placeholders and an optional Git marker/username. Git fields are absent from
+`placeholders`. Every issue replaces the Session binding; retrying a lost response creates
+a new generation. Revoke is binding/generation fenced and idempotent. Capability digests
+and secret references are persisted; upstream credentials are resolved per request.
+Resolve returns mandatory `request_body_policy`: only a currently authorized Git
+upload-pack POST receives `git_upload_pack`; other operations receive `stream`.
+Gateway uses this trusted policy to validate bounded Git requests before upstream forwarding.
+Environment `networking.allowed_hosts` uses case-insensitive exact hostname matching,
+consistent with existing Git authorization; stored hostname casing is preserved.
+
+Git reads use exact repository operations; optional REST reads require
+`SANDBOX_EGRESS_GITHUB_REST_READ_ENABLED` (default false). Vault environment
+credentials require bounded exact destinations and header-only injection. Session
+preparation rejects invalid credential names, unrestricted/empty/wildcard Vault
+hosts, body injection and reserved environment names: `GH_*`, `GIT_*`,
+`GITHUB_TOKEN`, `ORCA_GIT_*`, `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`,
+`ALL_PROXY`, `SSL_CERT_*`, `CURL_*` and `NODE_EXTRA_CA_CERTS`.
+Other valid names, including `OPENAI_API_KEY`, require no header configuration.
+Provider credentials are excluded; Session Vault order selects duplicate names.
+Helm cannot inspect live Vault data.
+
+Authorize returns binding/generation, scope, decision and `managed_auth`.
+Resolve requires `candidate_headers` (at most 32 lowercase name/value pairs);
+Gateway submits only headers containing reserved marker prefixes or Basic
+Authorization. Registry substitutes complete original markers in eligible headers,
+preserving surrounding text. Basic Authorization is strictly decoded, split at the
+first colon and re-encoded while preserving credential bytes; Vault markers may
+occur in either username or password, but username substitution cannot add a colon.
+Each source is read once per request, and inserted secret contents are never scanned.
+Complete unknown or foreign markers deny the request. Nonmarkers pass unchanged.
+Git markers remain limited to Authorization Basic (`x-access-token` username),
+Bearer or token credentials, canonical repository scope and read-only operations.
+
+Host, framing/hop-by-hop, proxy authentication, Cookie and Set-Cookie headers
+cannot receive secrets; Gateway also excludes headers nominated by Connection.
+Duplicate candidates are denied. Known Vault markers with host or injection-location
+mismatch remain unchanged without a secret read. HTTP80 never injects secrets;
+bodies are not substituted. Current binding, Environment and source permissions
+are checked on each request and rechecked after secret reads.
+
+The internal wire contract changes together with Gateway: upgrade with the feature
+disabled, reprepare Sessions and reissue bindings through the existing lifecycle,
+revoking old bindings. Mixed wire versions have no permissive fallback.
+
+Every resolve includes `request_body_policy`: authorized Git upload-pack POSTs
+require `git_upload_pack`; other requests use `stream`. Gateway validates
+bounded Git bodies and resolves again before forwarding. Legacy Git entry points
+remain denied for Sessions with an egress binding, including revoked bindings.
+
+Registry-owned managed cloud runners read their sandbox association from
+`environments.cloud_sandbox_handle_id`, atomically persisted with the launch token digest.
+Authorization also checks the assigned runner and current worker claim/TTL. Launch-failure
+cleanup compares the mint generation before clearing the association. Legacy launches with
+no persisted sandbox association fail closed until reprovisioned.
+`sessions.runner_launch_authority` fixes the launch digest, sandbox Pod UID, worker
+connection and Registry owner alongside the exact runner ID at dispatch. Only the
+route-authenticated launch token supplies this provenance; Env-Key connections cannot
+acquire it. Dispatch checks the current launch/claim under database locks before binding
+and again through launch enqueue. Issue and resolve compare the persisted source rather
+than assigning an old runner the latest launch. Missing provenance requires a fresh
+worker connection/rebind or Environment reprovision; it is never guessed from current rows.
+Worker reconnect marks stale bindings failed, sends the existing runner-stop request,
+and clears/rebinds only after stop acknowledgment. Failed teardown retains the old
+runner/provenance for retry and reports a reprovision-required error. Cleanup checks the
+expected runner ID so a stale callback cannot erase its successor.
+Native Pi retains its
+existing File-only resource placement; this mode does not enable native Git placement.
+Other Registry-owned native CLI providers fail preparation when this mode is enabled.
+The runner resource `manifest` message carries only the Session credential grant as
+`session_egress`; the runner validates its parent against the local network context.
+Migration 0072 retains old draft bindings as revoked history; new live grants require
+a parent foreign key. There is no old-wire reader or route alias.
+
 ## Run locally
 
 ```bash

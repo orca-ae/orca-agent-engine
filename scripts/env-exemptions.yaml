@@ -507,6 +507,18 @@ exemptions:
       The scoped session JWT injected alongside ORCA_GIT_CREDS_URL, read by the same in-image
       helper.
 
+  - name: ORCA_SANDBOX_EGRESS_CA_CONFIG_MAP
+    reason: wired-elsewhere
+    site: charts/opensandbox-patches/files/batchsandbox_provider.py
+    note: >-
+      The OpenSandbox Python provider reads the public CA ConfigMap name when controlled egress is enabled.
+
+  - name: ORCA_SANDBOX_EGRESS_REGISTRY_URL
+    reason: wired-elsewhere
+    site: charts/opensandbox-patches/files/batchsandbox_provider.py
+    note: >-
+      The OpenSandbox Python provider supplies this trusted Registry origin only to its dedicated network bootstrap init.
+
   - name: ORCA_TRUSTED_SANDBOX_REPOSITORIES
     reason: wired-elsewhere
     site: charts/opensandbox-patches/files/batchsandbox_provider.py
@@ -767,6 +779,14 @@ exemptions:
     note: >-
       harness-modes.md notes the fast-mode wire test runs without this SDK escape hatch, which is
       what makes it a real assertion about the SDK rather than about our own bypass.
+
+  - name: ALL_PROXY
+    reason: wired-elsewhere
+    site: packages/sandbox-runtime/src/sandbox-egress.ts
+    note: >-
+      Controlled egress reserves this name, clears inherited upper/lowercase values through
+      dynamic environment filtering, and emits empty values in the trusted bootstrap. It is
+      not an operator override; Registry rejects Vault credentials using the name.
 
   - name: HTTP_PROXY
     reason: intentionally-absent

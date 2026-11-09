@@ -306,6 +306,17 @@ describe('CloudEnvironmentLauncher — startWorker wiring (fake runtime)', () =>
     );
   });
 
+  it('propagates only the trusted sandbox egress requirement signal to the worker', async () => {
+    const runtime = new FakeSandboxRuntime();
+    const launcher = buildLauncher(runtime);
+    const id = await launcher.provision('test-env', {
+      sandboxNetwork: { binding_id: 'network', generation: 'generation' },
+    });
+    await launcher.startWorker(id, { ...START_OPTS, sandboxEgress: true });
+    const args = runtime.handles[0]!.runCalls[0]!.args as { command: string };
+    expect(args.command).toContain("SANDBOX_EGRESS_ENABLED='true'");
+  });
+
   it('wires WORKSPACE_DIR to a non-empty default when unset', async () => {
     const runtime = new FakeSandboxRuntime();
     const launcher = buildLauncher(runtime);

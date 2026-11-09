@@ -9,6 +9,48 @@ import { GUARDRAIL_READER_CAPABILITIES } from '@orca/guardrails';
 
 const TEST_TOKEN_PROVIDER = async () => 'test-internal-service-token';
 
+it('issues and revokes scoped sandbox egress with workload auth and without response-body errors', async () => {
+  const issued = {
+    network_binding_id: 'network',
+    binding_id: 'binding',
+    generation: 'generation',
+    proxy_capability: 'capability',
+    placeholders: {},
+  };
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce(Response.json(issued))
+    .mockResolvedValueOnce(new Response(null, { status: 204 }))
+    .mockResolvedValueOnce(new Response('private-diagnostic', { status: 503 }));
+  vi.stubGlobal('fetch', fetch);
+  const client = new RegistryClient('https://registry.internal', TEST_TOKEN_PROVIDER);
+  const scope = { workspaceId: 'ws_one', sessionId: 'ses_one' };
+  const owner = { namespace: 'orca', name: 'harness', uid: 'uid' };
+  expect(await client.issueSessionEgress({ ...scope, sandboxId: 'sandbox', owner })).toEqual(
+    issued,
+  );
+  expect(fetch.mock.calls[0]![0]).toBe(
+    'https://registry.internal/internal/v1/workspaces/ws_one/sessions/ses_one/session-egress/issue',
+  );
+  expect(JSON.parse(fetch.mock.calls[0]![1].body)).toEqual({ sandbox_id: 'sandbox', owner });
+  expect(fetch.mock.calls[0]![1].headers.get('authorization')).toBe(
+    'Bearer test-internal-service-token',
+  );
+  expect(fetch.mock.calls[0]![1].redirect).toBe('error');
+  await client.revokeSessionEgress({
+    ...scope,
+    binding_id: issued.binding_id,
+    generation: issued.generation,
+  });
+  expect(JSON.parse(fetch.mock.calls[1]![1].body)).toEqual({
+    binding_id: 'binding',
+    generation: 'generation',
+  });
+  await expect(
+    client.issueSessionEgress({ ...scope, sandboxId: 'sandbox', owner }),
+  ).rejects.toThrow('sandbox egress issuance failed: 503');
+});
+
 it('advertises native preparation capability and validates retained descriptors without dropping them', async () => {
   const files: DshProfileFiles = {
     'package.json': '{}',

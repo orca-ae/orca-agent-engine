@@ -16,7 +16,7 @@ export class SessionHarnessBindingError extends Error {}
 
 /** Read-only ownership remains available independently of execution preparation. */
 export async function loadSessionExecutionOwner(
-  db: DbClient,
+  db: Pick<DbClient, 'select'>,
   workspaceId: string,
   sessionId: string,
 ): Promise<ExecutionOwner | null> {
@@ -53,7 +53,7 @@ export async function loadSessionExecutionOwner(
 
 /** Routing survives archive/delete, but never substitutes the latest Agent version. */
 export async function loadSessionHarnessBinding(
-  db: DbClient,
+  db: Pick<DbClient, 'select'>,
   workspaceId: string,
   agentId: string,
   version: number,

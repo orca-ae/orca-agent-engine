@@ -27,6 +27,27 @@ import {
 } from '../../src/runner-env.js';
 
 describe('buildRunnerEnv', () => {
+  it('forwards the managed requirement signal without forwarding proxy credentials', () => {
+    const wiring = {
+      registryRunnerUrl: 'wss://registry.example',
+      runnerId: 'runner',
+      bindingToken: 'token',
+      workspace: '/ws',
+      parentPid: 1,
+    };
+    const base = {
+      SANDBOX_EGRESS_ENABLED: 'true',
+      ORCA_ENVIRONMENT_TOKEN: 'launch-secret',
+      HTTPS_PROXY: 'https://secret@proxy.example',
+    };
+    const env = buildRunnerEnv(base, wiring);
+    expect(env.SANDBOX_EGRESS_ENABLED).toBe('true');
+    expect(env.ORCA_ENVIRONMENT_TOKEN).toBeUndefined();
+    expect(env.HTTPS_PROXY).toBeUndefined();
+    expect(() => buildRunnerEnv({ SANDBOX_EGRESS_ENABLED: 'true' }, wiring)).toThrow(
+      'managed environment',
+    );
+  });
   it('allowlists worker env, strips non-essential secrets, and layers runner wiring', () => {
     const base: Record<string, string> = {
       PATH: '/usr/bin:/bin',

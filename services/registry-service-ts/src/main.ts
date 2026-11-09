@@ -4,6 +4,14 @@
 import { prunePolicyEvents } from './domain/policy-events.js';
 
 import { Pool } from 'pg';
+import { SandboxEgressService } from './domain/sandbox-egress.js';
+import { SandboxNetworkService } from './domain/sandbox-network.js';
+import { kubernetesSandboxNetworkAuthority } from './domain/sandbox-network-authority.js';
+import {
+  kubernetesEgressLivenessVerifier,
+  kubernetesEgressSandboxLocator,
+} from './domain/sandbox-egress-authority.js';
+import { buildRuntimeSecretResolver } from './secrets/runtime-resolver.js';
 import { and, eq, isNull } from 'drizzle-orm';
 import { environments } from './persistence/postgres/schema.js';
 import { normalizeStoredPackages } from './contracts/environment-wire.js';
@@ -254,6 +262,22 @@ const secretProvider = new DefaultSecretProvider(
   [],
 );
 const secretStore = await buildSecretStore();
+const sandboxEgress = config.sandboxEgressEnabled
+  ? new SandboxEgressService(db, buildRuntimeSecretResolver(secretProvider, secretStore), {
+      networks: new SandboxNetworkService(db, {
+        authority: kubernetesSandboxNetworkAuthority(
+          config.sandboxEgressSandboxNamespace!,
+          config.sandboxEgressPolicySha256,
+        ),
+        proxyUrl: config.sandboxEgressProxyUrl,
+        internalBypass: config.sandboxEgressInternalBypass,
+      }),
+      githubRestReadEnabled: config.sandboxEgressGithubRestReadEnabled,
+      environmentClaimTtlMs: config.environmentClaimTtlMs,
+      verifyLiveness: kubernetesEgressLivenessVerifier(),
+      locateSandbox: kubernetesEgressSandboxLocator(config.sandboxEgressSandboxNamespace!),
+    })
+  : undefined;
 
 // Public runner-tunnel auth posture. The tunnel is mounted off-mesh on
 // `/v1/tunnels/runners/:runnerId` (a self-hosted runner dials it from outside the
@@ -291,8 +315,15 @@ const workerRegistry = new WorkerRegistry();
 // worker (same machine); a real cloud backend deployment overrides it to the
 // externally-routable worker-tunnel origin the launched sandbox can reach.
 const environmentLauncherBackend = process.env['ORCA_ENVIRONMENT_LAUNCHER_BACKEND'];
+if (
+  config.sandboxEgressEnabled &&
+  environmentLauncherBackend &&
+  environmentLauncherBackend !== 'opensandbox'
+)
+  throw new Error('sandbox egress requires the OpenSandbox environment launcher');
 const environmentLaunchLifecycle = environmentLauncherBackend
   ? new EnvironmentLaunchLifecycle({
+      ...(sandboxEgress ? { networks: sandboxEgress.networks } : {}),
       launcher: launcherFactory(environmentLauncherBackend),
       tokens: new EnvironmentTokenStore(db),
       workerOnline: workerRegistry,
@@ -338,6 +369,7 @@ async function buildSecretStore(): Promise<SecretStore | undefined> {
 }
 
 const appOptions: BuildAppOptions = {
+  ...(sandboxEgress ? { sandboxEgress } : {}),
   db,
   batchReadsEnabled: config.batchReadsEnabled,
   apiKeyProofCacheEnabled: config.apiKeyProofCacheEnabled,
@@ -541,6 +573,7 @@ const reconcileTriggerDispatcher = async (): Promise<void> => {
   triggerDispatcherRunning = true;
   try {
     const result = await dispatchPendingAgentTriggerFires(db, {
+      sandboxNetworkEnabled: !!sandboxEgress,
       dshApprovedProfiles: config.dshApprovedProfiles,
       batchSize: config.triggerReconcileBatchSize,
     });

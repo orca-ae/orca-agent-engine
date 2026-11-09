@@ -28,6 +28,15 @@ and its row in the proposals index together.
 
 Each item is proposed as an OIP pull request; the design is reviewed there before the code lands.
 
+- **Controlled sandbox egress deployment qualification.** Enablement requires verified
+  Cilium enforcement and policy readiness for every new Pod, compatible Gateway and Registry
+  versions, and qualified native clients. Local fixtures do not establish deployment enforcement.
+  Transparent capture waits for a required client that cannot use explicit proxy configuration.
+  GitHub writes, GraphQL, self-hosted support and body substitution require a concrete use case
+  and an approved security boundary. Managed gem preparation remains rejected because
+  RubyGems 3.6.7 / Ruby 3.3.8 lacks HTTPS proxy transport. Trigger: qualify native RubyGems
+  HTTPS proxy transport with certificate verification before admitting managed gem plans.
+
 - **Conditional model prices and dynamic provider price sources.**
   The Engine catalog/resolver, organization rule-set API, HTTP request facts/receipts and bounded
   public-source acquisition are implemented with conversion disabled by default. Trigger for
@@ -110,8 +119,8 @@ Each item is proposed as an OIP pull request; the design is reviewed there befor
   initialization. Qualification requires custom-profile deployment, physical replacement,
   production Gateway/model delivery, resource-exhaustion/cancellation and application plugin-set
   acceptance with cleanup evidence. Local installation/tool/restore fixtures do not satisfy
-  these deployed gates. Custom profiles require unrestricted Environment networking; qualify
-  other providers or limited networking when a concrete deployment needs them. Shared install
+  these deployed gates. Custom profiles require unrestricted or managed Environment networking;
+  qualify other providers when a concrete deployment needs them. Shared install
   caches wait for measured preparation latency or registry availability requirements.
 - **DSH model catalog and provider acceptance.** The static catalog uses the pinned official
   plugin's chat models; managed transport/raw usage covers Messages, Chat Completions,
@@ -265,11 +274,12 @@ Operational work the engine needs before it can carry production traffic under a
 
 - **Package preparation on additional execution paths.** OpenSandbox supports
   `apt`, `pip`, `npm`, `cargo`, `gem`, and `go` through a separate init container,
-  with unrestricted Environment networking. E2B, AgentENV, local Environment
+  with unrestricted networking; managed networking supports the same path except gem.
+  E2B, AgentENV, local Environment
   launching, and runner providers without managed resources reject package plans.
   Existing workers do not rebuild automatically when package declarations change;
   resource transfer rejects a worker with a different declaration revision.
-  **Trigger:** a workload requires another backend, limited-network installation,
+  **Trigger:** a workload requires another backend,
   an unmanaged runner provider, or automatic worker replacement. Implement and
   validate an equivalent isolated preparation boundary, network policy, or worker
   generation transition before enabling that path.

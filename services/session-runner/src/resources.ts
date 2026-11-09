@@ -46,6 +46,12 @@ import {
   RESOURCE_MAX_TOTAL_BYTES,
   OUTPUT_RESOURCE_ID,
   GIT_PROXY_AUTH_ROOT,
+  parseSessionEgressGrant,
+  prepareSessionEgress,
+  parseSandboxNetworkContext,
+  SANDBOX_NETWORK_CONTEXT_PATH,
+  SANDBOX_NETWORK_TRUST_PATH,
+  type SessionEgressGrant,
   resourceCheckpointDigest,
   type ResourceFileDescriptor,
   type ResourceManifest,
@@ -64,6 +70,7 @@ interface IncomingFile {
   received: number;
 }
 interface Incoming {
+  sandboxEgress?: SessionEgressGrant;
   manifest: ResourceManifest;
   signature: string;
   domains: string[];
@@ -72,6 +79,7 @@ interface Incoming {
   files: Map<string, IncomingFile>;
 }
 interface Active {
+  egressGeneration?: string;
   placementId?: string;
   manifest: ResourceManifest;
   signature: string;
@@ -92,6 +100,7 @@ interface Frozen {
 }
 
 export interface RunnerResourcesOptions {
+  sandboxEgressRequired?: true;
   sessionSandbox?: import('./sandbox/seam.js').SandboxRuntime;
   /** Private runner directory, outside every model-tool handle. */
   workspaceDir: string;
@@ -128,6 +137,7 @@ export class RunnerResources {
   private queue: Promise<unknown> = Promise.resolve();
   private ackQueue: Promise<void> = Promise.resolve();
   private closed = false;
+  private egressFailed = false;
   private ack: { resolve(): void; reject(error: Error): void } | undefined;
   private lastAck: { id: string; digest: string } | undefined;
 
@@ -155,12 +165,17 @@ export class RunnerResources {
       !this.incoming &&
       !this.frozen &&
       !this.failed &&
+      !this.egressFailed &&
       !this.closed
     );
   }
 
   get revision(): string | undefined {
     return this.active?.manifest.revision;
+  }
+
+  get egressGeneration(): string | undefined {
+    return this.active?.egressGeneration;
   }
 
   get toolSandbox(): SandboxHandle | undefined {
@@ -195,7 +210,7 @@ export class RunnerResources {
     return {
       id: active.placementId,
       sandbox: active.raw,
-      policy: policyFor(active.manifest, [], false),
+      policy: policyFor(active.manifest, [], active.egressGeneration !== undefined),
       resolvedPaths: Object.fromEntries(
         active.manifest.resources.map((r) => [r.resource_id, join(active.root, r.mount_path)]),
       ),
@@ -374,7 +389,13 @@ export class RunnerResources {
           ? { committed: true, revision: this.active.manifest.revision }
           : { committed: false };
       if (message.type === 'manifest') return this.begin(message);
-      if (message.type === 'git_capabilities') return this.replaceGitCapabilities(message);
+      if (message.type === 'git_capabilities') {
+        if (this.options.sandboxEgressRequired) {
+          this.egressFailed = true;
+          throw new Error('managed sandbox egress rejects legacy Git capabilities');
+        }
+        return this.replaceGitCapabilities(message);
+      }
       if (message.type !== 'file_chunk' && message.type !== 'commit')
         throw new Error('unknown resource operation');
       if (typeof message.revision !== 'string') throw new Error('missing resource revision');
@@ -422,6 +443,19 @@ export class RunnerResources {
   }
 
   private async begin(message: Record<string, unknown>): Promise<{ committed: boolean }> {
+    if (this.options.sandboxEgressRequired) this.egressFailed = true;
+    if (message.session_egress !== undefined && !this.options.sandboxEgressRequired) {
+      throw new Error('sandbox egress delivery requires managed cloud execution');
+    }
+    const sandboxEgress = this.options.sandboxEgressRequired
+      ? parseSessionEgressGrant(message.session_egress)
+      : undefined;
+    if (
+      sandboxEgress &&
+      (message.placement !== 'session_sandbox' || !this.options.sessionSandbox)
+    ) {
+      throw new Error('sandbox egress requires verified managed native placement');
+    }
     const manifest = parseResourceManifest(message.manifest);
     if (manifest.environment_packages_revision !== currentEnvironmentPackagesRevision()) {
       throw new Error(
@@ -489,6 +523,11 @@ export class RunnerResources {
     if (this.active?.manifest.revision === manifest.revision) {
       if (this.active.signature !== signature) throw new Error('resource binding revision differs');
       if (this.frozen) throw new Error('resource checkpoint requires acknowledgement');
+      if (sandboxEgress) {
+        await this.prepareNativeSessionEgress(this.active.raw, sandboxEgress);
+        this.active.egressGeneration = sandboxEgress.binding_id + ':' + sandboxEgress.generation;
+        this.egressFailed = false;
+      }
       if (!this.memoryChanged(manifest)) {
         await this.removeIncoming();
         return { committed: true };
@@ -499,6 +538,7 @@ export class RunnerResources {
     await this.removeIncoming();
     const directory = await this.privateDirectory('incoming-');
     const incoming: Incoming = {
+      ...(sandboxEgress ? { sandboxEgress } : {}),
       manifest,
       signature,
       domains: normalizedDomains,
@@ -630,6 +670,12 @@ export class RunnerResources {
       if (!rootValue || !raw.spawn)
         throw new Error('Native placement requires an executable Local sandbox');
       const root = await realpath(rootValue);
+      let egressGeneration: string | undefined;
+      if (incoming.sandboxEgress) {
+        await this.prepareNativeSessionEgress(raw, incoming.sandboxEgress);
+        egressGeneration =
+          incoming.sandboxEgress.binding_id + ':' + incoming.sandboxEgress.generation;
+      }
       for (const resource of incoming.manifest.resources) {
         for (const file of resource.files) {
           await raw.files.write(
@@ -671,11 +717,12 @@ export class RunnerResources {
       await raw.files.write('/.orca/native-placement', Buffer.from('private'));
       const tools = await createPolicyEnforcedSandbox(
         raw as Parameters<typeof createPolicyEnforcedSandbox>[0],
-        policyFor(incoming.manifest, [], false),
+        policyFor(incoming.manifest, [], egressGeneration !== undefined),
       );
       await this.removeIncoming();
       await destroyActive(this.active);
       this.active = {
+        ...(egressGeneration ? { egressGeneration } : {}),
         manifest: incoming.manifest,
         signature: incoming.signature,
         root,
@@ -683,15 +730,31 @@ export class RunnerResources {
         tools,
         baseline: new Map(),
         domains: [],
-        unrestricted: false,
+        unrestricted: egressGeneration !== undefined,
         gitExpiresAt: Number.POSITIVE_INFINITY,
         placementId: randomUUID(),
       };
       this.failed = false;
+      this.egressFailed = false;
     } catch (error) {
       await raw.destroy();
       throw error;
     }
+  }
+
+  private async prepareNativeSessionEgress(
+    raw: SandboxHandle,
+    delivery: SessionEgressGrant,
+  ): Promise<void> {
+    // A private Local/SRT root gets the already bootstrapped context, never a new network.
+    const context = parseSandboxNetworkContext(
+      JSON.parse(await readFile(SANDBOX_NETWORK_CONTEXT_PATH, 'utf8')),
+    );
+    if (context.binding_id !== delivery.network_binding_id)
+      throw new Error('Session egress parent does not match worker network');
+    await raw.files.write(SANDBOX_NETWORK_TRUST_PATH, await readFile(SANDBOX_NETWORK_TRUST_PATH));
+    await raw.files.write(SANDBOX_NETWORK_CONTEXT_PATH, Buffer.from(JSON.stringify(context)));
+    await prepareSessionEgress(raw, delivery, false);
   }
 
   /** Refresh shared Memory between turns without discarding outputs, Git or Skills. */
@@ -1250,6 +1313,7 @@ export class RunnerResources {
     await this.queue;
     await this.ackQueue;
     await this.removeIncoming();
+    if (this.active?.egressGeneration) await this.active.raw.configureSessionEgress?.({});
     const retainedNative =
       this.nativePlacement &&
       this.nativeTurn !== undefined &&

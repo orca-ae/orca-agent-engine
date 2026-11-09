@@ -30,6 +30,11 @@ import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { parseToolCall } from '../sandbox-runtime.js';
 import {
+  buildSandboxNetworkEnvironment,
+  parseSandboxNetworkContext,
+  SANDBOX_NETWORK_CONTEXT_PATH,
+} from '../sandbox-egress.js';
+import {
   ENVIRONMENT_PACKAGES_EXEC_ROOT,
   ENVIRONMENT_PACKAGE_COPY_SCRIPT,
   buildEnvironmentPackageBoundaryProbe,
@@ -745,6 +750,8 @@ export class LocalSandboxRuntime implements SandboxRuntime {
   }
 
   async acquire(env: EnvironmentSpec): Promise<SandboxHandle> {
+    if (env.sandboxNetwork)
+      throw new Error('sandbox egress requires managed OpenSandbox execution');
     if (env.dshProfile)
       throw new Error('DSH profiles require OpenSandbox native-profile preparation');
     void env;
@@ -939,7 +946,8 @@ class LocalSandboxHandle implements SandboxHandle {
   private destroyPromise: Promise<void> | null = null;
   private readonly layout: SessionWorkDirLayout;
   private readonly canonicalRoot: string;
-  private readonly config: SandboxManagerInitConfig;
+  private config: SandboxManagerInitConfig;
+  private readonly originalNetwork: SandboxManagerInitConfig['network'];
   private readonly manager: SandboxManagerLike;
   private readonly binShell?: string;
   private readonly managedToolFilesystem: boolean;
@@ -947,12 +955,88 @@ class LocalSandboxHandle implements SandboxHandle {
   private readonly managedRuntimeBinds: MappedToolRuntimeBind[];
   private readonly rootIdentity: string;
   private managedWritePolicy: ValidatedSandboxWritePolicy | undefined;
+  private sandboxEgressEnvironment: Record<string, string> = {};
+
+  /** Called only by the trusted managed-cloud resource boundary after issued delivery. */
+  async configureSessionEgress(env: Record<string, string>): Promise<void> {
+    if (this.destroyed) throw new Error('sandbox destroyed');
+    if (Object.keys(env).length === 0)
+      env = buildSandboxNetworkEnvironment(
+        parseSandboxNetworkContext(
+          JSON.parse((await this.files.read(SANDBOX_NETWORK_CONTEXT_PATH)).toString('utf8')),
+        ),
+      );
+    const paths = new Set([
+      'CURL_HOME',
+      'CURL_CA_BUNDLE',
+      'SSL_CERT_FILE',
+      'NODE_EXTRA_CA_CERTS',
+      'GIT_SSL_CAINFO',
+      'GIT_PROXY_SSL_CAINFO',
+      'GIT_CONFIG_VALUE_0',
+      'GIT_CONFIG_VALUE_1',
+      'GH_CONFIG_DIR',
+      'REQUESTS_CA_BUNDLE',
+      'PIP_CERT',
+      'NPM_CONFIG_CAFILE',
+      'CARGO_HTTP_CAINFO',
+    ]);
+    this.sandboxEgressEnvironment = Object.fromEntries(
+      Object.entries(env).map(([name, value]) => [
+        name,
+        !this.managedToolFilesystem && paths.has(name) ? this.toHostPath(value) : value,
+      ]),
+    );
+    // Cilium on the outer managed Pod owns egress enforcement; preserve filesystem isolation.
+    this.config = {
+      ...this.config,
+      network:
+        Object.keys(env).length > 0
+          ? { ...this.originalNetwork, unrestricted: true }
+          : this.originalNetwork,
+    };
+    if (!this.managedToolFilesystem && env['GIT_PROXY_SSL_CAINFO']) {
+      await this.files.write(
+        '/run/orca/sandbox-network/.curlrc',
+        Buffer.from(
+          'proxy-cacert = ' +
+            JSON.stringify(this.sandboxEgressEnvironment['GIT_PROXY_SSL_CAINFO']) +
+            '\n',
+        ),
+      );
+    }
+  }
+
+  private egressSubprocessEnvironment(): Record<string, string> {
+    return Object.fromEntries(
+      Object.entries(this.sandboxEgressEnvironment).map(([name, value]) => [
+        'ORCA_EGRESS_BOOTSTRAP_' + name,
+        value,
+      ]),
+    );
+  }
+
+  private egressShellPrefix(): string {
+    return Object.keys(this.sandboxEgressEnvironment)
+      .map(
+        (name) =>
+          'export ' +
+          name +
+          '="$ORCA_EGRESS_BOOTSTRAP_' +
+          name +
+          '"; unset ORCA_EGRESS_BOOTSTRAP_' +
+          name +
+          '; ',
+      )
+      .join('');
+  }
 
   constructor(opts: LocalSandboxHandleOptions) {
     this.id = opts.id;
     this.layout = opts.layout;
     this.canonicalRoot = canonicalPathIfPresent(opts.layout.root);
     this.config = opts.config;
+    this.originalNetwork = opts.config.network;
     this.manager = opts.manager;
     this.managedToolFilesystem = opts.managedToolFilesystem === true;
     this.useEnvironmentPackages = opts.useEnvironmentPackages === true;
@@ -1035,7 +1119,11 @@ class LocalSandboxHandle implements SandboxHandle {
     opts?: { env?: Record<string, string>; cwd?: string },
   ): Promise<SpawnHandle> {
     if (this.destroyed) throw new Error(`sandbox ${this.id} destroyed`);
-    const wrapped = await this.manager.wrapWithSandbox(cmd, this.binShell, this.config);
+    const wrapped = await this.manager.wrapWithSandbox(
+      this.egressShellPrefix() + cmd,
+      this.binShell,
+      this.config,
+    );
     const cwd = opts?.cwd ? this.toHostPath(opts.cwd) : this.canonicalRoot;
     const proc = spawn(wrapped, {
       shell: true,
@@ -1047,6 +1135,7 @@ class LocalSandboxHandle implements SandboxHandle {
       env: {
         ...buildSandboxSubprocessEnv(cwd, canonicalPathIfPresent(this.layout.tmp)),
         ...opts?.env,
+        ...this.egressSubprocessEnvironment(),
       },
     });
     // SpawnHandle exposes no stderr; drain the wrapper and command to prevent pipe stalls.
@@ -1224,6 +1313,7 @@ rm -- "$probe_file"`;
   async destroy(): Promise<void> {
     if (this.destroyComplete) return;
     this.destroyed = true;
+    this.sandboxEgressEnvironment = {};
     this.destroyPromise ??= releaseSessionWorkDir(this.layout);
     try {
       await this.destroyPromise;
@@ -1496,7 +1586,11 @@ rm -- "$probe_file"`;
     // SRT injects its own shared TMPDIR while building the wrapper. Reset it
     // inside the sandbox shell before any caller-controlled command runs.
     const sandboxCommand = `${sessionEnvPrefix}; ${command}`;
-    const wrapped = await this.manager.wrapWithSandbox(sandboxCommand, sandboxBinShell, config);
+    const wrapped = await this.manager.wrapWithSandbox(
+      this.egressShellPrefix() + sandboxCommand,
+      sandboxBinShell,
+      config,
+    );
     try {
       return await new Promise<CapturedCommandResult>((resolve) => {
         const proc = spawn(wrapped, {
@@ -1510,6 +1604,7 @@ rm -- "$probe_file"`;
           env: {
             ...buildSandboxSubprocessEnv(cwd, canonicalPathIfPresent(this.layout.tmp)),
             ...envOverrides,
+            ...this.egressSubprocessEnvironment(),
           },
         });
         const out: Buffer[] = [];

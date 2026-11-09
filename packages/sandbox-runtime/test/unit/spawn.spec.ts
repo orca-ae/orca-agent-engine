@@ -207,6 +207,73 @@ it('Local spawn drains large wrapper and command stderr, preserves stdout and re
  * spawn honors the destroyed guard the same way `run` does.
  */
 describe('SandboxHandle.spawn — destroyed guard', () => {
+  it('Local applies session egress after wrapper overrides for run/spawn and clears it independently', async () => {
+    const baseDir = mkdtempSync(join(tmpdir(), 'orca-egress-env-'));
+    const seenCommands: string[] = [];
+    const seenConfigs: Array<Partial<SandboxManagerInitConfig>> = [];
+    const manager: SandboxManagerLike = {
+      initialize: async () => {},
+      wrapWithSandbox: async (command, _shell, config) => {
+        seenCommands.push(command);
+        if (config) seenConfigs.push(config);
+        return 'export HTTPS_PROXY=http://nested-proxy.invalid NO_PROXY=; ' + command;
+      },
+    };
+    const runtime = new LocalSandboxRuntime({
+      harnessWorkDir: baseDir,
+      allowedNetworkHosts: [],
+      manager,
+    });
+    const first = await runtime.acquire({});
+    const second = await runtime.acquire({});
+    try {
+      await first.configureSessionEgress!({
+        HTTPS_PROXY: 'https://orca:session-one@proxy.example',
+        NO_PROXY: 'registry.example',
+      });
+      await second.configureSessionEgress!({
+        HTTPS_PROXY: 'https://orca:session-two@proxy.example',
+        NO_PROXY: 'other.example',
+      });
+      const command = 'printf "%s %s" "$HTTPS_PROXY" "$NO_PROXY"';
+      expect((await first.run({ tool: 'bash', args: { command } })).stdout).toBe(
+        'https://orca:session-one@proxy.example registry.example',
+      );
+      const child = await second.spawn!(command);
+      expect(await collect(child.stdout)).toBe(
+        'https://orca:session-two@proxy.example other.example',
+      );
+      await child.exited;
+      expect(seenConfigs.at(-1)?.network?.unrestricted).toBe(true);
+      expect(seenCommands.join('')).not.toContain('session-one');
+      expect(seenCommands.join('')).not.toContain('session-two');
+      await first.files.write(
+        '/run/orca/sandbox-network/context.json',
+        Buffer.from(
+          JSON.stringify({
+            binding_id: 'network',
+            generation: 'one',
+            proxy_url: 'https://proxy.example',
+            proxy_capability: 'sandbox-base',
+            ca_bundle_path: '/run/orca/sandbox-network/ca-bundle.crt',
+            internal_bypass: ['registry.example'],
+          }),
+        ),
+      );
+      await first.configureSessionEgress!({});
+      expect((await first.run({ tool: 'bash', args: { command } })).stdout).toBe(
+        'https://orca:sandbox-base@proxy.example/ registry.example',
+      );
+      expect(seenConfigs.at(-1)?.network?.unrestricted).toBe(true);
+      expect((await second.run({ tool: 'bash', args: { command } })).stdout).toContain(
+        'session-two',
+      );
+    } finally {
+      await first.destroy();
+      await second.destroy();
+      rmSync(baseDir, { recursive: true, force: true });
+    }
+  });
   it('InMemory: rejects spawn after destroy', async () => {
     const rt = new InMemorySandboxRuntime();
     const sandbox = await rt.acquire({});

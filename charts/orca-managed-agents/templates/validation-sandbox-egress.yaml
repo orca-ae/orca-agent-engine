@@ -1,0 +1,64 @@
+{{- if .Values.sandboxEgress.enabled -}}
+{{- $egress := .Values.sandboxEgress -}}
+{{- $reservedKeys := list "SANDBOX_EGRESS_POLICY_SHA256" "SANDBOX_EGRESS_ENABLED" "SANDBOX_EGRESS_PROXY_URL" "SANDBOX_EGRESS_CA_BUNDLE_PATH" "SANDBOX_EGRESS_INTERNAL_BYPASS" "SANDBOX_EGRESS_GITHUB_REST_READ_ENABLED" "SANDBOX_EGRESS_SANDBOX_NAMESPACE" "SANDBOX_EGRESS_OWNER_POD_NAMESPACE" "SANDBOX_EGRESS_OWNER_POD_NAME" "SANDBOX_EGRESS_OWNER_POD_UID" -}}
+{{- range $component := list .Values.registry .Values.harness -}}
+{{- range $entry := default (list) $component.extraEnv -}}
+{{- if has $entry.name $reservedKeys -}}
+{{- fail "sandboxEgress enabled reserves chart-owned SANDBOX_EGRESS_* extraEnv keys; configure sandboxEgress values" -}}
+{{- end -}}
+{{- end -}}
+{{- range $key, $_ := default (dict) $component.secretKeyRefs -}}
+{{- if has $key $reservedKeys -}}
+{{- fail "sandboxEgress enabled reserves chart-owned SANDBOX_EGRESS_* secretKeyRefs keys" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if not (.Capabilities.APIVersions.Has "cilium.io/v2/CiliumNetworkPolicy") -}}
+{{- fail "sandboxEgress.enabled requires installed CiliumNetworkPolicy and CiliumEndpoint APIs; offline renders must supply --api-versions (not enforcement evidence)" -}}
+{{- end -}}
+{{- if not (.Capabilities.APIVersions.Has "cilium.io/v2/CiliumEndpoint") -}}
+{{- fail "sandboxEgress.enabled requires installed CiliumEndpoint API" -}}
+{{- end -}}
+{{- if not (.Capabilities.APIVersions.Has "cilium.io/v2/CiliumClusterwideNetworkPolicy") -}}
+{{- fail "sandboxEgress.enabled requires installed CiliumClusterwideNetworkPolicy API for policy union audit" -}}
+{{- end -}}
+{{- if not (regexMatch "^https://[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?(:[0-9]+)?$" $egress.proxyUrl) -}}
+{{- fail "sandboxEgress.proxyUrl must be an HTTPS DNS authority without credentials, path, query or fragment" -}}
+{{- end -}}
+{{- $proxy := urlParse $egress.proxyUrl -}}
+{{- $authority := $proxy.host -}}
+{{- $proxyPort := ternary (last (splitList ":" $authority)) "443" (contains ":" $authority) -}}
+{{- if ne $proxyPort (toString $egress.gateway.port) -}}
+{{- fail "sandboxEgress.proxyUrl port must equal sandboxEgress.gateway.port" -}}
+{{- end -}}
+{{- range $name, $value := dict "namespace" $egress.namespace "caBundleConfigMap" $egress.caBundleConfigMap "providerServiceAccount.namespace" $egress.providerServiceAccount.namespace "providerServiceAccount.name" $egress.providerServiceAccount.name -}}
+{{- if or (empty $value) (not (regexMatch "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$" $value)) -}}
+{{- fail (printf "sandboxEgress.%s must be an explicit Kubernetes name" $name) -}}
+{{- end -}}
+{{- end -}}
+{{- range $target := concat (list $egress.gateway $egress.dns) $egress.internalBypass -}}
+{{- if or (empty $target.namespace) (empty $target.podSelector) (not (kindIs "map" $target.podSelector)) -}}
+{{- fail "sandboxEgress targets require an explicit namespace and nonempty exact podSelector" -}}
+{{- end -}}
+{{- range $key, $value := $target.podSelector -}}
+{{- if or (contains ":" $key) (has $key (list "io.kubernetes.pod.namespace" "io.cilium.k8s.namespace.labels.kubernetes.io/metadata.name")) (not (kindIs "string" $value)) (empty $value) -}}
+{{- fail "sandboxEgress podSelector must contain exact nonempty Kubernetes labels without Cilium reserved namespace keys" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- range $target := concat (list (dict "ports" (list (dict "port" $egress.gateway.port "protocol" "TCP")))) $egress.internalBypass -}}
+{{- if empty $target.ports -}}
+{{- fail "sandboxEgress internalBypass requires explicit ports" -}}
+{{- end -}}
+{{- range $port := $target.ports -}}
+{{- if or (not (regexMatch "^[0-9]+$" (toString $port.port))) (lt (int $port.port) 1) (gt (int $port.port) 65535) (not (has $port.protocol (list "TCP" "UDP"))) -}}
+{{- fail "sandboxEgress ports must be numeric 1..65535 with explicit TCP or UDP protocol" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- range $entry := $egress.internalBypass -}}
+{{- if not (regexMatch "^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$" (default "" $entry.host)) -}}
+{{- fail "sandboxEgress.internalBypass.host must be one exact host, without suffix, CIDR or wildcard exemptions" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}

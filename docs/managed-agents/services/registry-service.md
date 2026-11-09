@@ -1716,6 +1716,85 @@ an earlier turn does not hide later queued messages. Recovery only serves replay
 while the bridge drives turns and skips those with linked output, including
 partial output. `pendingUserTurn` is diagnostic-only and cannot execute a turn.
 
+### Controlled sandbox HTTP egress
+
+`SANDBOX_EGRESS_ENABLED` defaults to false. Managed cloud OpenSandbox execution
+registers a Sandbox network parent before acquisition. A dedicated bootstrap init uses
+an audience `orca-sandbox-network` Pod-bound token at
+`POST /internal/v1/sandbox-networks/:bindingId/bootstrap`. Registry validates the
+actual Pod, authoritative owner chain, protected `orca.ai/network-binding-id` /
+`orca.ai/network-generation` annotations and current Cilium policy-union/CEP enforcement.
+`SANDBOX_EGRESS_POLICY_SHA256` pins the expected canonical policy specification.
+This bootstrap identity cannot call other Registry internal routes.
+
+The network parent stores a capability digest and Sandbox provisioning/workload identity.
+The base capability grants networking without Session secret resolution. Session grants
+reference the parent and retain current execution, Vault and Git authorization, including
+runner launch-token/worker provenance. Revoking a Session grant preserves the network
+parent and other Sessions; revoking or replacing the network invalidates its dependents.
+Worker Environment Token authentication remains separate: revoking a network does not revoke
+that token. A still-valid worker token can authenticate a tunnel, but cannot issue or use a
+Session egress grant whose network parent is revoked. Launch cleanup revokes its captured token
+with a generation-safe comparison. In managed mode, lifecycle termination on a replica with
+no tracked launch does not revoke another replica's token or terminate its Sandbox.
+
+Gateway uses workload-authenticated `POST /internal/v1/sandbox-egress/authorize` and
+`POST /internal/v1/sandbox-egress/resolve`. Both authority responses/requests identify
+`binding_id`, `generation` and mandatory `scope` (`sandbox` or `session`), without
+workspace/Session-scoped resolve routes. Harness uses scoped `sandbox-networks` registration
+and revocation, plus `session-egress/issue` and `session-egress/revoke` for Session grants.
+Runner resource manifests deliver `session_egress` without proxy URL or CA configuration;
+those already exist in the Sandbox-lifetime network context. Registry has no CA path config.
+
+Git reads use exact repository operations; optional REST reads require
+`SANDBOX_EGRESS_GITHUB_REST_READ_ENABLED` (default false). Vault environment
+credentials require bounded exact destinations and header-only injection. Session
+preparation rejects invalid credential names, unrestricted/empty/wildcard Vault
+hosts, body injection and reserved environment names: `GH_*`, `GIT_*`,
+`GITHUB_TOKEN`, `ORCA_GIT_*`, `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`,
+`ALL_PROXY`, `SSL_CERT_*`, `CURL_*` and `NODE_EXTRA_CA_CERTS`.
+Other valid names, including `OPENAI_API_KEY`, require no header configuration.
+Provider credentials are excluded; Session Vault order selects duplicate names.
+Helm cannot inspect live Vault data.
+
+Authorize returns binding/generation, scope, decision and `managed_auth`.
+Resolve requires `candidate_headers` (at most 32 lowercase name/value pairs);
+Gateway submits only headers containing reserved marker prefixes or Basic
+Authorization. Registry substitutes complete original markers in eligible headers,
+preserving surrounding text. Basic Authorization is strictly decoded, split at the
+first colon and re-encoded while preserving credential bytes; Vault markers may
+occur in either username or password, but username substitution cannot add a colon.
+Each source is read once per request, and inserted secret contents are never scanned.
+Complete unknown or foreign markers deny the request. Nonmarkers pass unchanged.
+Git markers remain limited to Authorization Basic (`x-access-token` username),
+Bearer or token credentials, canonical repository scope and read-only operations.
+
+Host, framing/hop-by-hop, proxy authentication, Cookie and Set-Cookie headers
+cannot receive secrets; Gateway also excludes headers nominated by Connection.
+Duplicate candidates are denied. Known Vault markers with host or injection-location
+mismatch remain unchanged without a secret read. HTTP80 never injects secrets;
+bodies are not substituted. Current binding, Environment and source permissions
+are checked on each request and rechecked after secret reads.
+
+The internal wire contract changes together with Gateway: upgrade with the feature
+disabled, reprepare Sessions and reissue bindings through the existing lifecycle,
+revoking old bindings. Mixed wire versions have no permissive fallback.
+
+Every resolve returns the required
+`request_body_policy`: `git_upload_pack` for an authorized Git upload-pack POST,
+`stream` otherwise. Gateway validates bounded Git request bodies and reauthorizes
+before sending them upstream. Legacy Git credential/proxy routes reject controlled
+egress Sessions even after their binding is revoked.
+
+Bootstrap travels outside persisted resource manifests/checkpoints. Native
+Registry-owned Pi placement remains file-only; Harness prepares Git inside its
+sandbox. Package/DSH initialization requires the verified network bootstrap and
+separate init containers; unsupported runtime combinations fail closed.
+See the [chart configuration](../../../charts/orca-managed-agents/README.md) for
+the Cilium policy-status prerequisite, exact network destinations and public CA
+mounts. The feature is disabled by default; local tests do not prove
+deployment enforcement.
+
 ### `POST /v1/git-creds` (public)
 
 Public route consumed by the in-sandbox `orca-git-creds` credential helper.

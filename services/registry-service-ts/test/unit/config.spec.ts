@@ -8,6 +8,42 @@ import { describe, expect, it } from 'vitest';
 
 import { loadConfig } from '../../src/config.js';
 
+describe('loadConfig — sandbox egress', () => {
+  it('requires the trusted Cilium policy digest whenever enabled', () => {
+    for (const digest of ['', 'a'.repeat(63), 'A'.repeat(64)])
+      expect(() =>
+        loadConfig({ SANDBOX_EGRESS_ENABLED: 'true', SANDBOX_EGRESS_POLICY_SHA256: digest }),
+      ).toThrow('SANDBOX_EGRESS_POLICY_SHA256');
+  });
+  it('defaults off without Kubernetes configuration and requires namespace on enablement', () => {
+    expect(loadConfig({})).toMatchObject({
+      sandboxEgressEnabled: false,
+      sandboxEgressGithubRestReadEnabled: false,
+    });
+    expect(() =>
+      loadConfig({
+        SANDBOX_EGRESS_ENABLED: 'true',
+        SANDBOX_EGRESS_POLICY_SHA256: 'a'.repeat(64),
+        SANDBOX_EGRESS_PROXY_URL: 'https://proxy.example:8443',
+      }),
+    ).toThrow('SANDBOX_EGRESS_SANDBOX_NAMESPACE');
+    expect(
+      loadConfig({
+        SANDBOX_EGRESS_ENABLED: 'true',
+        SANDBOX_EGRESS_POLICY_SHA256: 'a'.repeat(64),
+        SANDBOX_EGRESS_SANDBOX_NAMESPACE: 'sandboxes',
+        SANDBOX_EGRESS_PROXY_URL: 'https://proxy.example:8443',
+      }).sandboxEgressEnabled,
+    ).toBe(true);
+    expect(() =>
+      loadConfig({
+        SANDBOX_EGRESS_PROXY_URL: 'invalid-disabled-value',
+        SANDBOX_EGRESS_INTERNAL_BYPASS: 'invalid-json',
+      }),
+    ).not.toThrow();
+  });
+});
+
 describe('loadConfig — API performance rollback switches', () => {
   it('keeps admission off until explicitly enabled and validates queue bounds', () => {
     expect(loadConfig({}).heavyReadAdmission.maxConcurrent).toBe(0);

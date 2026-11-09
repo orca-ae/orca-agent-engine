@@ -114,6 +114,9 @@ FROM node:22-trixie-slim@sha256:517aa41d78545cb1b8c67b13655b4c13ede1ee9df1da8aab
 COPY --from=bubblewrap-build /tmp/orca-environment-probe /usr/local/libexec/orca-environment-probe
 ARG BUBBLEWRAP_VERSION
 WORKDIR /app/services/sandbox-harness
+ARG SANDBOX_GIT_VERSION=1:2.47.3-0+deb13u1
+ARG SANDBOX_CURL_VERSION=8.14.1-2+deb13u7
+ARG SANDBOX_GH_VERSION=2.46.0-3
 RUN npm install --global --ignore-scripts pnpm@9.15.9 && test "$(pnpm --version)" = 9.15.9
 
 # Claude Agent SDK uses bubblewrap for its Linux filesystem sandbox. The write
@@ -127,9 +130,10 @@ RUN npm install --global --ignore-scripts pnpm@9.15.9 && test "$(pnpm --version)
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
-        curl \
+        curl="$SANDBOX_CURL_VERSION" \
         fuse3 \
-        git \
+        git="$SANDBOX_GIT_VERSION" \
+        gh="$SANDBOX_GH_VERSION" \
         jq \
         libcap2 \
         s3fs \
@@ -161,6 +165,7 @@ RUN sed -i 's/^#user_allow_other$/user_allow_other/' /etc/fuse.conf \
     && grep -q '^user_allow_other$' /etc/fuse.conf
 
 ARG DEFAULT_AGENT=claude
+COPY packages/sandbox-runtime/bootstrap/network.mjs /usr/local/libexec/orca-sandbox-network.mjs
 ENV NODE_ENV=production \
     PORT=4096 \
     SANDBOX_HARNESS_DEFAULT_AGENT=${DEFAULT_AGENT} \

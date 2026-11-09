@@ -10,6 +10,7 @@ import shlex
 import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import MagicMock
 
 from kubernetes import client as k8s
 from fastapi import HTTPException
@@ -1161,3 +1162,154 @@ def test_security_context_round_trip_preserves_required_profiles(
     security_context = build_security_context_from_dict(security_context_dict)
 
     assert serialize_security_context_to_dict(security_context) == security_context_dict
+
+
+_NETWORK = {"binding_id": "network-fixture", "generation": "generation-fixture"}
+
+
+def _egress_provider(monkeypatch, enabled=True):
+    monkeypatch.setenv("ORCA_SANDBOX_EGRESS_ENABLED", "true" if enabled else "false")
+    monkeypatch.setenv("ORCA_SANDBOX_EGRESS_CA_CONFIG_MAP", "public-egress-ca")
+    monkeypatch.setenv("ORCA_SANDBOX_EGRESS_REGISTRY_URL", "http://registry.engine.svc:8081")
+    client = MagicMock()
+    client.create_custom_object.return_value = {"metadata": {"name": "sandbox", "uid": "workload-uid"}}
+    return BatchSandboxProvider(client, _app_config()), client
+
+
+def _create_egress_workload(provider, **kwargs):
+    values = dict(sandbox_id="sandbox", namespace="sandbox",
+        image_spec=ImageSpec(uri="ghcr.io/orca-ae/sandbox-harness-claude-code:fixture"),
+        entrypoint=["/usr/local/bin/orca-sandbox-harness"], env={}, resource_limits={}, labels={},
+        expires_at=None, execd_image="execd:test", extensions={**ISOLATION_EXTENSIONS, "orca.sandbox.network": json.dumps(_NETWORK)})
+    values.update(kwargs)
+    provider.create_workload(**values)
+
+
+def test_network_disabled_fails_closed_without_cilium_reads(monkeypatch):
+    provider, client = _egress_provider(monkeypatch, False)
+    with pytest.raises(ValueError, match="not enabled"):
+        _create_egress_workload(provider)
+    _create_egress_workload(provider, extensions=ISOLATION_EXTENSIONS)
+    client.get_custom_objects_api.assert_not_called()
+    assert "orca-sandbox-network" not in json.dumps(client.create_custom_object.call_args.kwargs["body"])
+
+
+@pytest.mark.parametrize("raw", ['{}', '{"binding_id":"x"}', '{"binding_id":"x","generation":"y","extra":true}', 'enable'])
+def test_network_registration_is_strict(monkeypatch, raw):
+    provider, client = _egress_provider(monkeypatch)
+    with pytest.raises((ValueError, TypeError)):
+        _create_egress_workload(provider, extensions={**ISOLATION_EXTENSIONS, "orca.sandbox.network": raw})
+    client.create_custom_object.assert_not_called()
+
+
+def test_network_init_is_only_token_reader_and_precedes_installers(monkeypatch):
+    provider, client = _egress_provider(monkeypatch)
+    _create_egress_workload(provider, env={"EXECD_ACCESS_TOKEN": "a" * 64, "RUNTIME_SECRET": "private"},
+        extensions={**ISOLATION_EXTENSIONS, "orca.sandbox.network": json.dumps(_NETWORK),
+                    "orca.environment.packages.v1": json.dumps({"version": 1, "packages": {"npm": ["example"]}})})
+    manifest = client.create_custom_object.call_args.kwargs["body"]
+    template = manifest["spec"]["template"]
+    for metadata in [manifest["metadata"], template["metadata"]]:
+        assert metadata["annotations"]["orca.ai/network-binding-id"] == "network-fixture"
+        assert metadata["annotations"]["orca.ai/network-generation"] == "generation-fixture"
+    pod = template["spec"]
+    assert pod["automountServiceAccountToken"] is False
+    assert pod["shareProcessNamespace"] is False
+    names = [container["name"] for container in pod["initContainers"]]
+    assert names.index("orca-sandbox-network") < names.index("orca-environment-packages")
+    bootstrap = next(container for container in pod["initContainers"] if container["name"] == "orca-sandbox-network")
+    assert "bootstrap" in bootstrap["command"]
+    assert not bootstrap.get("env") and not bootstrap.get("envFrom")
+    assert "private" not in json.dumps(bootstrap)
+    for container in pod["initContainers"] + pod["containers"]:
+        mounts = {mount["name"]: mount for mount in container.get("volumeMounts", [])}
+        assert ("orca-sandbox-network-token" in mounts) == (container is bootstrap)
+        if container["name"] in ("sandbox", "orca-environment-packages"):
+            assert mounts["orca-sandbox-network"]["readOnly"] is True
+            trust = [mount for mount in container["volumeMounts"] if mount["mountPath"] == "/etc/ssl/certs/ca-certificates.crt"]
+            assert trust == [{"name": "orca-sandbox-network", "mountPath": "/etc/ssl/certs/ca-certificates.crt",
+                              "subPath": "ca-bundle.crt", "readOnly": True}]
+    installer = next(container for container in pod["initContainers"] if container["name"] == "orca-environment-packages")
+    assert installer["command"][-1].startswith(". /run/orca/sandbox-network/environment.sh")
+    assert not installer.get("env")
+    context = next(volume for volume in pod["volumes"] if volume["name"] == "orca-sandbox-network")
+    assert context["emptyDir"]["medium"] == "Memory"
+    token = next(volume for volume in pod["volumes"] if volume["name"] == "orca-sandbox-network-token")
+    assert token["projected"]["sources"][0]["serviceAccountToken"]["audience"] == "orca-sandbox-network"
+    client.get_custom_objects_api.assert_not_called()
+
+
+@pytest.mark.parametrize("change", ["annotation", "label", "mount", "volume", "token", "init", "trust"])
+def test_network_rejects_template_overrides(monkeypatch, change):
+    provider, client = _egress_provider(monkeypatch)
+    def merge(manifest):
+        template = manifest["spec"]["template"]
+        pod = template["spec"]
+        if change == "annotation":
+            template["metadata"]["annotations"]["orca.ai/network-generation"] = "evil"
+        elif change == "label":
+            template["metadata"]["labels"]["orca.ai/sandbox-egress"] = "disabled"
+        elif change == "mount":
+            pod["containers"][0].setdefault("volumeMounts", []).append({"name": "evil", "mountPath": "/run"})
+        elif change == "volume":
+            pod["volumes"].append({"name": "orca-sandbox-network", "emptyDir": {}})
+        elif change == "token":
+            pod["volumes"].append({"name": "evil", "projected": {"sources": [{"serviceAccountToken": {"path": "token"}}]}})
+        elif change == "init":
+            pod["initContainers"].append({"name": "orca-sandbox-network", "image": "evil"})
+        elif change == "trust":
+            pod["containers"][0].setdefault("volumeMounts", []).append({"name": "evil", "mountPath": "/etc/ssl/certs"})
+        return manifest
+    provider.template_manager.merge_with_runtime_values = merge
+    with pytest.raises(ValueError, match="network|egress"):
+        _create_egress_workload(provider)
+    client.create_custom_object.assert_not_called()
+
+
+def test_network_gem_rejected_before_workload_creation(monkeypatch):
+    provider, client = _egress_provider(monkeypatch)
+    with pytest.raises(ValueError, match="RubyGems HTTPS proxy transport"):
+        _create_egress_workload(provider, env={"EXECD_ACCESS_TOKEN": "a" * 64}, extensions={
+            **ISOLATION_EXTENSIONS, "orca.sandbox.network": json.dumps(_NETWORK),
+            "orca.environment.packages.v1": json.dumps({"version": 1, "packages": {"gem": ["rake"]}})})
+    client.create_custom_object.assert_not_called()
+
+
+def test_network_packages_and_profile_share_trust_after_barrier(monkeypatch):
+    provider, client = _egress_provider(monkeypatch)
+    _create_egress_workload(provider, env={"EXECD_ACCESS_TOKEN": "a" * 64}, extensions={
+        **ISOLATION_EXTENSIONS, "orca.sandbox.network": json.dumps(_NETWORK),
+        "orca.environment.packages.v1": json.dumps({"version": 1, "packages": {"npm": ["example"]}}),
+        "orca.dsh.profile.v1": json.dumps(_dsh_descriptor())})
+    pod = client.create_custom_object.call_args.kwargs["body"]["spec"]["template"]["spec"]
+    assert [item["name"] for item in pod["initContainers"]] == [
+        "execd-installer", "orca-sandbox-network", "orca-environment-packages", "orca-dsh-profile"]
+    profile = pod["initContainers"][-1]
+    assert "ORCA_SANDBOX_NETWORK_REQUIRED=1" in profile["command"][-2]
+    assert "orca-sandbox-network.mjs exec node" in profile["command"][-2]
+    for container in [pod["initContainers"][2], profile, pod["containers"][0]]:
+        mounts = [item for item in container["volumeMounts"] if item["name"] == "orca-sandbox-network"]
+        assert all(item["readOnly"] is True for item in mounts)
+        assert {item["mountPath"] for item in mounts} == {
+            "/run/orca/sandbox-network", "/etc/ssl/certs/ca-certificates.crt"}
+    assert not profile.get("env") and not profile.get("envFrom")
+
+
+@pytest.mark.parametrize("change", ["swap", "untrusted", "offline-command"])
+def test_network_rejects_work_before_its_barrier(monkeypatch, change):
+    provider, client = _egress_provider(monkeypatch)
+    def merge(manifest):
+        initializers = manifest["spec"]["template"]["spec"]["initContainers"]
+        if change == "swap":
+            initializers.reverse()
+        elif change == "untrusted":
+            initializers.insert(0, {"name": "download", "image": "untrusted"})
+        else:
+            initializers[0]["command"] = ["sh", "-c", "curl https://example.com"]
+        return manifest
+    provider.template_manager.merge_with_runtime_values = merge
+    with pytest.raises(ValueError, match="network initialization"):
+        _create_egress_workload(provider, env={"EXECD_ACCESS_TOKEN": "a" * 64}, extensions={
+            **ISOLATION_EXTENSIONS, "orca.sandbox.network": json.dumps(_NETWORK),
+            "orca.environment.packages.v1": json.dumps({"version": 1, "packages": {"npm": ["example"]}})})
+    client.create_custom_object.assert_not_called()

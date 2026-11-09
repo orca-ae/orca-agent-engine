@@ -2,6 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { EnvironmentSpec } from './sandbox-runtime.js';
+import {
+  SANDBOX_NETWORK_EXTENSION,
+  SANDBOX_NETWORK_TIMEOUT_MS,
+  parseSandboxNetworkRequest,
+} from './sandbox-egress.js';
 import { DSH_PROFILE_EXTENSION, DSH_PROFILE_TIMEOUT_MS } from '@orca/harness-catalog';
 import { prepareDshProfilePlan } from './dsh-profile.js';
 import {
@@ -51,8 +56,12 @@ export function buildOpenSandboxAcquireRequest(
   // Merge harnessEnv (gateway LLM vars, etc.) into the container env map.
   // Treat undefined as {} per the backward-compat contract.
   const containerEnv: Record<string, string> = { ...(env.harnessEnv ?? {}) };
-  const packagePlan = prepareEnvironmentPackagePlan(env.packages, env.networking);
-  const dshProfilePlan = prepareDshProfilePlan(env.dshProfile, env.networking);
+  if (env.sandboxNetwork && env.target === 'self_hosted') {
+    throw new Error('sandbox egress requires managed OpenSandbox execution');
+  }
+  const network = env.sandboxNetwork && parseSandboxNetworkRequest(env.sandboxNetwork);
+  const packagePlan = prepareEnvironmentPackagePlan(env.packages, env.networking, !!network);
+  const dshProfilePlan = prepareDshProfilePlan(env.dshProfile, env.networking, !!network);
   delete containerEnv['EXECD_ACCESS_TOKEN'];
   if (opts.execdAccessToken) containerEnv['EXECD_ACCESS_TOKEN'] = opts.execdAccessToken;
   if ((packagePlan || dshProfilePlan) && !opts.execdAccessToken)
@@ -68,6 +77,7 @@ export function buildOpenSandboxAcquireRequest(
     secureAccess: false,
     timeout:
       opts.timeoutSeconds +
+      (network ? SANDBOX_NETWORK_TIMEOUT_MS / 1000 : 0) +
       (packagePlan ? ENVIRONMENT_PACKAGE_TIMEOUT_MS / 1000 : 0) +
       (dshProfilePlan ? DSH_PROFILE_TIMEOUT_MS / 1000 : 0),
     metadata: { owner: 'orca-managed-agents' },
@@ -78,6 +88,7 @@ export function buildOpenSandboxAcquireRequest(
     // insufficient on runtimes that enforce the container device cgroup.
     extensions: {
       [EXECD_ISOLATION_EXTENSION]: 'enable',
+      ...(network ? { [SANDBOX_NETWORK_EXTENSION]: JSON.stringify(network) } : {}),
       ...(packagePlan ? { [ENVIRONMENT_PACKAGES_EXTENSION]: packagePlan.extension } : {}),
       ...(dshProfilePlan ? { [DSH_PROFILE_EXTENSION]: JSON.stringify(dshProfilePlan) } : {}),
       ...(opts.enableFuse ? { [FUSE_DEVICE_EXTENSION]: 'enable' } : {}),

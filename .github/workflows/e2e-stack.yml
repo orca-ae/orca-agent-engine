@@ -1276,7 +1276,7 @@ jobs:
           set -a
           . services/dev/.env
           set +a
-          kind load docker-image "${AI_GATEWAY_IMAGE}" --name "${KIND_CLUSTER_NAME}"
+          bash .github/scripts/load-kind-image-with-retry.sh "${AI_GATEWAY_IMAGE}" "${KIND_CLUSTER_NAME}"
           ANTHROPIC_KEY_VALUE="${ANTHROPIC_API_KEY:-}"
           OPENAI_KEY_VALUE="${OPENAI_API_KEY:-}"
           gateway_config=services/dev/ai-gateway-llm-config.yaml

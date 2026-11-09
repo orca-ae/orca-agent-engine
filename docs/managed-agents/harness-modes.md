@@ -237,7 +237,8 @@ is checked again for Agent updates and every fresh preparation. Revocation denie
 replacement/cold restore and old-version Trigger launch without changing an already running
 turn. Clearing the annotation together with other valid edits remains possible.
 
-Profile preparation requires OpenSandbox support and unrestricted Environment networking.
+Profile preparation requires OpenSandbox support and unrestricted or managed Environment networking.
+With managed networking, the trusted network init completes before the isolated profile installer.
 Registry checks the current Environment at Session creation, Trigger launch and preparation;
 the harness advertises `dsh_profile_v1` only for a supporting provider. A missing capability
 returns no executable custom-profile plan. A Session can therefore be created successfully

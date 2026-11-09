@@ -1498,6 +1498,7 @@ export type ManagedRunnerResourcesFactory = (context: ManagedRunnerResourcesCont
       beginTurn?(event: Event): Promise<void>;
       publishMounted?(): Promise<void>;
       refreshGitCapabilities?(): Promise<void>;
+      abortPreparation?(): Promise<boolean>;
     })
   | null
 >;
@@ -1722,125 +1723,159 @@ export class SessionEventBridgeManager {
     let resources: Awaited<ReturnType<ManagedRunnerResourcesFactory>> = null;
     let managed: AgentSnapshot['managed_resources'];
     let guardrailFingerprint: string | undefined;
+    let started = false;
     try {
-      if (!isCurrent()) return;
-      resources =
-        (await this.resourcesFactory?.({
-          ...bound,
+      try {
+        if (!isCurrent()) return;
+        resources =
+          (await this.resourcesFactory?.({
+            ...bound,
+            runnerId,
+            registry,
+            isCurrent,
+          })) ?? null;
+        if (resources) managed = await resources.deliver();
+        if (!isCurrent()) return;
+        await this.deliverSkills(runnerId, bound, registry, resources !== null);
+        if (!isCurrent()) return;
+        await resources?.refreshGitCapabilities?.();
+        guardrailFingerprint = await this.deliverSnapshot(
           runnerId,
+          bound,
           registry,
-          isCurrent,
-        })) ?? null;
-      if (resources) managed = await resources.deliver();
-      if (!isCurrent()) return;
-      await this.deliverSkills(runnerId, bound, registry, resources !== null);
-      if (!isCurrent()) return;
-      await resources?.refreshGitCapabilities?.();
-      guardrailFingerprint = await this.deliverSnapshot(
-        runnerId,
-        bound,
-        registry,
-        managed,
-        resources?.snapshotResources?.(),
-      );
-      if (!isCurrent()) return;
-    } catch (err) {
-      this.logger?.error?.(
-        { err, runnerId, sessionId: bound.sessionId },
-        'managed runner preparation failed; bridge not started',
-      );
-      return;
-    }
-    // Serve the reverse-lookup resume replay BEFORE starting the bridge so the
-    // runner rebuilds its state before any pending turn is driven. Recovery only
-    // serves (reads + pushes); the bridge below is the sole turn driver, so the
-    // two never both drive a turn. Managed resources require a complete replay ACK;
-    // legacy providers retain their existing reconnect recovery behavior.
-    // The serving-side observation is retained per runner (diagnostics / explicit-
-    // resume seam) so the pending-turn signal is consumed at the manager boundary,
-    // never fed into a second driver.
-    if (this.recoverOnConnect) {
-      // Select the cursor the runner presented for THIS bound session (if any).
-      // An absent/empty cursor means a fresh full replay; a present one means an
-      // incremental `after={cursor}` slice — the runner's per-session
-      // last-consumed id, sourced from its hello.
-      const cursor = resumeCursors[bound.sessionId] ?? '';
-      const observation = await this.recoverSession(runnerId, bound, cursor, registry);
-      if (!isCurrent()) return;
-      if (observation !== null) {
-        this.lastRecovery.set(runnerId, observation);
-      }
-      if (
-        resources &&
-        (!observation || !observation.replayDelivered || observation.replayTruncated)
-      ) {
+          managed,
+          resources?.snapshotResources?.(),
+        );
+        if (!isCurrent()) return;
+      } catch (err) {
         this.logger?.error?.(
-          { runnerId, sessionId: bound.sessionId },
-          'managed runner recovery was not acknowledged; bridge not started',
+          { err, runnerId, sessionId: bound.sessionId },
+          'managed runner preparation failed; bridge not started',
         );
         return;
       }
-    }
-    if (!isCurrent()) return;
-    try {
-      await resources?.publishMounted?.();
-    } catch (err) {
-      this.logger?.error?.(
-        { err, runnerId, sessionId: bound.sessionId },
-        'managed resource publication failed; bridge not started',
-      );
-      return;
-    }
-    if (!isCurrent()) return;
-    const accounting =
-      resources && !resources.native
-        ? this.accountingFactory?.({ ...bound, runnerId, isCurrent })
-        : undefined;
-    const bridge = new SessionEventBridge({
-      ...(accounting ? { accounting } : {}),
-      ownsSession: async () => {
-        if (!isCurrent()) return false;
-        const current = await this.resolver.resolveBoundSession(runnerId);
-        return (
-          current?.workspaceId === bound.workspaceId &&
-          current.sessionId === bound.sessionId &&
-          ((await this.ownsSession?.(bound.workspaceId, bound.sessionId)) ?? true) &&
-          isCurrent()
+      // Serve the reverse-lookup resume replay BEFORE starting the bridge so the
+      // runner rebuilds its state before any pending turn is driven. Recovery only
+      // serves (reads + pushes); the bridge below is the sole turn driver, so the
+      // two never both drive a turn. Managed resources require a complete replay ACK;
+      // legacy providers retain their existing reconnect recovery behavior.
+      // The serving-side observation is retained per runner (diagnostics / explicit-
+      // resume seam) so the pending-turn signal is consumed at the manager boundary,
+      // never fed into a second driver.
+      if (this.recoverOnConnect) {
+        // Select the cursor the runner presented for THIS bound session (if any).
+        // An absent/empty cursor means a fresh full replay; a present one means an
+        // incremental `after={cursor}` slice — the runner's per-session
+        // last-consumed id, sourced from its hello.
+        const cursor = resumeCursors[bound.sessionId] ?? '';
+        const observation = await this.recoverSession(runnerId, bound, cursor, registry);
+        if (!isCurrent()) return;
+        if (observation !== null) {
+          this.lastRecovery.set(runnerId, observation);
+        }
+        if (
+          resources &&
+          (!observation || !observation.replayDelivered || observation.replayTruncated)
+        ) {
+          this.logger?.error?.(
+            { runnerId, sessionId: bound.sessionId },
+            'managed runner recovery was not acknowledged; bridge not started',
+          );
+          return;
+        }
+      }
+      if (!isCurrent()) return;
+      try {
+        await resources?.publishMounted?.();
+      } catch (err) {
+        this.logger?.error?.(
+          { err, runnerId, sessionId: bound.sessionId },
+          'managed resource publication failed; bridge not started',
         );
-      },
-      ...(resources ? { resources } : {}),
-      ...(this.saveHarnessState
-        ? {
-            saveHarnessState: (state: unknown) =>
-              this.saveHarnessState!(bound.workspaceId, bound.sessionId, runnerId, state),
-          }
-        : {}),
-      workspaceId: bound.workspaceId,
-      sessionId: bound.sessionId,
-      runnerId,
-      store: this.store,
-      registry,
-      ...(this.snapshotProvider !== undefined
-        ? {
-            beforeTurn: this.guardrailRefreshHook(
-              runnerId,
-              bound,
-              guardrailFingerprint,
-              registry,
-              resources,
-              isCurrent,
-              accounting,
-            ),
-          }
-        : {}),
-      ...(this.logger !== undefined ? { logger: this.logger } : {}),
-    });
-    this.bridges.set(runnerId, bridge);
-    bridge.start();
-    this.logger?.info?.(
-      { runnerId, sessionId: bound.sessionId },
-      'session event bridge started (owner pod)',
-    );
+        return;
+      }
+      if (!isCurrent()) return;
+      const accounting =
+        resources && !resources.native
+          ? this.accountingFactory?.({ ...bound, runnerId, isCurrent })
+          : undefined;
+      const bridge = new SessionEventBridge({
+        ...(accounting ? { accounting } : {}),
+        ownsSession: async () => {
+          if (!isCurrent()) return false;
+          const current = await this.resolver.resolveBoundSession(runnerId);
+          return (
+            current?.workspaceId === bound.workspaceId &&
+            current.sessionId === bound.sessionId &&
+            ((await this.ownsSession?.(bound.workspaceId, bound.sessionId)) ?? true) &&
+            isCurrent()
+          );
+        },
+        ...(resources ? { resources } : {}),
+        ...(this.saveHarnessState
+          ? {
+              saveHarnessState: (state: unknown) =>
+                this.saveHarnessState!(bound.workspaceId, bound.sessionId, runnerId, state),
+            }
+          : {}),
+        workspaceId: bound.workspaceId,
+        sessionId: bound.sessionId,
+        runnerId,
+        store: this.store,
+        registry,
+        ...(this.snapshotProvider !== undefined
+          ? {
+              beforeTurn: this.guardrailRefreshHook(
+                runnerId,
+                bound,
+                guardrailFingerprint,
+                registry,
+                resources,
+                isCurrent,
+                accounting,
+              ),
+            }
+          : {}),
+        ...(this.logger !== undefined ? { logger: this.logger } : {}),
+      });
+      this.bridges.set(runnerId, bridge);
+      bridge.start();
+      started = true;
+      this.logger?.info?.(
+        { runnerId, sessionId: bound.sessionId },
+        'session event bridge started (owner pod)',
+      );
+    } finally {
+      if (!started) await this.abortRunnerPreparation(runnerId, registry, resources, isCurrent);
+    }
+  }
+
+  private async abortRunnerPreparation(
+    runnerId: string,
+    registry: TransportRegistry,
+    resources: Awaited<ReturnType<ManagedRunnerResourcesFactory>>,
+    isCurrent: () => boolean,
+  ): Promise<void> {
+    const generation = isCurrent() ? this.registry.get(runnerId) : undefined;
+    let aborted = false;
+    try {
+      aborted = (await resources?.abortPreparation?.()) ?? false;
+    } catch (err) {
+      aborted = true;
+      this.logger?.error?.({ err, runnerId }, 'runner preparation cleanup failed');
+    }
+    if (
+      aborted &&
+      generation &&
+      isCurrent() &&
+      registry.get(runnerId) === generation &&
+      this.registry.deregister(runnerId, generation)
+    ) {
+      // Never await the running bridge from its own beforeTurn hook.
+      void this.retireBridge(runnerId).catch((err: unknown) =>
+        this.logger?.error?.({ err, runnerId }, 'runner preparation teardown failed'),
+      );
+    }
   }
 
   /**
@@ -2005,62 +2040,67 @@ export class SessionEventBridgeManager {
   ): (event: Event) => Promise<void> {
     let deliveredFingerprint = initialFingerprint;
     return async (event) => {
-      const provider = this.snapshotProvider;
-      if (provider === undefined) return;
-      if (!isCurrent()) throw new Error('runner generation retired');
-      const managed = resources ? await resources.deliver() : undefined;
-      if (resources) await this.deliverSkills(runnerId, bound, registry, true);
-      if (!isCurrent()) throw new Error('runner generation retired');
-      let snapshot = await provider.resolve(bound.sessionId, {
-        policyOwner: runnerPolicyOwner(registry, runnerId),
-        ...(['user.message', 'user.define_outcome'].includes(event.kind)
-          ? { turnEventId: event.id }
-          : {}),
-      });
-      if (snapshot)
-        assertGuardrailReaderCapabilities(
-          snapshot.guardrails ?? [],
-          registry.get(runnerId)?.hello.guardrailCapabilities ?? [],
-        );
-      if (snapshot === null) {
-        throw new Error('guardrail snapshot no longer resolves for the bound session');
-      }
-      if (managed)
-        snapshot = {
-          ...snapshot,
-          ...(resources?.snapshotResources?.() ?? { managed_resources: managed }),
-          ...(this.accountingFactory &&
-          (snapshot.provider === 'codex-sdk' || snapshot.provider === 'pi-sdk')
-            ? { request_guardrails_owner: 'registry' as const }
+      try {
+        const provider = this.snapshotProvider;
+        if (provider === undefined) return;
+        if (!isCurrent()) throw new Error('runner generation retired');
+        const managed = resources ? await resources.deliver() : undefined;
+        if (resources) await this.deliverSkills(runnerId, bound, registry, true);
+        if (!isCurrent()) throw new Error('runner generation retired');
+        let snapshot = await provider.resolve(bound.sessionId, {
+          policyOwner: runnerPolicyOwner(registry, runnerId),
+          ...(['user.message', 'user.define_outcome'].includes(event.kind)
+            ? { turnEventId: event.id }
             : {}),
-        };
-      if (!isCurrent()) throw new Error('runner generation retired');
-      const nextFingerprint = guardrailSnapshotFingerprint(snapshot);
-      if (
-        !resources &&
-        snapshot.provider !== 'codex-sdk' &&
-        snapshot.provider !== 'pi-sdk' &&
-        nextFingerprint === deliveredFingerprint
-      )
-        return;
-      const delivery = new SessionSnapshotDelivery({
-        workspaceId: bound.workspaceId,
-        sessionId: bound.sessionId,
-        runnerId,
-        registry,
-        provider: { resolve: async () => snapshot },
-        ...(this.logger !== undefined ? { logger: this.logger } : {}),
-      });
-      await resources?.refreshGitCapabilities?.();
-      const outcome = await delivery.deliver();
-      if (!outcome.delivered) {
-        throw new Error('changed guardrail snapshot was not accepted by the runner');
+        });
+        if (snapshot)
+          assertGuardrailReaderCapabilities(
+            snapshot.guardrails ?? [],
+            registry.get(runnerId)?.hello.guardrailCapabilities ?? [],
+          );
+        if (snapshot === null) {
+          throw new Error('guardrail snapshot no longer resolves for the bound session');
+        }
+        if (managed)
+          snapshot = {
+            ...snapshot,
+            ...(resources?.snapshotResources?.() ?? { managed_resources: managed }),
+            ...(this.accountingFactory &&
+            (snapshot.provider === 'codex-sdk' || snapshot.provider === 'pi-sdk')
+              ? { request_guardrails_owner: 'registry' as const }
+              : {}),
+          };
+        if (!isCurrent()) throw new Error('runner generation retired');
+        const nextFingerprint = guardrailSnapshotFingerprint(snapshot);
+        if (
+          !resources &&
+          snapshot.provider !== 'codex-sdk' &&
+          snapshot.provider !== 'pi-sdk' &&
+          nextFingerprint === deliveredFingerprint
+        )
+          return;
+        const delivery = new SessionSnapshotDelivery({
+          workspaceId: bound.workspaceId,
+          sessionId: bound.sessionId,
+          runnerId,
+          registry,
+          provider: { resolve: async () => snapshot },
+          ...(this.logger !== undefined ? { logger: this.logger } : {}),
+        });
+        await resources?.refreshGitCapabilities?.();
+        const outcome = await delivery.deliver();
+        if (!outcome.delivered) {
+          throw new Error('changed guardrail snapshot was not accepted by the runner');
+        }
+        await resources?.publishMounted?.();
+        deliveredFingerprint = nextFingerprint;
+        await accounting?.prepare(event, snapshot);
+        await resources?.beginTurn?.(event);
+        await resources?.refreshGitCapabilities?.();
+      } catch (error) {
+        await this.abortRunnerPreparation(runnerId, registry, resources, isCurrent);
+        throw error;
       }
-      await resources?.publishMounted?.();
-      deliveredFingerprint = nextFingerprint;
-      await accounting?.prepare(event, snapshot);
-      await resources?.beginTurn?.(event);
-      await resources?.refreshGitCapabilities?.();
     };
   }
 

@@ -69,6 +69,18 @@ _TRUSTED_REPOSITORY_PREFIXES_ENV = "ORCA_TRUSTED_SANDBOX_REPOSITORY_PREFIXES"
 _ALLOW_TAGGED_IMAGES_ENV = "ORCA_ALLOW_TAGGED_SANDBOX_IMAGES"
 _GVISOR_RUNTIME_TYPE = "gvisor"
 _GVISOR_RUNTIME_CLASS = "gvisor"
+_NETWORK_EXTENSION = "orca.sandbox.network"
+_NETWORK_BINDING = "orca.ai/network-binding-id"
+_NETWORK_GENERATION = "orca.ai/network-generation"
+_NETWORK_ROOT = "/run/orca/sandbox-network"
+_NETWORK_VOLUME = "orca-sandbox-network"
+_NETWORK_TOKEN = "orca-sandbox-network-token"
+_NETWORK_BOOTSTRAP = "/usr/local/libexec/orca-sandbox-network.mjs"
+_EGRESS_LABEL = "orca.ai/sandbox-egress"
+_EGRESS_CA_VOLUME = "orca-sandbox-egress-ca"
+_EGRESS_CA_DIRECTORY = "/etc/orca/sandbox-egress"
+
+
 # The official Orca sandbox images and the only entrypoint each may run with.
 _OFFICIAL_IMAGES = (
     ("orca-opensandbox-code-interpreter", ("/opt/code-interpreter/code-interpreter.sh",)),
@@ -516,6 +528,14 @@ class BatchSandboxProvider(WorkloadProvider):
         self.trusted_workloads = _load_trusted_workloads()
         self.trusted_non_fuse_workloads = _load_trusted_workloads(_TRUSTED_NON_FUSE_WORKLOADS_ENV)
         self.trusted_repositories = _load_trusted_repositories()
+        self.egress_enabled = os.environ.get("ORCA_SANDBOX_EGRESS_ENABLED") == "true"
+        self.egress_ca_config_map = os.environ.get("ORCA_SANDBOX_EGRESS_CA_CONFIG_MAP", "")
+        self.egress_registry_url = os.environ.get("ORCA_SANDBOX_EGRESS_REGISTRY_URL", "")
+        if self.egress_enabled and (
+            not re.fullmatch(r"[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?", self.egress_ca_config_map)
+            or not re.fullmatch(r"https?://[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?(?::[0-9]{1,5})?/?", self.egress_registry_url)
+        ):
+            raise ValueError("sandbox egress requires CA ConfigMap and trusted Registry origin")
 
         self.resolver = SecureRuntimeResolver(app_config)
         self.runtime_class = self.resolver.get_k8s_runtime_class()
@@ -567,6 +587,32 @@ class BatchSandboxProvider(WorkloadProvider):
             extensions.get(BOOTSTRAP_EXECD_ISOLATION_KEY) == "enable"
         )
         fuse_requested = extensions.get(_FUSE_DEVICE_EXTENSION) == "enable"
+        if "orca.sandbox.egress" in extensions:
+            raise ValueError("unsupported sandbox network extension")
+        raw_network = extensions.get(_NETWORK_EXTENSION)
+        egress = None
+        if raw_network is not None:
+            if not isinstance(raw_network, str) or len(raw_network) > 1024:
+                raise ValueError("invalid sandbox network registration")
+            egress = json.loads(raw_network)
+            if (not isinstance(egress, dict) or set(egress) != {"binding_id", "generation"}
+                    or any(not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,200}", value)
+                           for value in egress.values())):
+                raise ValueError("invalid sandbox network registration")
+        if any(key in (annotations or {}) for key in (_NETWORK_BINDING, _NETWORK_GENERATION)):
+            raise ValueError("sandbox network annotations are platform-managed")
+        annotations = dict(annotations or {})
+        if egress:
+            annotations.update({_NETWORK_BINDING: egress["binding_id"], _NETWORK_GENERATION: egress["generation"]})
+        if egress and not self.egress_enabled:
+            raise ValueError("sandbox egress is not enabled by the provider")
+        if egress and packages and packages.get("gem"):
+            raise ValueError("managed Sandbox networking does not support RubyGems HTTPS proxy transport")
+        if _EGRESS_LABEL in labels:
+            raise ValueError("sandbox egress label is platform-managed")
+        labels = dict(labels)
+        if egress:
+            labels[_EGRESS_LABEL] = "enabled"
 
         logger.info(
             "Using Kubernetes RuntimeClass '%s' for sandbox %s",
@@ -751,6 +797,30 @@ class BatchSandboxProvider(WorkloadProvider):
         if dsh_profile:
             _validate_dsh_preparation(merged_pod_spec, image_spec.uri, dsh_profile,
                                       self.image_pull_policy, env["EXECD_ACCESS_TOKEN"])
+        if egress:
+            template = batchsandbox["spec"]["template"]
+            if batchsandbox["spec"].get("shardPatches") or batchsandbox["spec"].get("replicas") != 1:
+                raise ValueError("sandbox egress forbids replica and shard template overrides")
+            runtimes = [item for item in merged_pod_spec.get("containers", []) if item.get("name") == "sandbox"]
+            if (len(runtimes) != 1 or runtimes[0].get("image") != image_spec.uri
+                    or runtimes[0].get("command") != ["/opt/opensandbox/bootstrap.sh"] + entrypoint
+                    or runtimes[0].get("args")):
+                raise ValueError("template changes sandbox egress trusted entrypoint")
+            if (template.get("metadata", {}).get("labels", {}).get(_EGRESS_LABEL) != "enabled"
+                    or batchsandbox.get("metadata", {}).get("labels", {}).get(_EGRESS_LABEL) != "enabled"):
+                raise ValueError("template changes the sandbox egress enforcement label")
+            expected_annotations = {_NETWORK_BINDING: egress["binding_id"], _NETWORK_GENERATION: egress["generation"]}
+            for metadata in (batchsandbox.get("metadata", {}), template.get("metadata", {})):
+                if any(metadata.get("annotations", {}).get(key) != value for key, value in expected_annotations.items()):
+                    raise ValueError("template changes sandbox network annotations")
+            expected_init = [_container_to_dict(init_container)]
+            if packages:
+                expected_init.append(_package_init_container(image_spec.uri, packages, main_container_dict.get("resources", {}), self.image_pull_policy))
+            if dsh_profile:
+                expected_init.append(_dsh_init_container(image_spec.uri, dsh_profile, self.image_pull_policy))
+            if merged_pod_spec.get("initContainers") != expected_init:
+                raise ValueError("template changes sandbox network initialization order or trusted offline bootstrap")
+            self._prepare_egress(template, image_spec.uri, egress)
         if platform is not None:
             WorkloadProvider.ensure_platform_compatible_with_affinity(merged_pod_spec, platform)
 
@@ -800,6 +870,77 @@ class BatchSandboxProvider(WorkloadProvider):
             "apiVersion": f"{self.group}/{self.version}",
             "kind": "BatchSandbox",
         }
+
+    def _prepare_egress(self, template: dict, image: str, network: dict) -> None:
+        pod = template["spec"]
+        if pod.get("automountServiceAccountToken") is not False or pod.get("shareProcessNamespace") is True:
+            raise ValueError("sandbox network requires token and process isolation")
+        pod["shareProcessNamespace"] = False
+        reserved = {_EGRESS_CA_VOLUME, _NETWORK_VOLUME, _NETWORK_TOKEN}
+        for volume in pod.get("volumes", []):
+            if volume.get("name") in reserved:
+                raise ValueError("sandbox network volume is reserved")
+            if any("serviceAccountToken" in source for source in volume.get("projected", {}).get("sources", [])):
+                raise ValueError("sandbox network token is bootstrap-only")
+        roots = (_NETWORK_ROOT, _EGRESS_CA_DIRECTORY, "/var/run/orca/sandbox-network", "/etc/ssl/certs/ca-certificates.crt")
+        for field in ("initContainers", "containers", "ephemeralContainers"):
+            for container in pod.get(field, []):
+                if container.get("name") == _NETWORK_VOLUME or container.get("restartPolicy") == "Always":
+                    raise ValueError("sandbox network forbids bootstrap override and sidecar init")
+                for existing in container.get("volumeMounts", []):
+                    path = existing.get("mountPath", "").rstrip("/")
+                    if (existing.get("name") in reserved or not path or any(
+                            path == root or path.startswith(root + "/") or root.startswith(path + "/")
+                            for root in roots)):
+                        raise ValueError("template overlaps sandbox network mount")
+        runtime = [item for item in pod["containers"] if item.get("name") == "sandbox"]
+        if len(runtime) != 1 or len(pod["containers"]) != 1 or pod.get("ephemeralContainers"):
+            raise ValueError("sandbox network requires one isolated runtime")
+        context_mount = {"name": _NETWORK_VOLUME, "mountPath": _NETWORK_ROOT, "readOnly": True}
+        # Debian/Ubuntu platform images use this native system trust path for libcurl/Cargo.
+        system_trust_mount = {"name": _NETWORK_VOLUME, "mountPath": "/etc/ssl/certs/ca-certificates.crt",
+                              "subPath": "ca-bundle.crt", "readOnly": True}
+        pod["volumes"].extend([
+            {"name": _EGRESS_CA_VOLUME, "configMap": {"name": self.egress_ca_config_map,
+             "items": [{"key": "ca-bundle.crt", "path": "ca-bundle.crt"}]}},
+            {"name": _NETWORK_VOLUME, "emptyDir": {"medium": "Memory", "sizeLimit": "2Mi"}},
+            {"name": _NETWORK_TOKEN, "projected": {"defaultMode": 256, "sources": [{
+                "serviceAccountToken": {"audience": "orca-sandbox-network", "expirationSeconds": 600, "path": "token"}}]}},
+        ])
+        bootstrap = {
+            "name": _NETWORK_VOLUME, "image": image, "imagePullPolicy": self.image_pull_policy,
+            "command": ["/usr/bin/timeout", "--signal=KILL", "70", "/usr/local/bin/node", _NETWORK_BOOTSTRAP,
+                        "bootstrap", self.egress_registry_url, network["binding_id"], network["generation"]],
+            "securityContext": {"runAsUser": 0, "allowPrivilegeEscalation": False, "capabilities": {"drop": ["ALL"]}},
+            "resources": {"requests": {"cpu": "10m", "memory": "64Mi"}, "limits": {"cpu": "1", "memory": "128Mi"}},
+            "volumeMounts": [
+                {"name": _NETWORK_VOLUME, "mountPath": _NETWORK_ROOT},
+                {"name": _EGRESS_CA_VOLUME, "mountPath": _EGRESS_CA_DIRECTORY, "readOnly": True},
+                {"name": _NETWORK_TOKEN, "mountPath": "/var/run/orca/sandbox-network", "readOnly": True},
+            ],
+        }
+        # Offline execd copy may precede the barrier; every installer follows it.
+        initializers = pod.setdefault("initContainers", [])
+        package_index = next((index for index, item in enumerate(initializers)
+                              if item.get("name") in ("orca-environment-packages", _DSH_VOLUME)), len(initializers))
+        if any(item.get("name") in ("orca-environment-packages", _DSH_VOLUME) for item in initializers[:package_index]):
+            raise ValueError("invalid sandbox network installer order")
+        initializers.insert(package_index, bootstrap)
+        for container in initializers[package_index + 1:]:
+            if container.get("name") not in ("orca-environment-packages", _DSH_VOLUME, _NETWORK_VOLUME):
+                raise ValueError("sandbox network forbids untrusted additional init containers")
+            container.setdefault("volumeMounts", []).append(dict(context_mount))
+            container["volumeMounts"].append(dict(system_trust_mount))
+            if container["name"] == "orca-environment-packages":
+                container["command"][-1] = ". " + _NETWORK_ROOT + "/environment.sh || exit 1\n" + container["command"][-1]
+            else:
+                container["command"][-2] = container["command"][-2].replace(
+                    "env -i PATH=/usr/local/bin:/usr/bin:/bin node ",
+                    "env -i PATH=/usr/local/bin:/usr/bin:/bin ORCA_SANDBOX_NETWORK_REQUIRED=1 node " +
+                    _NETWORK_BOOTSTRAP + " exec node ")
+        runtime[0].setdefault("volumeMounts", []).append(dict(context_mount))
+        runtime[0]["volumeMounts"].append(dict(system_trust_mount))
+        runtime[0]["command"] = ["/usr/local/bin/node", _NETWORK_BOOTSTRAP, "exec"] + runtime[0]["command"]
 
     def _apply_platform_node_selector(
         self,
@@ -1144,23 +1285,28 @@ class BatchSandboxProvider(WorkloadProvider):
                     return "ENVIRONMENT_PACKAGES_STORAGE_LIMIT"
                 return "ENVIRONMENT_PACKAGES_POD_EVICTED"
             for container in status.init_container_statuses or []:
-                if container.name not in ("orca-environment-packages", _DSH_VOLUME):
+                if container.name not in ("orca-environment-packages", _DSH_VOLUME, _NETWORK_VOLUME):
                     continue
                 state = container.state
                 if state is None:
                     continue
                 if state.terminated is not None and state.terminated.exit_code != 0:
-                    return "DSH_PROFILE_INSTALL_FAILED" if container.name == _DSH_VOLUME else "ENVIRONMENT_PACKAGES_INSTALL_FAILED"
+                    return "SANDBOX_NETWORK_BOOTSTRAP_FAILED" if container.name == _NETWORK_VOLUME else ("DSH_PROFILE_INSTALL_FAILED" if container.name == _DSH_VOLUME else "ENVIRONMENT_PACKAGES_INSTALL_FAILED")
                 # ErrImagePull may recover on the next pull; persistent backoff
                 # and configuration failures still fail acquisition promptly.
                 if state.waiting is not None and state.waiting.reason in (
                     "CrashLoopBackOff", "ImagePullBackOff",
                     "CreateContainerConfigError", "CreateContainerError", "RunContainerError",
                 ):
-                    return "DSH_PROFILE_START_FAILED" if container.name == _DSH_VOLUME else "ENVIRONMENT_PACKAGES_START_FAILED"
+                    return "SANDBOX_NETWORK_BOOTSTRAP_FAILED" if container.name == _NETWORK_VOLUME else ("DSH_PROFILE_START_FAILED" if container.name == _DSH_VOLUME else "ENVIRONMENT_PACKAGES_START_FAILED")
         return None
 
     def get_status(self, workload: Dict[str, Any]) -> Dict[str, Any]:
+        """Gate execution-ready states without obscuring lifecycle or failures."""
+        result = self._get_workload_status(workload)
+        return result
+
+    def _get_workload_status(self, workload: Dict[str, Any]) -> Dict[str, Any]:
         """Derive sandbox state from BatchSandbox status and pod readiness."""
         status = workload.get("status", {})
         creation_timestamp = workload.get("metadata", {}).get("creationTimestamp")
@@ -1168,7 +1314,7 @@ class BatchSandboxProvider(WorkloadProvider):
         # Phase is authoritative when set (Pausing/Paused/Resuming/Failed)
         phase = status.get("phase", "")
         init_containers = workload.get("spec", {}).get("template", {}).get("spec", {}).get("initContainers", [])
-        has_packages = any(item.get("name") in ("orca-environment-packages", _DSH_VOLUME) for item in init_containers)
+        has_packages = any(item.get("name") in ("orca-environment-packages", _DSH_VOLUME, _NETWORK_VOLUME) for item in init_containers)
         if has_packages and phase in ("", "Pending", "Failed"):
             failure = self._package_preparation_failure(workload)
             if failure:
