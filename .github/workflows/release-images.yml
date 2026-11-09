@@ -96,7 +96,8 @@ jobs:
   validate:
     name: Validate source
     if: github.repository == 'orca-ae/orca-agent-engine'
-    runs-on: ubuntu-latest
+    # Keep Local sandbox probes on the same supported runner as test-ts.yml.
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
